@@ -130,16 +130,17 @@ def test_current_user_can_view_cost_reflects_the_column(
 
 
 def test_rls_denies_anon(db_conn: psycopg.Connection[Any]) -> None:
-    """anon gets no grant on app_users at all (0010 only grants authenticated),
-    same as every other table in this schema — so this fails before RLS is
-    even reached: without schema USAGE, Postgres can't resolve the
-    unqualified table name for that role and raises UndefinedTable, not a
-    table-level permission error."""
+    """anon gets no grant on app_users at all (0010 only grants authenticated).
+    anon does have schema USAGE — tests/supabase_default_acl_baseline.sql
+    simulates the real Supabase default, granted independently of this
+    schema's own migrations — so name resolution succeeds and this fails
+    at the table-level permission check instead, same as every other
+    table in this schema."""
     _seed_user(db_conn)
 
     db_conn.execute("SET SESSION AUTHORIZATION anon")
     try:
-        with pytest.raises(psycopg.errors.UndefinedTable):
+        with pytest.raises(psycopg.errors.InsufficientPrivilege):
             db_conn.execute("SELECT * FROM app_users").fetchall()
     finally:
         db_conn.execute("RESET SESSION AUTHORIZATION")

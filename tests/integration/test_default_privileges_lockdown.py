@@ -69,21 +69,16 @@ def test_authenticated_cannot_select_ungranted_table(
 def test_anon_cannot_select_ungranted_table(
     db_conn: psycopg.Connection[Any], _scratch_table_with_no_grants: None
 ) -> None:
-    """anon has no schema USAGE at all locally, so this fails one step
-    earlier than the authenticated case — relation not found, not
-    permission denied. Same outcome (zero rows reachable), different
-    failure mode; see test_anon_cannot_select_cost_table in
-    test_cost_tables_rls.py for the same divergence, and note real
-    Supabase grants anon schema USAGE by default (confirmed against a
-    live project) so this specific exception type is a local-only
-    artifact — the security outcome, not the error code, is what
-    migration 0012 guarantees."""
+    """anon has schema USAGE (tests/supabase_default_acl_baseline.sql
+    simulates the real Supabase default) but the default ACL grants it
+    nothing on a table that never grants it anything itself — permission
+    denied at the table, same failure mode as authenticated."""
     select = sql.SQL("SELECT * FROM {table}").format(
         table=sql.Identifier(_SCRATCH_TABLE)
     )
     db_conn.execute("SET SESSION AUTHORIZATION anon")
     try:
-        with pytest.raises(psycopg.errors.UndefinedTable):
+        with pytest.raises(psycopg.errors.InsufficientPrivilege):
             db_conn.execute(select)
     finally:
         db_conn.execute("RESET SESSION AUTHORIZATION")
@@ -130,13 +125,13 @@ def test_authenticated_cannot_execute_ungranted_function(
 def test_anon_cannot_execute_ungranted_function(
     db_conn: psycopg.Connection[Any], _scratch_function_with_no_grants: None
 ) -> None:
-    """anon has no schema USAGE at all locally, so this fails one step
-    earlier than the authenticated case — same divergence from real
-    Supabase as the table tests above, documented there."""
+    """anon has schema USAGE (simulated per the table test above) but no
+    EXECUTE grant on this function — permission denied, same failure
+    mode as authenticated."""
     call = sql.SQL("SELECT {fn}()").format(fn=sql.Identifier(_SCRATCH_FUNCTION))
     db_conn.execute("SET SESSION AUTHORIZATION anon")
     try:
-        with pytest.raises(psycopg.errors.UndefinedFunction):
+        with pytest.raises(psycopg.errors.InsufficientPrivilege):
             db_conn.execute(call)
     finally:
         db_conn.execute("RESET SESSION AUTHORIZATION")

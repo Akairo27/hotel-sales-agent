@@ -175,13 +175,13 @@ def test_sales_user_cannot_select_audit_log(
 def test_anon_cannot_select_audit_log(db_conn: psycopg.Connection[Any]) -> None:
     """anon gets no grant on audit_log at all, same as app_users — see
     test_rls_denies_anon in test_app_users_and_roles_rls.py for why this
-    is UndefinedTable rather than a table-level permission error."""
+    is a table-level permission error, not a missing-schema one."""
     admin_id = _seed_user(db_conn, role="admin")
     _seed_audit_entry(db_conn, admin_id)
 
     db_conn.execute("SET SESSION AUTHORIZATION anon")
     try:
-        with pytest.raises(psycopg.errors.UndefinedTable):
+        with pytest.raises(psycopg.errors.InsufficientPrivilege):
             db_conn.execute("SELECT * FROM audit_log").fetchall()
     finally:
         db_conn.execute("RESET SESSION AUTHORIZATION")
