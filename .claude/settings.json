@@ -62,7 +62,9 @@
       "Bash(gh pr create*)",
       "Bash(pip install *)",
       "Bash(npm install *)",
-      "Bash(uv add *)"
+      "Bash(uv add *)",
+      "Bash(ssh *root@149.104.71.71*)",
+      "Bash(scp *root@149.104.71.71*)"
     ],
 
     "deny": [
@@ -111,8 +113,6 @@
 
       "Bash(curl *)",
       "Bash(wget *)",
-      "Bash(ssh *)",
-      "Bash(scp *)",
       "Bash(docker *)",
 
       "Bash(gh secret*)",
