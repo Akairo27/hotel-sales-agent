@@ -39,6 +39,43 @@
 (قبل بناء `next build` مثلًا، لتفادي قتل العملية صامتًا على ذاكرة محدودة)
 يكفيها التأكد من وجود التبديل الحالي — لا إضافة `/swapfile` فوقه.
 
+### ٣. مخزن npm المؤقت (cache) — `www-data` لا يملك `$HOME`
+
+`npm ci`/`npm run build` يجب أن يعملا بمستخدم `www-data` (قرار المرحلة ١
+في خطة النشر، بلا إنشاء مستخدم جديد). لكن `www-data` في أوبنتو مُعرَّف
+بـ `HOME=/var/www`، وهذا المجلد `755 root:root` — جذر nginx القياسي،
+غير مملوك لـ `www-data` وليس قابلاً للكتابة منه. و npm يخزّن مخزنه
+المؤقت افتراضياً في `$HOME/.npm`.
+
+**النتيجة الفعلية المُلاحَظة:** `npm ci` لا يفشل بخطأ واضح فوراً — يفشل
+بشكل متقطّع أثناء فك الأرشيف بأخطاء تبدو عشوائية
+(`TAR_ENTRY_ERROR ENOENT`، ثم `ENOTEMPTY` عند تنظيف npm لنفسه)، وأحياناً
+يُظهر السبب الحقيقي صراحة: `EACCES ... mkdir /var/www/.npm`. جُرِّب
+تقليل التزامن (`--maxsockets=1`) قبل تشخيص هذا — لم يُصلح شيئاً، لأن
+السبب ليس تزامناً، بل عجز `www-data` عن إنشاء مخزنه أصلاً.
+
+**لا تُصلَح بتخفيف صلاحية `/var/www`** — هو جذر nginx، وتغييره أثر خارج
+نطاق هذا النشر. **ولا يوضع المخزن داخل شجرة المشروع** (`/srv/hotel-admin/app`)
+— يدخل بالخطأ في نسخ أو أرشفة لاحقة للمشروع بلا داع.
+
+**الحل المعتمد:** مخزن مخصص خارج الاثنين، بملكية `www-data`:
+
+```bash
+mkdir -p /var/cache/hotel-admin-npm
+chown www-data:www-data /var/cache/hotel-admin-npm
+```
+
+ثم كل استدعاء لـ `npm ci`/`npm run build` بمستخدم `www-data` يمرّر
+`--cache=/var/cache/hotel-admin-npm` صراحةً — **هذا المسار يجب أن يبقى
+ثابتاً في `/etc/systemd/system/hotel-admin.service` (متغير بيئة) وفي
+`ops/deploy.sh` (راية `npm ci`/`npm run build`)**، وإلا يتكرر نفس الخطأ
+في كل نشر لاحق.
+
+**تحقق:** `npm ci --ignore-scripts --cache=/var/cache/hotel-admin-npm`
+نجح فعلياً (409 حزمة، صفر ثغرات)، و`npm run build` بعده نجح (١١ مساراً)
+دون لمس `package-lock.json` — `git status`/`git diff --stat` في
+`/srv/hotel-admin/app` جاءا فارغين بعد التثبيت.
+
 ---
 
 ## بقية الدليل
