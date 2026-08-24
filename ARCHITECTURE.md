@@ -354,7 +354,59 @@ CASE WHEN current_user_can_view_cost() THEN cost_per_night ELSE NULL END
 
 **النطاق:** `allotments.cost_per_night` عمود مسطّح — النمط أعلاه يطبَّق عليه حرفياً. `quotes.nights` مصفوفة `jsonb` يحمل كل عنصر فيها `cost_per_night` (ومعه `min_profit_halalas` وبقية تفاصيل الحساب) — نفس مبدأ الإخفاء ينطبق، لكن الشكل مختلف: إعادة بناء المصفوفة عبر `jsonb_agg`/`jsonb_build_object` مع تصفير الحقول المالية بدل عمود واحد بـ `CASE`. تفاصيل هذا التركيب تُترك لتنفيذ الـ PR الذي يبنيه، لا تُحسم هنا.
 
-**تنبيه مهم:** `app_users.can_view_cost` و`current_app_role()`/`current_user_can_view_cost()` (migration 0010) موجودان في السكيما اليوم لكن **لا يستخدمهما أي policy ولا أي view بعد** — هذا قرار تصميم فقط، لا تنفيذ. أول PR يمنح `authenticated` صلاحية `SELECT` على `allotments` أو `quotes` (أو VIEW فوقهما) يجب أن يبني هذا الإخفاء في نفس الوقت، لا بعده — وإلا كان عمود التكلفة مكشوفاً بالكامل للحظة (انظر `tests/integration/test_cost_tables_rls.py`، الذي صُمم عمداً ليفشل بصوت عالٍ في تلك اللحظة).
+**تحديث:** الفقرة التالية وصفت `current_app_role()`/`current_user_can_view_cost()` كقرار تصميم غير منفَّذ بعد — هذا لم يعد صحيحاً، وتُرك هنا مصحَّحاً لا محذوفاً حتى لا يضلّل قارئاً لاحقاً. الدالتان مستخدَمتان فعلياً اليوم: `current_app_role()` في سياسات RLS للقراءة والكتابة عبر migrations 0014-0021، و`current_user_can_view_cost()` في سياسات الكتابة (`allotments_update_cost_for_admin`، `price_rules_insert_for_admin`/`update_for_admin`) وفي إخفاء عمودي التكلفة/الهامش داخل `allotments_for_dashboard` (migration 0016) و`price_rules_for_dashboard` (migrations 0018/0020) — انظر القسم التالي لتفاصيل كيف يعمل هذا الإخفاء رغم شارة UNRESTRICTED في Supabase Studio.
+
+الجزء المتبقي غير المنفَّذ من هذا القرار: `quotes.nights`. أول PR يمنح `authenticated` صلاحية `SELECT` على `quotes` (أو VIEW فوقه) يجب أن يبني إخفاءً مماثلاً في نفس الوقت، لا بعده — وإلا كان عمود التكلفة هناك مكشوفاً بالكامل للحظة (انظر `tests/integration/test_cost_tables_rls.py`، الذي صُمم عمداً ليفشل بصوت عالٍ في تلك اللحظة).
+
+### شارة UNRESTRICTED في Supabase Studio على `allotments_for_dashboard`/`price_rules_for_dashboard`
+
+هذي الشارة تطلع على الاثنين في Table Editor، وهذا **متوقَّع، مو إنذار
+ثغرة** — لكن لازم يُفهم ليش، لأن الشارة نفسها لا تثبت ولا تنفي أي شيء عن
+أمان الـ view.
+
+**ليش تطلع دائماً على أي view:** RLS خاصية جداول فقط في Postgres —
+`ALTER TABLE ... ENABLE ROW LEVEL SECURITY` غير موجود لها مكافئ على
+`VIEW`. شارة Supabase Studio تفحص حرفياً "هل RLS مفعّل على هذا الكائن
+نفسه" — وهذا دائماً `false` لأي view في أي مشروع Supabase، بصرف النظر
+عن مدى إحكامه. الشارة أداة تنبيه عامة، لا تفهم منطق الـ view نفسه.
+
+**الحماية الفعلية هنا مو RLS الجدول الأصلي — هي مبنية يدوياً داخل الـ
+view:**
+
+1. مالك الـ view (دور الميقريشن) يحمل `rolbypassrls = true` على
+   Supabase فعلياً (تحقّق تجريبي، migration 0016) — فسياسات RLS على
+   `allotments`/`price_rules` **لا تُطبَّق تلقائياً** عند القراءة عبر
+   الـ view. الشرط `WHERE current_app_role() IS NOT NULL` في جسم كل
+   view أُعيد كتابته يدوياً ليطابق حرفياً شرط سياسة `FOR SELECT` على
+   الجدول الأصلي (`allotments_select_id_for_active_users` /
+   `price_rules_select_scope_for_active_users`) — تطابق مقصود، لا
+   وراثة تلقائية، ولازم يبقى متزامناً يدوياً لو تغيّرت سياسة الجدول
+   الأصلي يوماً.
+2. إخفاء عمود التكلفة/الهامش عبر `CASE WHEN current_user_can_view_cost()`
+   كما في الأعلى — والدالتان `SECURITY DEFINER` مربوطتان بـ `auth.uid()`
+   (هوية الجلسة الحقيقية من Supabase Auth، غير قابلة للتلاعب من العميل)،
+   لا بأي قيمة يرسلها الطلب نفسه.
+3. **ليش مو `security_invoker = true`** (البديل "الأنظف" في Postgres
+   15+، يخلي الـ view يرث RLS تلقائياً): لو فُعِّل، الاستعلام يشتغل
+   بصلاحيات المستخدم المستدعي فعلياً — و`authenticated` أصلاً بلا أي
+   `SELECT` على `cost_per_night`/`target_margin_bps` في الجدول الأصلي
+   (migrations 0016/0018 تمنحان أعمدة محددة فقط). النتيجة: خطأ صلاحية
+   **لكل المستخدمين حتى من يملك `can_view_cost=true`** — Postgres
+   يتحقق من صلاحية العمود المرجعي وقت التحليل، بغض النظر عن كون `CASE`
+   سيُخفيه لاحقاً لبعض الصفوف فقط. نمط "مالك مميّز + `WHERE` يدوي" هو
+   الخيار الوحيد الممكن لإخفاء عمود بهذا الشكل تحديداً.
+
+**التغطية بالاختبارات (اتصال Postgres حقيقي، لا mock، تبديل جلسة فعلي
+عبر `sign_in_as`):**
+- `tests/integration/test_cost_tables_rls.py::test_sales_without_can_view_cost_sees_null_via_view`
+- `tests/integration/test_cost_tables_rls.py::test_view_masks_cost_without_hiding_other_columns`
+- `tests/integration/test_price_rules_rls.py::test_masking_view_hides_margin_and_min_profit_without_cost_visibility`
+
+**القاعدة العملية:** أي view مستقبلي بنفس النمط (مالك يتجاوز RLS + `CASE`
+لإخفاء عمود) سيحمل نفس الشارة دائماً — لا تُعامَل كخلل بحد ذاتها. الفحص
+الحقيقي: هل شرط `WHERE` داخل الـ view يطابق سياسة `FOR SELECT` على
+الجدول الأصلي حرفياً، وهل كل عمود مالي محمي بدالة `SECURITY DEFINER`
+مربوطة بـ`auth.uid()` لا بقيمة من الطلب.
 
 ---
 
