@@ -1,0 +1,26 @@
+[Unit]
+Description=Hotel Sales Agent admin dashboard
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=www-data
+Group=www-data
+WorkingDirectory=/srv/hotel-admin/app/admin
+EnvironmentFile=/etc/hotel-admin/admin.env
+Environment=NODE_ENV=production
+Environment=npm_config_cache=/var/cache/hotel-admin-npm
+ExecStart=/usr/bin/node node_modules/next/dist/bin/next start --hostname 127.0.0.1 --port 3000
+Restart=always
+RestartSec=5
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=yes
+ReadWritePaths=/srv/hotel-admin/app/admin/.next
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
