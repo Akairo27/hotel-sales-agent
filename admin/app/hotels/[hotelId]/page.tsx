@@ -1,13 +1,17 @@
 import { notFound, redirect } from "next/navigation";
 import { createClient } from "@/utils/supabase/server";
 import { getCurrentAppUser } from "@/lib/session";
-import type { Hotel, RoomType } from "@/lib/types";
-import { ALERT_ERROR, BUTTON_PRIMARY, BUTTON_SECONDARY, CARD, INPUT, LABEL, SECTION_TITLE } from "@/lib/ui";
+import type { Hotel, HotelAmenityRow, RoomType } from "@/lib/types";
+import type { HotelAmenity } from "@/lib/hotelDetails";
+import { missingHotelProfileFields } from "@/lib/hotelDetails";
+import { ALERT_ERROR, ALERT_STATUS, BUTTON_PRIMARY, CARD, INPUT, LABEL, SECTION_TITLE } from "@/lib/ui";
 import { AppShell } from "@/app/_components/AppShell";
 import { PageHeader } from "@/app/_components/PageHeader";
-import { createRoomType, renameRoomType } from "./actions";
+import { HotelDetailsForm } from "./HotelDetailsForm";
+import { RoomTypeCard } from "./RoomTypeCard";
+import { createRoomType } from "./actions";
 
-export default async function HotelRoomTypesPage({
+export default async function HotelProfilePage({
   params,
   searchParams,
 }: {
@@ -29,27 +33,43 @@ export default async function HotelRoomTypesPage({
   const supabase = await createClient();
   const { data: hotel } = await supabase
     .from("hotels")
-    .select("id, hotel_name, created_at")
+    .select(
+      "id, hotel_name, distance_to_haram_meters, star_rating, address_text, " +
+        "check_in_time, check_out_time, is_active, created_at",
+    )
     .eq("id", hotelIdNum)
     .maybeSingle<Hotel>();
   if (!hotel) {
     notFound();
   }
 
-  const { data: roomTypes } = await supabase
-    .from("room_types")
-    .select("id, hotel_id, room_type_name, created_at")
-    .eq("hotel_id", hotelIdNum)
-    .order("room_type_name")
-    .overrideTypes<RoomType[], { merge: false }>();
+  const [{ data: roomTypes }, { data: amenityRows }] = await Promise.all([
+    supabase
+      .from("room_types")
+      .select(
+        "id, hotel_id, room_type_name, capacity_adults, size_sqm, " +
+          "bed_configuration, created_at",
+      )
+      .eq("hotel_id", hotelIdNum)
+      .order("room_type_name")
+      .overrideTypes<RoomType[], { merge: false }>(),
+    supabase
+      .from("hotel_amenities")
+      .select("hotel_id, amenity, created_at")
+      .eq("hotel_id", hotelIdNum)
+      .overrideTypes<HotelAmenityRow[], { merge: false }>(),
+  ]);
 
   const isAdmin = appUser.app_role === "admin";
+  const selectedAmenities: HotelAmenity[] = (amenityRows ?? []).map((row) => row.amenity);
+  const missingFields = missingHotelProfileFields(hotel);
 
   return (
     <AppShell appUser={appUser}>
       <PageHeader
         breadcrumb={{ href: "/hotels", label: "الفنادق" }}
         title={hotel.hotel_name}
+        description={hotel.address_text ?? undefined}
       />
 
       {error && (
@@ -58,48 +78,37 @@ export default async function HotelRoomTypesPage({
         </p>
       )}
 
-      <h2 className={SECTION_TITLE}>أنواع الغرف</h2>
+      {missingFields.length > 0 && (
+        <p className={`${ALERT_STATUS} mb-6`}>
+          ملف الفندق غير مكتمل — ناقص: {missingFields.join("، ")}. الوكيل يحتاج هذي
+          البيانات ليجاوب على أسئلة العميل عن الفندق.
+        </p>
+      )}
+
+      {!hotel.is_active && (
+        <p className={`${ALERT_STATUS} mb-6`}>هذا الفندق موقوف — لن يُعرض على العملاء.</p>
+      )}
+
+      <HotelDetailsForm
+        hotel={hotel}
+        selectedAmenities={selectedAmenities}
+        canEdit={isAdmin}
+      />
+
+      <h2 className={`${SECTION_TITLE} mt-10`}>أنواع الغرف</h2>
       <ul className="mt-4 space-y-3">
         {(roomTypes ?? []).map((roomType) => (
-          <li key={roomType.id} className={CARD}>
-            <div className="flex flex-wrap items-center justify-between gap-4">
-              <span className="text-base font-medium text-foreground">
-                {roomType.room_type_name}
-              </span>
-              {isAdmin && <RenameRoomTypeForm hotelId={hotel.id} roomType={roomType} />}
-            </div>
+          <li key={roomType.id}>
+            <RoomTypeCard hotelId={hotel.id} roomType={roomType} canEdit={isAdmin} />
           </li>
         ))}
       </ul>
+      {(roomTypes ?? []).length === 0 && (
+        <p className={`${ALERT_STATUS} mt-4`}>لا توجد أنواع غرف لهذا الفندق بعد.</p>
+      )}
 
       {isAdmin && <AddRoomTypeForm hotelId={hotel.id} />}
     </AppShell>
-  );
-}
-
-function RenameRoomTypeForm({ hotelId, roomType }: { hotelId: number; roomType: RoomType }) {
-  const renameThisRoomType = renameRoomType.bind(null, hotelId, roomType.id);
-  return (
-    <form action={renameThisRoomType} className="flex items-end gap-2">
-      <div className="w-44">
-        <label
-          htmlFor={`room-type-name-${roomType.id}`}
-          className="mb-1 block text-xs text-muted-foreground"
-        >
-          الاسم الجديد
-        </label>
-        <input
-          id={`room-type-name-${roomType.id}`}
-          name="room_type_name"
-          defaultValue={roomType.room_type_name}
-          required
-          className={`${INPUT} w-full`}
-        />
-      </div>
-      <button type="submit" className={BUTTON_SECONDARY}>
-        حفظ
-      </button>
-    </form>
   );
 }
 

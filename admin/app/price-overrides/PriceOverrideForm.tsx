@@ -1,7 +1,7 @@
 "use client";
 
 import { useState } from "react";
-import type { Hotel, RoomType } from "@/lib/types";
+import type { HotelRef, RoomTypeRef } from "@/lib/types";
 import {
   MAX_OVERRIDE_RANGE_NIGHTS,
   nightCount,
@@ -23,8 +23,8 @@ import {
 import { upsertPriceOverrides } from "./actions";
 
 interface PriceOverrideFormProps {
-  hotels: Hotel[];
-  roomTypes: RoomType[];
+  hotels: HotelRef[];
+  roomTypes: RoomTypeRef[];
   onSaved: () => void;
 }
 

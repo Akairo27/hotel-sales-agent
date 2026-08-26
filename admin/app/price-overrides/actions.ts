@@ -3,7 +3,7 @@
 import { revalidatePath } from "next/cache";
 import { createClient } from "@/utils/supabase/server";
 import { getCurrentAppUser } from "@/lib/session";
-import { translatePricingError } from "@/lib/postgresErrors";
+import { translateConstraintError } from "@/lib/postgresErrors";
 import { validateOverrideRange } from "@/lib/priceOverrideRange";
 
 const PRICE_OVERRIDES_PATH = "/price-overrides";
@@ -122,7 +122,7 @@ export async function upsertPriceOverrides(
     p_expires_at: expiresAt,
   });
   if (error) {
-    return { error: translatePricingError(error.message) };
+    return { error: translateConstraintError(error.message) };
   }
   revalidatePath(PRICE_OVERRIDES_PATH);
 
@@ -170,7 +170,7 @@ export async function endPriceOverrideNow(
     p_expires_at: new Date().toISOString(),
   });
   if (error) {
-    return { error: translatePricingError(error.message) };
+    return { error: translateConstraintError(error.message) };
   }
   revalidatePath(PRICE_OVERRIDES_PATH);
   return {};

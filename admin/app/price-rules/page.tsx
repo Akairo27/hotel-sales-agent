@@ -1,7 +1,7 @@
 import { redirect } from "next/navigation";
 import { createClient } from "@/utils/supabase/server";
 import { getCurrentAppUser } from "@/lib/session";
-import type { Hotel, PriceRuleForDashboard, RoomType, Season } from "@/lib/types";
+import type { HotelRef, PriceRuleForDashboard, RoomTypeRef, Season } from "@/lib/types";
 import { ALERT_STATUS } from "@/lib/ui";
 import { AppShell } from "@/app/_components/AppShell";
 import { PageHeader } from "@/app/_components/PageHeader";
@@ -25,11 +25,11 @@ export default async function PriceRulesPage() {
         .order("scope")
         .overrideTypes<PriceRuleForDashboard[], { merge: false }>(),
       supabase.from("hotels").select("id, hotel_name, created_at").overrideTypes<
-        Hotel[],
+        HotelRef[],
         { merge: false }
       >(),
       supabase.from("room_types").select("id, hotel_id, room_type_name, created_at").overrideTypes<
-        RoomType[],
+        RoomTypeRef[],
         { merge: false }
       >(),
       supabase

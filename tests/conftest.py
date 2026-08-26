@@ -71,6 +71,7 @@ _TABLES_TO_TRUNCATE = (
     "room_night_inventory",
     "allotments",
     "seasons",
+    "hotel_amenities",
     "room_types",
     "hotels",
 )

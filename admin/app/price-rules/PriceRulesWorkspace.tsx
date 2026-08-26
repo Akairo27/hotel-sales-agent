@@ -2,10 +2,10 @@
 
 import { useState } from "react";
 import type {
-  Hotel,
+  HotelRef,
   PriceRuleForDashboard,
   PriceRuleScope,
-  RoomType,
+  RoomTypeRef,
   Season,
 } from "@/lib/types";
 import { CARD, FIELDSET, HINT, SECTION_TITLE, SELECT } from "@/lib/ui";
@@ -13,8 +13,8 @@ import { PriceRuleEditForm } from "./PriceRuleEditForm";
 
 interface PriceRulesWorkspaceProps {
   initialRules: PriceRuleForDashboard[];
-  hotels: Hotel[];
-  roomTypes: RoomType[];
+  hotels: HotelRef[];
+  roomTypes: RoomTypeRef[];
   seasons: Season[];
   canEdit: boolean;
 }

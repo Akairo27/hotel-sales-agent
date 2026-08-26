@@ -3,6 +3,8 @@
 // typescript` is run against the applied schema — that command needs a
 // linked Supabase project and network access neither of which this
 // session's permissions allow, so this is not yet auto-generated.
+import type { BedConfiguration, HotelAmenity } from "@/lib/hotelDetails";
+
 export type AppRole = "admin" | "sales";
 
 export interface AppUser {
@@ -14,19 +16,54 @@ export interface AppUser {
   created_at: string;
 }
 
-// Mirrors db/migrations/0001_hotels_room_types.sql. Neither table carries a
-// cost column, so unlike AppUser there is no ARCHITECTURE.md §8 masking
-// concern here.
-export interface Hotel {
+// Mirrors db/migrations/0001_hotels_room_types.sql plus the detail columns
+// 0023_hotel_details.sql adds. Neither table carries a cost column, so
+// unlike AppUser there is no ARCHITECTURE.md §8 masking concern here.
+//
+// Every detail column is nullable on purpose: 0023 ran against rows that
+// predated it and there is no honest default for a real hotel's distance
+// from the Haram, so "not recorded yet" is a state the UI has to render
+// rather than a case it can assume away. admin/lib/hotelDetails.ts's
+// missingHotelProfileFields is what surfaces it.
+// The three columns every screen other than the hotel profile selects: an
+// id to key on, a name to render, and created_at. Kept as its own type
+// because overrideTypes<T> casts the result without checking it — typing a
+// three-column query as the full Hotel would be a silent lie about fields
+// that are not in the payload, not a compile error.
+export interface HotelRef {
   id: number;
   hotel_name: string;
   created_at: string;
 }
 
-export interface RoomType {
+export interface Hotel extends HotelRef {
+  distance_to_haram_meters: number | null;
+  star_rating: number | null;
+  address_text: string | null;
+  check_in_time: string | null;
+  check_out_time: string | null;
+  is_active: boolean;
+}
+
+export interface RoomTypeRef {
   id: number;
   hotel_id: number;
   room_type_name: string;
+  created_at: string;
+}
+
+export interface RoomType extends RoomTypeRef {
+  capacity_adults: number | null;
+  size_sqm: number | null;
+  bed_configuration: BedConfiguration | null;
+}
+
+// One row per amenity a hotel has; absence is what "does not have it"
+// means. The closed list lives in admin/lib/hotelDetails.ts, pinned to the
+// migration's CHECK by hotelDetails.conformance.test.ts.
+export interface HotelAmenityRow {
+  hotel_id: number;
+  amenity: HotelAmenity;
   created_at: string;
 }
 
