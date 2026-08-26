@@ -3,8 +3,9 @@ import { createClient } from "@/utils/supabase/server";
 import { getCurrentAppUser } from "@/lib/session";
 import type { AppUser } from "@/lib/types";
 import { ROLE_LABELS } from "@/lib/roleLabels";
-import { ALERT_ERROR, BUTTON_SECONDARY, CARD, HINT, PAGE } from "@/lib/ui";
-import { BackLink } from "@/app/_components/BackLink";
+import { ALERT_ERROR, BUTTON_SECONDARY, CARD } from "@/lib/ui";
+import { AppShell } from "@/app/_components/AppShell";
+import { PageHeader } from "@/app/_components/PageHeader";
 import { updateAppRole, updateCanViewCost } from "./actions";
 
 export default async function UsersPage({
@@ -29,18 +30,19 @@ export default async function UsersPage({
     .overrideTypes<AppUser[], { merge: false }>();
 
   return (
-    <main className={PAGE}>
-      <BackLink href="/dashboard">لوحة التحكم</BackLink>
-      <h1 className="text-2xl font-semibold text-foreground sm:text-3xl">الصلاحيات</h1>
+    <AppShell appUser={appUser}>
+      <PageHeader
+        title="الصلاحيات"
+        description="كل تغيير هنا يُسجَّل في سجل التغييرات — من غيّر، ماذا، ومتى."
+      />
 
       {error && (
-        <p role="alert" className={`${ALERT_ERROR} mt-4`}>
+        <p role="alert" className={`${ALERT_ERROR} mb-6`}>
           {error}
         </p>
       )}
-      <p className={`${HINT} mt-4`}>كل تغيير هنا يُسجَّل في سجل التغييرات — من غيّر، ماذا، ومتى.</p>
 
-      <ul className="mt-8 space-y-3">
+      <ul className="space-y-3">
         {(users ?? []).map((user) => (
           <li key={user.id} className={CARD}>
             <div className="flex flex-wrap items-center justify-between gap-4">
@@ -58,7 +60,7 @@ export default async function UsersPage({
           </li>
         ))}
       </ul>
-    </main>
+    </AppShell>
   );
 }
 

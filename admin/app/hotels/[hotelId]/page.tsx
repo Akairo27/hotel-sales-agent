@@ -2,8 +2,9 @@ import { notFound, redirect } from "next/navigation";
 import { createClient } from "@/utils/supabase/server";
 import { getCurrentAppUser } from "@/lib/session";
 import type { Hotel, RoomType } from "@/lib/types";
-import { ALERT_ERROR, BUTTON_PRIMARY, BUTTON_SECONDARY, CARD, INPUT, LABEL, PAGE, SECTION_TITLE } from "@/lib/ui";
-import { BackLink } from "@/app/_components/BackLink";
+import { ALERT_ERROR, BUTTON_PRIMARY, BUTTON_SECONDARY, CARD, INPUT, LABEL, SECTION_TITLE } from "@/lib/ui";
+import { AppShell } from "@/app/_components/AppShell";
+import { PageHeader } from "@/app/_components/PageHeader";
 import { createRoomType, renameRoomType } from "./actions";
 
 export default async function HotelRoomTypesPage({
@@ -45,17 +46,19 @@ export default async function HotelRoomTypesPage({
   const isAdmin = appUser.app_role === "admin";
 
   return (
-    <main className={PAGE}>
-      <BackLink href="/hotels">الفنادق</BackLink>
-      <h1 className="text-2xl font-semibold text-foreground sm:text-3xl">{hotel.hotel_name}</h1>
+    <AppShell appUser={appUser}>
+      <PageHeader
+        breadcrumb={{ href: "/hotels", label: "الفنادق" }}
+        title={hotel.hotel_name}
+      />
 
       {error && (
-        <p role="alert" className={`${ALERT_ERROR} mt-4`}>
+        <p role="alert" className={`${ALERT_ERROR} mb-6`}>
           {error}
         </p>
       )}
 
-      <h2 className={`${SECTION_TITLE} mt-8`}>أنواع الغرف</h2>
+      <h2 className={SECTION_TITLE}>أنواع الغرف</h2>
       <ul className="mt-4 space-y-3">
         {(roomTypes ?? []).map((roomType) => (
           <li key={roomType.id} className={CARD}>
@@ -70,7 +73,7 @@ export default async function HotelRoomTypesPage({
       </ul>
 
       {isAdmin && <AddRoomTypeForm hotelId={hotel.id} />}
-    </main>
+    </AppShell>
   );
 }
 

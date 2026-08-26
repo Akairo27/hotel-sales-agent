@@ -1,3 +1,6 @@
+import { BRAND_NAME, BRAND_TAGLINE } from "@/lib/brand";
+import { ALERT_ERROR, BUTTON_PRIMARY, INPUT, LABEL } from "@/lib/ui";
+import { BrandMark } from "@/app/_components/BrandMark";
 import { login } from "./actions";
 
 export default async function LoginPage({
@@ -8,27 +11,33 @@ export default async function LoginPage({
   const { error } = await searchParams;
 
   return (
-    <main className="flex flex-1 items-center justify-center p-6">
-      <div className="w-full max-w-sm rounded-3xl border border-border bg-surface p-8 shadow-sm shadow-black/5 sm:p-10">
-        <div className="mb-8 text-center">
-          <h1 className="text-2xl font-semibold text-foreground">تسجيل الدخول</h1>
-          <p className="mt-2 text-sm text-muted-foreground">
-            لوحة تحكم المبيعات والتسعير
-          </p>
+    <main className="relative flex flex-1 items-center justify-center overflow-hidden p-6">
+      {/* The only decorative element in the whole dashboard: a single warm
+          wash behind the sign-in card, so the first screen anyone sees is
+          not a flat black rectangle. */}
+      <div
+        aria-hidden="true"
+        className="pointer-events-none absolute inset-x-0 top-0 h-80 bg-[radial-gradient(60%_100%_at_50%_0%,rgba(212,176,106,0.12),transparent_70%)]"
+      />
+
+      <div className="relative w-full max-w-md rounded-3xl border border-border bg-surface p-8 shadow-2xl shadow-black/40 sm:p-10">
+        <div className="mb-8 flex flex-col items-center text-center">
+          <BrandMark className="h-12 w-12" />
+          <h1 className="mt-4 text-2xl font-semibold tracking-tight text-foreground">
+            {BRAND_NAME}
+          </h1>
+          <p className="mt-1 text-sm tracking-wide text-accent">{BRAND_TAGLINE}</p>
         </div>
 
         {error && (
-          <p
-            role="alert"
-            className="mb-6 rounded-xl border border-danger/20 bg-danger-background px-4 py-3 text-sm text-danger"
-          >
+          <p role="alert" className={`${ALERT_ERROR} mb-6`}>
             {error}
           </p>
         )}
 
         <form className="space-y-5">
           <div className="space-y-2">
-            <label htmlFor="email" className="block text-sm font-medium text-foreground">
+            <label htmlFor="email" className={LABEL}>
               البريد الإلكتروني
             </label>
             <input
@@ -37,12 +46,12 @@ export default async function LoginPage({
               type="email"
               required
               autoComplete="email"
-              className="w-full rounded-xl border border-border bg-background px-4 py-2.5 text-sm text-foreground outline-none transition focus:border-accent focus:ring-2 focus:ring-accent/25"
+              className={`${INPUT} w-full`}
             />
           </div>
 
           <div className="space-y-2">
-            <label htmlFor="password" className="block text-sm font-medium text-foreground">
+            <label htmlFor="password" className={LABEL}>
               كلمة المرور
             </label>
             <input
@@ -51,15 +60,11 @@ export default async function LoginPage({
               type="password"
               required
               autoComplete="current-password"
-              className="w-full rounded-xl border border-border bg-background px-4 py-2.5 text-sm text-foreground outline-none transition focus:border-accent focus:ring-2 focus:ring-accent/25"
+              className={`${INPUT} w-full`}
             />
           </div>
 
-          <button
-            formAction={login}
-            type="submit"
-            className="w-full rounded-xl bg-accent px-4 py-2.5 text-sm font-medium text-accent-foreground transition hover:opacity-90 focus:outline-none focus:ring-2 focus:ring-accent/40 focus:ring-offset-2 focus:ring-offset-surface"
-          >
+          <button formAction={login} type="submit" className={`${BUTTON_PRIMARY} w-full`}>
             دخول
           </button>
         </form>

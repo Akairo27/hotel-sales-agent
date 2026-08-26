@@ -2,8 +2,9 @@ import { redirect } from "next/navigation";
 import { createClient } from "@/utils/supabase/server";
 import { getCurrentAppUser } from "@/lib/session";
 import type { Season } from "@/lib/types";
-import { ALERT_ERROR, PAGE } from "@/lib/ui";
-import { BackLink } from "@/app/_components/BackLink";
+import { ALERT_ERROR } from "@/lib/ui";
+import { AppShell } from "@/app/_components/AppShell";
+import { PageHeader } from "@/app/_components/PageHeader";
 import { SeasonsWorkspace } from "./SeasonsWorkspace";
 
 export default async function SeasonsPage({
@@ -27,19 +28,19 @@ export default async function SeasonsPage({
     .overrideTypes<Season[], { merge: false }>();
 
   return (
-    <main className={PAGE}>
-      <BackLink href="/dashboard">لوحة التحكم</BackLink>
-      <h1 className="text-2xl font-semibold text-foreground sm:text-3xl">المواسم</h1>
+    <AppShell appUser={appUser}>
+      <PageHeader
+        title="المواسم"
+        description="تقويم المواسم وأولوياتها، مع معاينة التغطية لسنة هجرية كاملة."
+      />
 
       {error && (
-        <p role="alert" className={`${ALERT_ERROR} mt-4`}>
+        <p role="alert" className={`${ALERT_ERROR} mb-6`}>
           {error}
         </p>
       )}
 
-      <div className="mt-8">
-        <SeasonsWorkspace initialSeasons={seasons ?? []} isAdmin={appUser.app_role === "admin"} />
-      </div>
-    </main>
+      <SeasonsWorkspace initialSeasons={seasons ?? []} isAdmin={appUser.app_role === "admin"} />
+    </AppShell>
   );
 }

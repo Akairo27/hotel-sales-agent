@@ -2,8 +2,8 @@ import { redirect } from "next/navigation";
 import { createClient } from "@/utils/supabase/server";
 import { getCurrentAppUser } from "@/lib/session";
 import type { Hotel, PriceOverride, RoomType } from "@/lib/types";
-import { PAGE } from "@/lib/ui";
-import { BackLink } from "@/app/_components/BackLink";
+import { AppShell } from "@/app/_components/AppShell";
+import { PageHeader } from "@/app/_components/PageHeader";
 import { PriceOverridesWorkspace } from "./PriceOverridesWorkspace";
 
 export default async function PriceOverridesPage() {
@@ -39,18 +39,18 @@ export default async function PriceOverridesPage() {
   const canEdit = appUser.app_role === "admin";
 
   return (
-    <main className={PAGE}>
-      <BackLink href="/dashboard">لوحة التحكم</BackLink>
-      <h1 className="text-2xl font-semibold text-foreground sm:text-3xl">تجاوزات الأسعار</h1>
+    <AppShell appUser={appUser}>
+      <PageHeader
+        title="تجاوزات الأسعار"
+        description="استثناءات سعرية على تواريخ محددة، تعلو على قواعد التسعير."
+      />
 
-      <div className="mt-8">
-        <PriceOverridesWorkspace
-          initialOverrides={overrides ?? []}
-          hotels={hotels ?? []}
-          roomTypes={roomTypes ?? []}
-          canEdit={canEdit}
-        />
-      </div>
-    </main>
+      <PriceOverridesWorkspace
+        initialOverrides={overrides ?? []}
+        hotels={hotels ?? []}
+        roomTypes={roomTypes ?? []}
+        canEdit={canEdit}
+      />
+    </AppShell>
   );
 }

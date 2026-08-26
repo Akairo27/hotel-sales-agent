@@ -1,5 +1,6 @@
 import type { Metadata } from "next";
 import { IBM_Plex_Sans_Arabic } from "next/font/google";
+import { BRAND_NAME, BRAND_TAGLINE } from "@/lib/brand";
 import "./globals.css";
 
 const ibmPlexSansArabic = IBM_Plex_Sans_Arabic({
@@ -9,8 +10,8 @@ const ibmPlexSansArabic = IBM_Plex_Sans_Arabic({
 });
 
 export const metadata: Metadata = {
-  title: "لوحة التحكم",
-  description: "نظام إدارة المبيعات والتسعير للفنادق",
+  title: BRAND_NAME,
+  description: `${BRAND_TAGLINE} — نظام إدارة الفنادق`,
 };
 
 export default function RootLayout({ children }: LayoutProps<"/">) {

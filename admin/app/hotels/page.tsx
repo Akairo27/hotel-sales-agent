@@ -3,8 +3,9 @@ import { redirect } from "next/navigation";
 import { createClient } from "@/utils/supabase/server";
 import { getCurrentAppUser } from "@/lib/session";
 import type { Hotel } from "@/lib/types";
-import { ALERT_ERROR, BUTTON_PRIMARY, BUTTON_SECONDARY, CARD, INPUT, LABEL, PAGE, SECTION_TITLE } from "@/lib/ui";
-import { BackLink } from "@/app/_components/BackLink";
+import { ALERT_ERROR, BUTTON_PRIMARY, BUTTON_SECONDARY, CARD, INPUT, LABEL, SECTION_TITLE } from "@/lib/ui";
+import { AppShell } from "@/app/_components/AppShell";
+import { PageHeader } from "@/app/_components/PageHeader";
 import { createHotel, renameHotel } from "./actions";
 
 export default async function HotelsPage({
@@ -28,17 +29,16 @@ export default async function HotelsPage({
   const isAdmin = appUser.app_role === "admin";
 
   return (
-    <main className={PAGE}>
-      <BackLink href="/dashboard">لوحة التحكم</BackLink>
-      <h1 className="text-2xl font-semibold text-foreground sm:text-3xl">الفنادق</h1>
+    <AppShell appUser={appUser}>
+      <PageHeader title="الفنادق" description="افتح فندقاً لإدارة أنواع غرفه." />
 
       {error && (
-        <p role="alert" className={`${ALERT_ERROR} mt-4`}>
+        <p role="alert" className={`${ALERT_ERROR} mb-6`}>
           {error}
         </p>
       )}
 
-      <ul className="mt-8 space-y-3">
+      <ul className="space-y-3">
         {(hotels ?? []).map((hotel) => (
           <li key={hotel.id} className={CARD}>
             <div className="flex flex-wrap items-center justify-between gap-4">
@@ -55,7 +55,7 @@ export default async function HotelsPage({
       </ul>
 
       {isAdmin && <AddHotelForm />}
-    </main>
+    </AppShell>
   );
 }
 

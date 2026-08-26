@@ -7,13 +7,14 @@ import {
   ALERT_STATUS,
   BUTTON_SECONDARY,
   INPUT,
-  PAGE,
   TABLE,
+  TABLE_ROW,
   TABLE_WRAPPER,
   TD,
   TH,
 } from "@/lib/ui";
-import { BackLink } from "@/app/_components/BackLink";
+import { AppShell } from "@/app/_components/AppShell";
+import { PageHeader } from "@/app/_components/PageHeader";
 import { updateAllotmentCost } from "./actions";
 
 export default async function AllotmentsPage({
@@ -49,20 +50,19 @@ export default async function AllotmentsPage({
   const canEditCost = appUser.app_role === "admin" && appUser.can_view_cost;
 
   return (
-    <main className={PAGE}>
-      <BackLink href="/dashboard">لوحة التحكم</BackLink>
-      <h1 className="text-2xl font-semibold text-foreground sm:text-3xl">التكلفة</h1>
+    <AppShell appUser={appUser}>
+      <PageHeader title="التكلفة" description="تكلفة الليلة لكل نوع غرفة في كل تاريخ." />
 
       {error && (
-        <p role="alert" className={`${ALERT_ERROR} mt-4`}>
+        <p role="alert" className={`${ALERT_ERROR} mb-6`}>
           {error}
         </p>
       )}
       {!appUser.can_view_cost && (
-        <p className={`${ALERT_STATUS} mt-4`}>لا تملك صلاحية عرض التكلفة — راجع شاشة الصلاحيات.</p>
+        <p className={`${ALERT_STATUS} mb-6`}>لا تملك صلاحية عرض التكلفة — راجع شاشة الصلاحيات.</p>
       )}
 
-      <div className={`${TABLE_WRAPPER} mt-8`}>
+      <div className={TABLE_WRAPPER}>
         <table className={TABLE}>
           <thead>
             <tr>
@@ -75,7 +75,7 @@ export default async function AllotmentsPage({
           </thead>
           <tbody>
             {(allotments ?? []).map((allotment) => (
-              <tr key={allotment.id}>
+              <tr key={allotment.id} className={TABLE_ROW}>
                 <td className={TD}>{hotelNames.get(allotment.hotel_id) ?? allotment.hotel_id}</td>
                 <td className={TD}>
                   {roomTypeNames.get(allotment.room_type_id) ?? allotment.room_type_id}
@@ -94,7 +94,7 @@ export default async function AllotmentsPage({
           </tbody>
         </table>
       </div>
-    </main>
+    </AppShell>
   );
 }
 

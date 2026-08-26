@@ -1,12 +1,18 @@
-// Shared Tailwind class strings for the admin UI's visual language
-// (soft/rounded, calm-contrast, generous spacing — see
-// admin/app/layout.tsx and admin/app/globals.css for the underlying
-// color tokens). Centralized here so every screen's forms and tables
-// stay visually identical instead of each re-deriving its own version.
+// Shared Tailwind class strings for the admin UI's visual language: a
+// dark, gold-accented surface with generous spacing — see
+// admin/app/globals.css for the underlying color tokens and
+// admin/app/_components/AppShell.tsx for the frame they sit in.
+// Centralized here so every screen's forms and tables stay visually
+// identical instead of each re-deriving its own version.
 
-export const PAGE = "mx-auto w-full max-w-5xl flex-1 px-6 py-10 sm:px-8 sm:py-14";
+export const PAGE = "mx-auto w-full max-w-6xl flex-1 px-4 py-8 sm:px-8 sm:py-12";
 
 export const CARD = "rounded-2xl border border-border bg-surface p-6";
+
+// A card meant to be read before the ones under it — the gold hairline on
+// its start edge is the only place the accent is used structurally rather
+// than for an interactive affordance.
+export const CARD_FEATURED = "rounded-2xl border border-border border-s-2 border-s-accent bg-surface p-6";
 
 // Deliberately carries no width utility — every call site must add its own
 // (`w-full` for a field meant to fill its label/row, a fixed `w-NN` for a
@@ -16,7 +22,7 @@ export const CARD = "rounded-2xl border border-border bg-surface p-6";
 // win — every "why is this one-digit field full width" bug traced back to
 // exactly that.
 export const INPUT =
-  "rounded-xl border border-border bg-background px-3 py-2 text-sm text-foreground outline-none transition focus:border-accent focus:ring-2 focus:ring-accent/25 disabled:cursor-not-allowed disabled:opacity-60";
+  "rounded-xl border border-border bg-background px-3 py-2 text-sm text-foreground outline-none transition placeholder:text-muted-foreground hover:border-border-strong focus:border-accent focus:ring-2 focus:ring-accent/25 disabled:cursor-not-allowed disabled:opacity-60";
 
 export const SELECT = INPUT;
 
@@ -42,13 +48,26 @@ export const LABEL = "block text-sm font-medium text-foreground";
 export const CHECKBOX_LABEL =
   "inline-flex items-center gap-2 text-sm text-foreground";
 
-export const CHECKBOX = "h-4 w-4 rounded border-border text-accent focus:ring-2 focus:ring-accent/25";
+// accent-accent, not text-accent: a native checkbox takes its checked fill
+// from CSS accent-color, which no text-color utility feeds. `text-accent`
+// left every box rendering in the browser's default blue — invisible on a
+// light theme, glaring against gold on this one.
+export const CHECKBOX =
+  "h-4 w-4 rounded border-border accent-accent focus:ring-2 focus:ring-accent/25";
 
+// hover:bg-accent-hover, not hover:opacity-90: on a near-black page,
+// fading the gold toward the background reads as the button going
+// *disabled*, which is the opposite of the intended affordance.
 export const BUTTON_PRIMARY =
-  "rounded-xl bg-accent px-4 py-2 text-sm font-medium text-accent-foreground transition hover:opacity-90 focus:outline-none focus:ring-2 focus:ring-accent/40 disabled:cursor-not-allowed disabled:opacity-60";
+  "rounded-xl bg-accent px-4 py-2 text-sm font-semibold text-accent-foreground transition hover:bg-accent-hover focus:outline-none focus:ring-2 focus:ring-accent/40 disabled:cursor-not-allowed disabled:opacity-60";
 
 export const BUTTON_SECONDARY =
-  "rounded-xl border border-border bg-surface px-4 py-2 text-sm font-medium text-foreground transition hover:border-accent/40 focus:outline-none focus:ring-2 focus:ring-accent/25 disabled:cursor-not-allowed disabled:opacity-60";
+  "rounded-xl border border-border bg-surface px-4 py-2 text-sm font-medium text-foreground transition hover:border-accent/50 hover:text-accent focus:outline-none focus:ring-2 focus:ring-accent/25 disabled:cursor-not-allowed disabled:opacity-60";
+
+// A tertiary action that must not compete with anything on the page —
+// the shell's sign-out, and nothing heavier than that.
+export const BUTTON_SUBTLE =
+  "rounded-lg border border-transparent px-3 py-1.5 text-sm font-medium text-muted-foreground transition hover:border-border hover:text-foreground focus:outline-none focus:ring-2 focus:ring-accent/25";
 
 export const BUTTON_DANGER =
   "rounded-xl border border-danger/30 bg-danger-background px-3 py-1.5 text-sm font-medium text-danger transition hover:border-danger/60 disabled:cursor-not-allowed disabled:opacity-60";
@@ -59,14 +78,26 @@ export const ALERT_ERROR =
 export const ALERT_STATUS =
   "rounded-xl border border-accent/20 bg-accent/10 px-4 py-3 text-sm text-foreground";
 
-export const TABLE_WRAPPER = "overflow-x-auto rounded-2xl border border-border";
+export const TABLE_WRAPPER = "overflow-x-auto rounded-2xl border border-border bg-surface";
 
 export const TABLE = "w-full min-w-max text-sm";
 
-export const TH = "border-b border-border bg-background/60 px-4 py-2.5 text-start font-medium text-muted-foreground";
+export const TH =
+  "border-b border-border bg-surface-subtle px-4 py-3 text-start text-xs font-semibold uppercase tracking-wide text-muted-foreground";
 
 export const TD = "border-b border-border px-4 py-2.5 align-middle";
 
-export const SECTION_TITLE = "text-lg font-semibold text-foreground";
+// Applied to <tr> in a table body. Rows on a dark surface run together
+// without it; the tint is the same one TH uses, at a fraction of its weight.
+export const TABLE_ROW = "transition hover:bg-surface-subtle/50";
+
+export const SECTION_TITLE = "text-lg font-semibold tracking-tight text-foreground";
 
 export const HINT = "text-sm text-muted-foreground";
+
+// A read-only status pill — a role, a permission state — never a control.
+export const BADGE =
+  "inline-flex items-center rounded-full border border-border bg-surface px-3 py-1 text-xs font-medium text-muted-foreground";
+
+export const BADGE_ACCENT =
+  "inline-flex items-center rounded-full border border-accent/30 bg-accent/10 px-3 py-1 text-xs font-medium text-accent";
