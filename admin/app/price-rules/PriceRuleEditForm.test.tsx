@@ -37,7 +37,6 @@ describe("PriceRuleEditForm", () => {
           rule={hotelRuleWithInheritedDemandCurve}
           scope="hotel"
           scopeId={2}
-          scopeLabel="فندق الاختبار"
           onSaved={() => {}}
         />
       )
@@ -50,7 +49,6 @@ describe("PriceRuleEditForm", () => {
         rule={hotelRuleWithInheritedDemandCurve}
         scope="hotel"
         scopeId={2}
-        scopeLabel="فندق الاختبار"
         onSaved={() => {}}
       />
     );
@@ -67,7 +65,6 @@ describe("PriceRuleEditForm", () => {
         rule={hotelRuleWithInheritedDemandCurve}
         scope="hotel"
         scopeId={2}
-        scopeLabel="فندق الاختبار"
         onSaved={() => {}}
       />
     );

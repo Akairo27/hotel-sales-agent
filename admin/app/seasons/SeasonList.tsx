@@ -5,6 +5,21 @@ import type { CalendarType, Season } from "@/lib/types";
 import { endOfMonthSentinel } from "@/lib/seasonCalendar";
 import { monthName, MONTH_NUMBERS } from "@/lib/monthNames";
 import { seasonColor } from "@/lib/seasonColor";
+import {
+  ACTION_BAR,
+  ALERT_ERROR,
+  BUTTON_PRIMARY,
+  CARD,
+  CHECKBOX,
+  CHECKBOX_LABEL,
+  FIELDSET,
+  HINT,
+  INPUT,
+  LABEL,
+  LEGEND,
+  SECTION_TITLE,
+  SELECT,
+} from "@/lib/ui";
 import { SeasonEditForm } from "./SeasonEditForm";
 import { createDefaultSeason, createSeason, renameDefaultSeason } from "./actions";
 
@@ -53,11 +68,19 @@ export function SeasonList({
 
   return (
     <section>
-      <h2>المواسم</h2>
-      {isAdmin && <p>الأعلى في القائمة يفوز عند تداخل المواسم — اسحب لإعادة الترتيب.</p>}
-      {reorderError && <p role="alert">{reorderError}</p>}
+      <h2 className={SECTION_TITLE}>المواسم</h2>
+      {isAdmin && (
+        <p className={`${HINT} mt-1`}>
+          الأعلى في القائمة يفوز عند تداخل المواسم — اسحب لإعادة الترتيب.
+        </p>
+      )}
+      {reorderError && (
+        <p role="alert" className={`${ALERT_ERROR} mt-3`}>
+          {reorderError}
+        </p>
+      )}
 
-      <ul>
+      <ul className="mt-4 space-y-2">
         {orderedSeasons.map((season) => (
           <li
             key={season.id}
@@ -65,32 +88,40 @@ export function SeasonList({
             onDragStart={isAdmin ? () => setDraggedId(season.id) : undefined}
             onDragOver={isAdmin ? (event) => event.preventDefault() : undefined}
             onDrop={isAdmin ? () => handleDrop(season.id) : undefined}
+            className={`${CARD} p-4 ${isAdmin ? "cursor-move" : ""}`}
           >
-            <span
-              aria-hidden
-              style={{
-                display: "inline-block",
-                width: "0.9em",
-                height: "0.9em",
-                backgroundColor: seasonColor(season.id),
-                marginInlineEnd: "0.4em",
-              }}
-            />
-            {isAdmin ? (
-              <details>
-                <summary>{season.season_name}</summary>
-                <SeasonEditForm season={season} onChange={onSeasonChange} />
-              </details>
-            ) : (
-              season.season_name
-            )}
+            <div className="flex items-center gap-2.5">
+              <span
+                aria-hidden
+                className="h-3.5 w-3.5 shrink-0 rounded-full"
+                style={{ backgroundColor: seasonColor(season.id) }}
+              />
+              {isAdmin ? (
+                <details className="flex-1">
+                  <summary className="cursor-pointer text-sm font-medium text-foreground">
+                    {season.season_name}
+                  </summary>
+                  <div className="mt-4">
+                    <SeasonEditForm season={season} onChange={onSeasonChange} />
+                  </div>
+                </details>
+              ) : (
+                <span className="text-sm font-medium text-foreground">{season.season_name}</span>
+              )}
+            </div>
           </li>
         ))}
       </ul>
 
-      <DefaultSeasonBlock defaultSeason={defaultSeason} isAdmin={isAdmin} />
+      <div className="mt-6">
+        <DefaultSeasonBlock defaultSeason={defaultSeason} isAdmin={isAdmin} />
+      </div>
 
-      {isAdmin && <AddSeasonForm />}
+      {isAdmin && (
+        <div className="mt-6">
+          <AddSeasonForm />
+        </div>
+      )}
     </section>
   );
 }
@@ -103,36 +134,49 @@ function DefaultSeasonBlock({
   isAdmin: boolean;
 }) {
   if (defaultSeason === null && !isAdmin) {
-    return <p>لا يوجد موسم افتراضي بعد.</p>;
+    return <p className={HINT}>لا يوجد موسم افتراضي بعد.</p>;
   }
   if (defaultSeason === null) {
     return (
-      <form action={createDefaultSeason}>
-        <p>
+      <form action={createDefaultSeason} className={CARD}>
+        <p className="text-sm text-foreground">
           لا يوجد موسم افتراضي بعد — أي تاريخ لا يقع ضمن موسم محدد يحتاج مرجعاً. أنشئ الموسم
           الافتراضي المطلوب (ARCHITECTURE.md §4).
         </p>
-        <button type="submit">إنشاء الموسم الافتراضي</button>
+        <div className={ACTION_BAR}>
+          <button type="submit" className={BUTTON_PRIMARY}>
+            إنشاء الموسم الافتراضي
+          </button>
+        </div>
       </form>
     );
   }
 
   if (!isAdmin) {
     return (
-      <p>
+      <p className="text-sm text-foreground">
         الموسم الافتراضي (يغطي كل الفجوات): <strong>{defaultSeason.season_name}</strong>
       </p>
     );
   }
 
   return (
-    <form action={renameDefaultSeason}>
+    <form action={renameDefaultSeason} className={CARD}>
       <input type="hidden" name="season_id" value={defaultSeason.id} />
-      <label>
+      <label className={LABEL}>
         اسم الموسم الافتراضي (يغطي كل الفجوات، حدوده غير قابلة للتعديل)
-        <input name="season_name" defaultValue={defaultSeason.season_name} required />
+        <input
+          name="season_name"
+          defaultValue={defaultSeason.season_name}
+          required
+          className={`${INPUT} mt-1 w-full`}
+        />
       </label>
-      <button type="submit">حفظ</button>
+      <div className={ACTION_BAR}>
+        <button type="submit" className={BUTTON_PRIMARY}>
+          حفظ
+        </button>
+      </div>
     </form>
   );
 }
@@ -165,74 +209,95 @@ function AddSeasonForm() {
   }
 
   return (
-    <form action={createSeason}>
-      <h3>إضافة موسم</h3>
-      <label>
+    <form action={createSeason} className={CARD}>
+      <h3 className={SECTION_TITLE}>إضافة موسم</h3>
+
+      <label className={`${LABEL} mt-4`}>
         اسم الموسم
-        <input name="season_name" required />
+        <input name="season_name" required className={`${INPUT} mt-1 w-full`} />
       </label>
 
-      <label>
+      <label className={`${LABEL} mt-4`}>
         التقويم
         <select
           name="calendar_type"
           value={calendarType}
           onChange={(event) => handleCalendarTypeChange(event.target.value as CalendarType)}
+          className={`${SELECT} mt-1 w-full sm:w-64`}
         >
           <option value="hijri">هجري</option>
           <option value="gregorian">ميلادي</option>
         </select>
       </label>
 
-      <fieldset>
-        <legend>البداية</legend>
-        <select name="start_month" defaultValue={1}>
-          {MONTH_NUMBERS.map((monthNumber) => (
-            <option key={monthNumber} value={monthNumber}>
-              {monthName(calendarType, monthNumber)}
-            </option>
-          ))}
-        </select>
-        <input type="number" name="start_day" min={1} max={31} defaultValue={1} required />
-      </fieldset>
-
-      <fieldset>
-        <legend>النهاية</legend>
-        <select
-          name="end_month"
-          value={endMonth}
-          onChange={(event) => handleEndMonthChange(Number(event.target.value))}
-        >
-          {MONTH_NUMBERS.map((monthNumber) => (
-            <option key={monthNumber} value={monthNumber}>
-              {monthName(calendarType, monthNumber)}
-            </option>
-          ))}
-        </select>
-        {endsAtMonthEnd ? (
-          <input type="hidden" name="end_day" value={endDay} />
-        ) : (
+      <fieldset className={`${FIELDSET} mt-4`}>
+        <legend className={LEGEND}>البداية</legend>
+        <div className="flex flex-wrap gap-3">
+          <select name="start_month" defaultValue={1} className={`${SELECT} w-40`}>
+            {MONTH_NUMBERS.map((monthNumber) => (
+              <option key={monthNumber} value={monthNumber}>
+                {monthName(calendarType, monthNumber)}
+              </option>
+            ))}
+          </select>
           <input
             type="number"
-            name="end_day"
+            name="start_day"
             min={1}
             max={31}
-            value={endDay}
-            onChange={(event) => setEndDay(Number(event.target.value))}
+            defaultValue={1}
             required
+            className={`${INPUT} w-20`}
           />
-        )}
-        <label>
-          <input
-            type="checkbox"
-            checked={endsAtMonthEnd}
-            onChange={(event) => toggleEndsAtMonthEnd(event.target.checked)}
-          />
-          حتى نهاية الشهر
-        </label>
+        </div>
       </fieldset>
 
-      <button type="submit">إضافة</button>
+      <fieldset className={`${FIELDSET} mt-4`}>
+        <legend className={LEGEND}>النهاية</legend>
+        <div className="flex flex-wrap items-center gap-3">
+          <select
+            name="end_month"
+            value={endMonth}
+            onChange={(event) => handleEndMonthChange(Number(event.target.value))}
+            className={`${SELECT} w-40`}
+          >
+            {MONTH_NUMBERS.map((monthNumber) => (
+              <option key={monthNumber} value={monthNumber}>
+                {monthName(calendarType, monthNumber)}
+              </option>
+            ))}
+          </select>
+          {endsAtMonthEnd ? (
+            <input type="hidden" name="end_day" value={endDay} />
+          ) : (
+            <input
+              type="number"
+              name="end_day"
+              min={1}
+              max={31}
+              value={endDay}
+              onChange={(event) => setEndDay(Number(event.target.value))}
+              required
+              className={`${INPUT} w-20`}
+            />
+          )}
+          <label className={CHECKBOX_LABEL}>
+            <input
+              type="checkbox"
+              checked={endsAtMonthEnd}
+              onChange={(event) => toggleEndsAtMonthEnd(event.target.checked)}
+              className={CHECKBOX}
+            />
+            حتى نهاية الشهر
+          </label>
+        </div>
+      </fieldset>
+
+      <div className={ACTION_BAR}>
+        <button type="submit" className={BUTTON_PRIMARY}>
+          إضافة
+        </button>
+      </div>
     </form>
   );
 }

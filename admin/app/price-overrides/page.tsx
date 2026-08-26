@@ -1,8 +1,9 @@
-import Link from "next/link";
 import { redirect } from "next/navigation";
 import { createClient } from "@/utils/supabase/server";
 import { getCurrentAppUser } from "@/lib/session";
 import type { Hotel, PriceOverride, RoomType } from "@/lib/types";
+import { PAGE } from "@/lib/ui";
+import { BackLink } from "@/app/_components/BackLink";
 import { PriceOverridesWorkspace } from "./PriceOverridesWorkspace";
 
 export default async function PriceOverridesPage() {
@@ -38,17 +39,18 @@ export default async function PriceOverridesPage() {
   const canEdit = appUser.app_role === "admin";
 
   return (
-    <main>
-      <p>
-        <Link href="/dashboard">&larr; لوحة التحكم</Link>
-      </p>
-      <h1>تجاوزات الأسعار</h1>
-      <PriceOverridesWorkspace
-        initialOverrides={overrides ?? []}
-        hotels={hotels ?? []}
-        roomTypes={roomTypes ?? []}
-        canEdit={canEdit}
-      />
+    <main className={PAGE}>
+      <BackLink href="/dashboard">لوحة التحكم</BackLink>
+      <h1 className="text-2xl font-semibold text-foreground sm:text-3xl">تجاوزات الأسعار</h1>
+
+      <div className="mt-8">
+        <PriceOverridesWorkspace
+          initialOverrides={overrides ?? []}
+          hotels={hotels ?? []}
+          roomTypes={roomTypes ?? []}
+          canEdit={canEdit}
+        />
+      </div>
     </main>
   );
 }

@@ -1,8 +1,9 @@
-import Link from "next/link";
 import { notFound, redirect } from "next/navigation";
 import { createClient } from "@/utils/supabase/server";
 import { getCurrentAppUser } from "@/lib/session";
 import type { Hotel, RoomType } from "@/lib/types";
+import { ALERT_ERROR, BUTTON_PRIMARY, BUTTON_SECONDARY, CARD, INPUT, LABEL, PAGE, SECTION_TITLE } from "@/lib/ui";
+import { BackLink } from "@/app/_components/BackLink";
 import { createRoomType, renameRoomType } from "./actions";
 
 export default async function HotelRoomTypesPage({
@@ -44,21 +45,30 @@ export default async function HotelRoomTypesPage({
   const isAdmin = appUser.app_role === "admin";
 
   return (
-    <main>
-      <p>
-        <Link href="/hotels">&larr; الفنادق</Link>
-      </p>
-      <h1>{hotel.hotel_name}</h1>
-      {error && <p role="alert">{error}</p>}
-      <h2>أنواع الغرف</h2>
-      <ul>
+    <main className={PAGE}>
+      <BackLink href="/hotels">الفنادق</BackLink>
+      <h1 className="text-2xl font-semibold text-foreground sm:text-3xl">{hotel.hotel_name}</h1>
+
+      {error && (
+        <p role="alert" className={`${ALERT_ERROR} mt-4`}>
+          {error}
+        </p>
+      )}
+
+      <h2 className={`${SECTION_TITLE} mt-8`}>أنواع الغرف</h2>
+      <ul className="mt-4 space-y-3">
         {(roomTypes ?? []).map((roomType) => (
-          <li key={roomType.id}>
-            {roomType.room_type_name}
-            {isAdmin && <RenameRoomTypeForm hotelId={hotel.id} roomType={roomType} />}
+          <li key={roomType.id} className={CARD}>
+            <div className="flex flex-wrap items-center justify-between gap-4">
+              <span className="text-base font-medium text-foreground">
+                {roomType.room_type_name}
+              </span>
+              {isAdmin && <RenameRoomTypeForm hotelId={hotel.id} roomType={roomType} />}
+            </div>
           </li>
         ))}
       </ul>
+
       {isAdmin && <AddRoomTypeForm hotelId={hotel.id} />}
     </main>
   );
@@ -67,15 +77,25 @@ export default async function HotelRoomTypesPage({
 function RenameRoomTypeForm({ hotelId, roomType }: { hotelId: number; roomType: RoomType }) {
   const renameThisRoomType = renameRoomType.bind(null, hotelId, roomType.id);
   return (
-    <form action={renameThisRoomType}>
-      <label htmlFor={`room-type-name-${roomType.id}`}>الاسم الجديد</label>
-      <input
-        id={`room-type-name-${roomType.id}`}
-        name="room_type_name"
-        defaultValue={roomType.room_type_name}
-        required
-      />
-      <button type="submit">حفظ</button>
+    <form action={renameThisRoomType} className="flex items-end gap-2">
+      <div className="w-44">
+        <label
+          htmlFor={`room-type-name-${roomType.id}`}
+          className="mb-1 block text-xs text-muted-foreground"
+        >
+          الاسم الجديد
+        </label>
+        <input
+          id={`room-type-name-${roomType.id}`}
+          name="room_type_name"
+          defaultValue={roomType.room_type_name}
+          required
+          className={`${INPUT} w-full`}
+        />
+      </div>
+      <button type="submit" className={BUTTON_SECONDARY}>
+        حفظ
+      </button>
     </form>
   );
 }
@@ -83,11 +103,24 @@ function RenameRoomTypeForm({ hotelId, roomType }: { hotelId: number; roomType: 
 function AddRoomTypeForm({ hotelId }: { hotelId: number }) {
   const createThisRoomType = createRoomType.bind(null, hotelId);
   return (
-    <form action={createThisRoomType}>
-      <h3>إضافة نوع غرفة</h3>
-      <label htmlFor="new-room-type-name">الاسم</label>
-      <input id="new-room-type-name" name="room_type_name" required />
-      <button type="submit">إضافة</button>
-    </form>
+    <div className={`${CARD} mt-8`}>
+      <h3 className={SECTION_TITLE}>إضافة نوع غرفة</h3>
+      <form action={createThisRoomType} className="mt-4 flex flex-wrap items-end gap-3">
+        <div className="min-w-48 flex-1">
+          <label htmlFor="new-room-type-name" className={LABEL}>
+            الاسم
+          </label>
+          <input
+            id="new-room-type-name"
+            name="room_type_name"
+            required
+            className={`${INPUT} mt-1 w-full`}
+          />
+        </div>
+        <button type="submit" className={BUTTON_PRIMARY}>
+          إضافة
+        </button>
+      </form>
+    </div>
   );
 }

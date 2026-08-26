@@ -2,6 +2,17 @@
 
 import { useState } from "react";
 import type { Hotel, PriceOverride, RoomType } from "@/lib/types";
+import {
+  ALERT_ERROR,
+  BUTTON_DANGER,
+  CARD,
+  HINT,
+  SECTION_TITLE,
+  TABLE,
+  TABLE_WRAPPER,
+  TD,
+  TH,
+} from "@/lib/ui";
 import { PriceOverrideForm } from "./PriceOverrideForm";
 import { endPriceOverrideNow } from "./actions";
 
@@ -80,7 +91,7 @@ export function PriceOverridesWorkspace({
   }
 
   return (
-    <div>
+    <div className="space-y-8">
       {canEdit && (
         <PriceOverrideForm
           hotels={hotels}
@@ -94,62 +105,73 @@ export function PriceOverridesWorkspace({
         />
       )}
 
-      {error && <p role="alert">{error}</p>}
+      {error && (
+        <p role="alert" className={ALERT_ERROR}>
+          {error}
+        </p>
+      )}
 
-      <h2>التجاوزات الحالية</h2>
-      {groups.size === 0 && <p>لا توجد تجاوزات أسعار مسجلة.</p>}
-      {[...groups.entries()].map(([key, rows]) => {
-        const [hotelIdText, roomTypeIdText] = key.split(":");
-        const hotelId = Number(hotelIdText);
-        const roomTypeId = Number(roomTypeIdText);
-        return (
-          <details key={key} open>
-            <summary>
-              {hotelNames.get(hotelId) ?? `فندق #${hotelId}`} —{" "}
-              {roomTypeNames.get(roomTypeId) ?? `نوع غرفة #${roomTypeId}`}
-            </summary>
-            <table>
-              <thead>
-                <tr>
-                  <th>الليلة</th>
-                  <th>سعر العرض</th>
-                  <th>الحد الأدنى المسموح</th>
-                  <th>ينتهي في</th>
-                  <th>الحالة</th>
-                  {canEdit && <th></th>}
-                </tr>
-              </thead>
-              <tbody>
-                {rows.map((row) => {
-                  const isActive = new Date(row.expires_at).getTime() > Date.now();
-                  return (
-                    <tr key={row.id}>
-                      <td>{row.stay_date}</td>
-                      <td>{row.ask_price_override}</td>
-                      <td>{row.min_allowed_override}</td>
-                      <td>{EXPIRES_AT_FORMAT.format(new Date(row.expires_at))}</td>
-                      <td>{isActive ? "نشط" : "منتهٍ"}</td>
-                      {canEdit && (
-                        <td>
-                          {isActive && (
-                            <button
-                              type="button"
-                              onClick={() => handleEndNow(row)}
-                              disabled={endingId === row.id}
-                            >
-                              {endingId === row.id ? "جارٍ الإنهاء…" : "إنهاء الآن"}
-                            </button>
-                          )}
-                        </td>
-                      )}
-                    </tr>
-                  );
-                })}
-              </tbody>
-            </table>
-          </details>
-        );
-      })}
+      <section>
+        <h2 className={SECTION_TITLE}>التجاوزات الحالية</h2>
+        {groups.size === 0 && <p className={`${HINT} mt-2`}>لا توجد تجاوزات أسعار مسجلة.</p>}
+        <div className="mt-4 space-y-4">
+          {[...groups.entries()].map(([key, rows]) => {
+            const [hotelIdText, roomTypeIdText] = key.split(":");
+            const hotelId = Number(hotelIdText);
+            const roomTypeId = Number(roomTypeIdText);
+            return (
+              <details key={key} open className={CARD}>
+                <summary className="cursor-pointer text-sm font-medium text-foreground">
+                  {hotelNames.get(hotelId) ?? `فندق #${hotelId}`} —{" "}
+                  {roomTypeNames.get(roomTypeId) ?? `نوع غرفة #${roomTypeId}`}
+                </summary>
+                <div className={`${TABLE_WRAPPER} mt-4`}>
+                  <table className={TABLE}>
+                    <thead>
+                      <tr>
+                        <th className={TH}>الليلة</th>
+                        <th className={TH}>سعر العرض</th>
+                        <th className={TH}>الحد الأدنى المسموح</th>
+                        <th className={TH}>ينتهي في</th>
+                        <th className={TH}>الحالة</th>
+                        {canEdit && <th className={TH}></th>}
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {rows.map((row) => {
+                        const isActive = new Date(row.expires_at).getTime() > Date.now();
+                        return (
+                          <tr key={row.id}>
+                            <td className={TD}>{row.stay_date}</td>
+                            <td className={TD}>{row.ask_price_override}</td>
+                            <td className={TD}>{row.min_allowed_override}</td>
+                            <td className={TD}>{EXPIRES_AT_FORMAT.format(new Date(row.expires_at))}</td>
+                            <td className={TD}>{isActive ? "نشط" : "منتهٍ"}</td>
+                            {canEdit && (
+                              <td className={TD}>
+                                {isActive && (
+                                  <button
+                                    type="button"
+                                    onClick={() => handleEndNow(row)}
+                                    disabled={endingId === row.id}
+                                    className={BUTTON_DANGER}
+                                  >
+                                    {endingId === row.id ? "جارٍ الإنهاء…" : "إنهاء الآن"}
+                                  </button>
+                                )}
+                              </td>
+                            )}
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                  </table>
+                </div>
+              </details>
+            );
+          })}
+        </div>
+      </section>
     </div>
   );
 }

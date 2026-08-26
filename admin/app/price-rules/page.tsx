@@ -1,8 +1,9 @@
-import Link from "next/link";
 import { redirect } from "next/navigation";
 import { createClient } from "@/utils/supabase/server";
 import { getCurrentAppUser } from "@/lib/session";
 import type { Hotel, PriceRuleForDashboard, RoomType, Season } from "@/lib/types";
+import { ALERT_STATUS, PAGE } from "@/lib/ui";
+import { BackLink } from "@/app/_components/BackLink";
 import { PriceRulesWorkspace } from "./PriceRulesWorkspace";
 
 export default async function PriceRulesPage() {
@@ -42,21 +43,25 @@ export default async function PriceRulesPage() {
   const canEdit = appUser.app_role === "admin" && appUser.can_view_cost;
 
   return (
-    <main>
-      <p>
-        <Link href="/dashboard">&larr; لوحة التحكم</Link>
-      </p>
-      <h1>قواعد التسعير</h1>
+    <main className={PAGE}>
+      <BackLink href="/dashboard">لوحة التحكم</BackLink>
+      <h1 className="text-2xl font-semibold text-foreground sm:text-3xl">قواعد التسعير</h1>
+
       {!appUser.can_view_cost && (
-        <p>لا تملك صلاحية عرض التكلفة — الهامش وحد الربح الأدنى مخفيان عنك.</p>
+        <p className={`${ALERT_STATUS} mt-4`}>
+          لا تملك صلاحية عرض التكلفة — الهامش وحد الربح الأدنى مخفيان عنك.
+        </p>
       )}
-      <PriceRulesWorkspace
-        initialRules={rules ?? []}
-        hotels={hotels ?? []}
-        roomTypes={roomTypes ?? []}
-        seasons={seasons ?? []}
-        canEdit={canEdit}
-      />
+
+      <div className="mt-8">
+        <PriceRulesWorkspace
+          initialRules={rules ?? []}
+          hotels={hotels ?? []}
+          roomTypes={roomTypes ?? []}
+          seasons={seasons ?? []}
+          canEdit={canEdit}
+        />
+      </div>
     </main>
   );
 }

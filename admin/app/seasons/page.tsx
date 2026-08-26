@@ -1,8 +1,9 @@
-import Link from "next/link";
 import { redirect } from "next/navigation";
 import { createClient } from "@/utils/supabase/server";
 import { getCurrentAppUser } from "@/lib/session";
 import type { Season } from "@/lib/types";
+import { ALERT_ERROR, PAGE } from "@/lib/ui";
+import { BackLink } from "@/app/_components/BackLink";
 import { SeasonsWorkspace } from "./SeasonsWorkspace";
 
 export default async function SeasonsPage({
@@ -26,16 +27,19 @@ export default async function SeasonsPage({
     .overrideTypes<Season[], { merge: false }>();
 
   return (
-    <main>
-      <p>
-        <Link href="/dashboard">&larr; لوحة التحكم</Link>
-      </p>
-      <h1>المواسم</h1>
-      {error && <p role="alert">{error}</p>}
-      <SeasonsWorkspace
-        initialSeasons={seasons ?? []}
-        isAdmin={appUser.app_role === "admin"}
-      />
+    <main className={PAGE}>
+      <BackLink href="/dashboard">لوحة التحكم</BackLink>
+      <h1 className="text-2xl font-semibold text-foreground sm:text-3xl">المواسم</h1>
+
+      {error && (
+        <p role="alert" className={`${ALERT_ERROR} mt-4`}>
+          {error}
+        </p>
+      )}
+
+      <div className="mt-8">
+        <SeasonsWorkspace initialSeasons={seasons ?? []} isAdmin={appUser.app_role === "admin"} />
+      </div>
     </main>
   );
 }

@@ -8,6 +8,7 @@ import type {
   RoomType,
   Season,
 } from "@/lib/types";
+import { CARD, FIELDSET, HINT, SECTION_TITLE, SELECT } from "@/lib/ui";
 import { PriceRuleEditForm } from "./PriceRuleEditForm";
 
 interface PriceRulesWorkspaceProps {
@@ -88,92 +89,101 @@ export function PriceRulesWorkspace({
   ];
 
   return (
-    <div>
-      <section>
-        <h2>القاعدة العامة</h2>
-        <p>أساس سلسلة التوريث — لا تُحذف ولا تُعطَّل، ويجب أن تحدد الثلاثة كاملة.</p>
-        {canEdit ? (
-          <PriceRuleEditForm
-            rule={globalRule}
-            scope="global"
-            scopeId={null}
-            scopeLabel="القاعدة العامة"
-            onSaved={refresh}
-          />
-        ) : (
-          <p>تحتاج صلاحية عرض التكلفة لتعديل هذه القاعدة.</p>
+    <div className="space-y-8">
+      <section className={CARD}>
+        <h2 className={SECTION_TITLE}>القاعدة العامة</h2>
+        <p className={`${HINT} mt-1`}>
+          أساس سلسلة التوريث — لا تُحذف ولا تُعطَّل، ويجب أن تحدد الثلاثة كاملة.
+        </p>
+        <div className="mt-4">
+          {canEdit ? (
+            <PriceRuleEditForm rule={globalRule} scope="global" scopeId={null} onSaved={refresh} />
+          ) : (
+            <p className={HINT}>تحتاج صلاحية عرض التكلفة لتعديل هذه القاعدة.</p>
+          )}
+        </div>
+      </section>
+
+      <section className={CARD}>
+        <h2 className={SECTION_TITLE}>قواعد المواسم</h2>
+        {seasonRules.length === 0 && <p className={`${HINT} mt-2`}>لا توجد قواعد خاصة بموسم بعينه.</p>}
+        <div className="mt-4 divide-y divide-border">
+          {seasonRules.map((rule) => (
+            <details key={rule.id} className="py-4 first:pt-0 last:pb-0">
+              <summary className="cursor-pointer text-sm font-medium text-foreground">
+                {seasonNames.get(rule.scope_id ?? -1) ?? `موسم #${rule.scope_id}`}
+                {!rule.is_active && <span className="text-muted-foreground"> (معطَّلة)</span>}
+              </summary>
+              {canEdit && (
+                <div className="mt-4">
+                  <PriceRuleEditForm
+                    rule={rule}
+                    scope="season"
+                    scopeId={rule.scope_id}
+                    onSaved={refresh}
+                  />
+                </div>
+              )}
+            </details>
+          ))}
+        </div>
+      </section>
+
+      <section className={CARD}>
+        <h2 className={SECTION_TITLE}>قواعد الفنادق</h2>
+        {hotelRules.length === 0 && <p className={`${HINT} mt-2`}>لا توجد قواعد خاصة بفندق بعينه.</p>}
+        <div className="mt-4 divide-y divide-border">
+          {hotelRules.map((rule) => (
+            <details key={rule.id} className="py-4 first:pt-0 last:pb-0">
+              <summary className="cursor-pointer text-sm font-medium text-foreground">
+                {hotelNames.get(rule.scope_id ?? -1) ?? `فندق #${rule.scope_id}`}
+                {!rule.is_active && <span className="text-muted-foreground"> (معطَّلة)</span>}
+              </summary>
+              {canEdit && (
+                <div className="mt-4">
+                  <PriceRuleEditForm
+                    rule={rule}
+                    scope="hotel"
+                    scopeId={rule.scope_id}
+                    onSaved={refresh}
+                  />
+                </div>
+              )}
+            </details>
+          ))}
+        </div>
+      </section>
+
+      <section className={CARD}>
+        <h2 className={SECTION_TITLE}>قواعد أنواع الغرف</h2>
+        {roomTypeRules.length === 0 && (
+          <p className={`${HINT} mt-2`}>لا توجد قواعد خاصة بنوع غرفة بعينه.</p>
         )}
-      </section>
-
-      <section>
-        <h2>قواعد المواسم</h2>
-        {seasonRules.length === 0 && <p>لا توجد قواعد خاصة بموسم بعينه.</p>}
-        {seasonRules.map((rule) => (
-          <details key={rule.id}>
-            <summary>
-              {seasonNames.get(rule.scope_id ?? -1) ?? `موسم #${rule.scope_id}`}
-              {!rule.is_active && " (معطَّلة)"}
-            </summary>
-            {canEdit && (
-              <PriceRuleEditForm
-                rule={rule}
-                scope="season"
-                scopeId={rule.scope_id}
-                scopeLabel={seasonNames.get(rule.scope_id ?? -1) ?? ""}
-                onSaved={refresh}
-              />
-            )}
-          </details>
-        ))}
-      </section>
-
-      <section>
-        <h2>قواعد الفنادق</h2>
-        {hotelRules.length === 0 && <p>لا توجد قواعد خاصة بفندق بعينه.</p>}
-        {hotelRules.map((rule) => (
-          <details key={rule.id}>
-            <summary>
-              {hotelNames.get(rule.scope_id ?? -1) ?? `فندق #${rule.scope_id}`}
-              {!rule.is_active && " (معطَّلة)"}
-            </summary>
-            {canEdit && (
-              <PriceRuleEditForm
-                rule={rule}
-                scope="hotel"
-                scopeId={rule.scope_id}
-                scopeLabel={hotelNames.get(rule.scope_id ?? -1) ?? ""}
-                onSaved={refresh}
-              />
-            )}
-          </details>
-        ))}
-      </section>
-
-      <section>
-        <h2>قواعد أنواع الغرف</h2>
-        {roomTypeRules.length === 0 && <p>لا توجد قواعد خاصة بنوع غرفة بعينه.</p>}
-        {roomTypeRules.map((rule) => (
-          <details key={rule.id}>
-            <summary>
-              {roomTypeNames.get(rule.scope_id ?? -1) ?? `نوع غرفة #${rule.scope_id}`}
-              {!rule.is_active && " (معطَّلة)"}
-            </summary>
-            {canEdit && (
-              <PriceRuleEditForm
-                rule={rule}
-                scope="room_type"
-                scopeId={rule.scope_id}
-                scopeLabel={roomTypeNames.get(rule.scope_id ?? -1) ?? ""}
-                onSaved={refresh}
-              />
-            )}
-          </details>
-        ))}
+        <div className="mt-4 divide-y divide-border">
+          {roomTypeRules.map((rule) => (
+            <details key={rule.id} className="py-4 first:pt-0 last:pb-0">
+              <summary className="cursor-pointer text-sm font-medium text-foreground">
+                {roomTypeNames.get(rule.scope_id ?? -1) ?? `نوع غرفة #${rule.scope_id}`}
+                {!rule.is_active && <span className="text-muted-foreground"> (معطَّلة)</span>}
+              </summary>
+              {canEdit && (
+                <div className="mt-4">
+                  <PriceRuleEditForm
+                    rule={rule}
+                    scope="room_type"
+                    scopeId={rule.scope_id}
+                    onSaved={refresh}
+                  />
+                </div>
+              )}
+            </details>
+          ))}
+        </div>
       </section>
 
       {canEdit && availableTargets.length > 0 && (
-        <section>
-          <h2>إضافة قاعدة جديدة</h2>
+        <section className={CARD}>
+          <h2 className={SECTION_TITLE}>إضافة قاعدة جديدة</h2>
           <select
             value={
               addingTarget ? `${addingTarget.scope}:${addingTarget.scopeId}` : ""
@@ -185,6 +195,7 @@ export function PriceRulesWorkspace({
               );
               setAddingTarget(target ?? null);
             }}
+            className={`${SELECT} mt-4 w-full sm:w-80`}
           >
             <option value="">اختر نطاقاً…</option>
             {availableTargets.map((target) => (
@@ -197,13 +208,14 @@ export function PriceRulesWorkspace({
             ))}
           </select>
           {addingTarget && (
-            <PriceRuleEditForm
-              rule={null}
-              scope={addingTarget.scope}
-              scopeId={addingTarget.scopeId}
-              scopeLabel={addingTarget.label}
-              onSaved={refresh}
-            />
+            <div className={`mt-4 ${FIELDSET}`}>
+              <PriceRuleEditForm
+                rule={null}
+                scope={addingTarget.scope}
+                scopeId={addingTarget.scopeId}
+                onSaved={refresh}
+              />
+            </div>
           )}
         </section>
       )}
