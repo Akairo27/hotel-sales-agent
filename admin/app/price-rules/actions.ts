@@ -3,7 +3,7 @@
 import { revalidatePath } from "next/cache";
 import { createClient } from "@/utils/supabase/server";
 import { getCurrentAppUser } from "@/lib/session";
-import { translatePricingError } from "@/lib/postgresErrors";
+import { translateConstraintError } from "@/lib/postgresErrors";
 import { validateLeadTimeBands, validateOccupancyBands } from "@/lib/priceRuleBands";
 import type { DemandCurve, MinProfitByLeadTime, PriceRuleScope } from "@/lib/types";
 
@@ -108,7 +108,7 @@ export async function upsertPriceRule(
     new_demand_curve: demandCurve,
   });
   if (error) {
-    return { error: translatePricingError(error.message) };
+    return { error: translateConstraintError(error.message) };
   }
   revalidatePath(PRICE_RULES_PATH);
   return {};
@@ -129,7 +129,7 @@ export async function setPriceRuleActive(
     new_is_active: isActive,
   });
   if (error) {
-    return { error: translatePricingError(error.message) };
+    return { error: translateConstraintError(error.message) };
   }
   revalidatePath(PRICE_RULES_PATH);
   return {};

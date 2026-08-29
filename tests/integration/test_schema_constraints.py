@@ -10,6 +10,7 @@ from typing import Any
 
 import psycopg
 import pytest
+from psycopg import sql
 
 from tests.integration._seed import seed_actor
 
@@ -270,22 +271,26 @@ def test_rls_denies_anon_even_when_granted_table_select(
 def test_rls_denies_authenticated_even_when_granted_table_select(
     db_conn: psycopg.Connection[Any],
 ) -> None:
+    """authenticated already holds SELECT on hotels permanently — migration
+    0014 grants it so the dashboard can read the table — and this session
+    sets no request.jwt.claim.sub, so current_app_role() is NULL and
+    hotels_select_for_active_users hides every row anyway. That is the
+    assertion: the grant is real, and RLS still returns nothing.
+
+    Neither the grant nor schema USAGE is set up or torn down here. Both
+    belong to migrations (0014 and 0010), not to this test: a teardown
+    REVOKE would strip them for the rest of the session, breaking every
+    later test that reads hotels as authenticated rather than undoing
+    anything this test did.
+    """
     _seed_single_room_night(db_conn)
 
-    db_conn.execute("GRANT USAGE ON SCHEMA public TO authenticated")
-    db_conn.execute("GRANT SELECT ON hotels TO authenticated")
+    db_conn.execute("SET SESSION AUTHORIZATION authenticated")
     try:
-        db_conn.execute("SET SESSION AUTHORIZATION authenticated")
         rows = db_conn.execute("SELECT * FROM hotels").fetchall()
         assert rows == []
     finally:
         db_conn.execute("RESET SESSION AUTHORIZATION")
-        db_conn.execute("REVOKE SELECT ON hotels FROM authenticated")
-        # Not revoking USAGE ON SCHEMA public here: migration 0010 grants it
-        # to authenticated permanently for the whole app, not this test —
-        # revoking it would strip every later test's ability to resolve an
-        # unqualified table name as authenticated, not just undo this test's
-        # own GRANT SELECT ON hotels above.
 
 
 def test_service_role_bypasses_rls(db_conn: psycopg.Connection[Any]) -> None:
@@ -715,3 +720,132 @@ def test_quotes_nights_override_night_needs_no_computation_detail(
     )
     row = db_conn.execute("SELECT count(*) FROM quotes").fetchone()
     assert row == (1,)
+
+
+def _seed_bare_hotel(conn: psycopg.Connection[Any]) -> int:
+    return _returning_id(
+        conn, "INSERT INTO hotels (hotel_name) VALUES ('Test Hotel') RETURNING id"
+    )
+
+
+@pytest.mark.parametrize(
+    ("column", "value", "constraint"),
+    [
+        ("distance_to_haram_meters", 0, "hotels_distance_to_haram_positive"),
+        ("distance_to_haram_meters", -250, "hotels_distance_to_haram_positive"),
+        ("star_rating", 0, "hotels_star_rating_valid"),
+        ("star_rating", 6, "hotels_star_rating_valid"),
+        ("address_text", "   ", "hotels_address_text_not_blank"),
+        ("address_text", "", "hotels_address_text_not_blank"),
+    ],
+)
+def test_hotel_detail_columns_reject_invalid_values(
+    db_conn: psycopg.Connection[Any], column: str, value: object, constraint: str
+) -> None:
+    """Migration 0023's detail columns. A blank address is rejected as well
+    as an empty one: `length(btrim(...)) > 0` is what stops a row of spaces
+    being stored as if it were a real address."""
+    hotel_id = _seed_bare_hotel(db_conn)
+
+    with pytest.raises(psycopg.errors.CheckViolation, match=constraint):
+        db_conn.execute(
+            sql.SQL("UPDATE hotels SET {} = %s WHERE id = %s").format(
+                sql.Identifier(column)
+            ),
+            (value, hotel_id),
+        )
+
+
+def test_hotel_detail_columns_accept_null(db_conn: psycopg.Connection[Any]) -> None:
+    """Each CHECK spells out `IS NULL OR ...` deliberately: the columns are
+    nullable because migrations are forward-only and there is no honest
+    default for a real hotel's distance from the Haram. This pins that
+    NULL really is accepted, rather than leaving it to a bare comparison
+    that would admit NULL by accident."""
+    hotel_id = _seed_bare_hotel(db_conn)
+
+    db_conn.execute(
+        "UPDATE hotels SET distance_to_haram_meters = NULL, star_rating = NULL, "
+        "address_text = NULL WHERE id = %s",
+        (hotel_id,),
+    )
+    row = db_conn.execute(
+        "SELECT distance_to_haram_meters, star_rating, address_text FROM hotels "
+        "WHERE id = %s",
+        (hotel_id,),
+    ).fetchone()
+    assert row == (None, None, None)
+
+
+def test_hotel_is_active_defaults_to_true(db_conn: psycopg.Connection[Any]) -> None:
+    """Retiring a hotel has to be a flag: migration 0014 grants DELETE on
+    hotels to no role but service_role, and existing rows predate 0023."""
+    hotel_id = _seed_bare_hotel(db_conn)
+
+    row = db_conn.execute(
+        "SELECT is_active FROM hotels WHERE id = %s", (hotel_id,)
+    ).fetchone()
+    assert row == (True,)
+
+
+@pytest.mark.parametrize(
+    ("column", "value", "constraint"),
+    [
+        ("capacity_adults", 0, "room_types_capacity_adults_valid"),
+        ("capacity_adults", 21, "room_types_capacity_adults_valid"),
+        ("size_sqm", 0, "room_types_size_sqm_positive"),
+        ("size_sqm", -12, "room_types_size_sqm_positive"),
+        ("bed_configuration", "king", "room_types_bed_configuration_valid"),
+        ("bed_configuration", "", "room_types_bed_configuration_valid"),
+    ],
+)
+def test_room_type_detail_columns_reject_invalid_values(
+    db_conn: psycopg.Connection[Any], column: str, value: object, constraint: str
+) -> None:
+    room_type_id = _returning_id(
+        db_conn,
+        "INSERT INTO room_types (hotel_id, room_type_name) VALUES (%s, 'Standard') "
+        "RETURNING id",
+        (_seed_bare_hotel(db_conn),),
+    )
+
+    with pytest.raises(psycopg.errors.CheckViolation, match=constraint):
+        db_conn.execute(
+            sql.SQL("UPDATE room_types SET {} = %s WHERE id = %s").format(
+                sql.Identifier(column)
+            ),
+            (value, room_type_id),
+        )
+
+
+def test_hotel_amenities_reject_an_unknown_amenity(
+    db_conn: psycopg.Connection[Any],
+) -> None:
+    """The closed list is the whole point of storing amenities as rows: it
+    is what stops the agent describing a facility the hotel does not have.
+    Widening it is a one-line forward migration, never an ad-hoc insert."""
+    hotel_id = _seed_bare_hotel(db_conn)
+
+    with pytest.raises(
+        psycopg.errors.CheckViolation, match="hotel_amenities_known_amenity"
+    ):
+        db_conn.execute(
+            "INSERT INTO hotel_amenities (hotel_id, amenity) VALUES (%s, 'helipad')",
+            (hotel_id,),
+        )
+
+
+def test_hotel_amenities_reject_a_duplicate(db_conn: psycopg.Connection[Any]) -> None:
+    """(hotel_id, amenity) is the primary key, so "has wifi" cannot be
+    recorded twice and a removal never has to delete more than one row."""
+    hotel_id = _seed_bare_hotel(db_conn)
+    db_conn.execute(
+        "INSERT INTO hotel_amenities (hotel_id, amenity) VALUES (%s, 'wifi')",
+        (hotel_id,),
+    )
+
+    with pytest.raises(psycopg.errors.UniqueViolation):
+        db_conn.execute(
+            "INSERT INTO hotel_amenities (hotel_id, amenity) VALUES (%s, 'wifi')",
+            (hotel_id,),
+        )

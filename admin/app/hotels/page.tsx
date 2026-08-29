@@ -3,6 +3,7 @@ import { redirect } from "next/navigation";
 import { createClient } from "@/utils/supabase/server";
 import { getCurrentAppUser } from "@/lib/session";
 import type { Hotel } from "@/lib/types";
+import { missingHotelProfileFields } from "@/lib/hotelDetails";
 import { ALERT_ERROR, BUTTON_PRIMARY, BUTTON_SECONDARY, CARD, INPUT, LABEL, SECTION_TITLE } from "@/lib/ui";
 import { AppShell } from "@/app/_components/AppShell";
 import { PageHeader } from "@/app/_components/PageHeader";
@@ -22,7 +23,10 @@ export default async function HotelsPage({
   const supabase = await createClient();
   const { data: hotels } = await supabase
     .from("hotels")
-    .select("id, hotel_name, created_at")
+    .select(
+      "id, hotel_name, distance_to_haram_meters, star_rating, address_text, " +
+        "check_in_time, check_out_time, is_active, created_at",
+    )
     .order("hotel_name")
     .overrideTypes<Hotel[], { merge: false }>();
 
@@ -42,12 +46,17 @@ export default async function HotelsPage({
         {(hotels ?? []).map((hotel) => (
           <li key={hotel.id} className={CARD}>
             <div className="flex flex-wrap items-center justify-between gap-4">
-              <Link
-                href={`/hotels/${hotel.id}`}
-                className="text-base font-medium text-foreground transition hover:text-accent"
-              >
-                {hotel.hotel_name}
-              </Link>
+              <div>
+                <Link
+                  href={`/hotels/${hotel.id}`}
+                  className="text-base font-medium text-foreground transition hover:text-accent"
+                >
+                  {hotel.hotel_name}
+                </Link>
+                <span className="mt-1 block text-sm text-muted-foreground">
+                  {summarize(hotel)}
+                </span>
+              </div>
               {isAdmin && <RenameHotelForm hotel={hotel} />}
             </div>
           </li>
@@ -57,6 +66,19 @@ export default async function HotelsPage({
       {isAdmin && <AddHotelForm />}
     </AppShell>
   );
+}
+
+// The two facts that decide whether a hotel is worth opening — how far it
+// is from the Haram and how it is rated — plus an explicit flag when the
+// profile is too incomplete for the agent to describe it at all.
+function summarize(hotel: Hotel): string {
+  const missing = missingHotelProfileFields(hotel);
+  if (missing.length > 0) {
+    return `ملف غير مكتمل — ناقص: ${missing.join("، ")}`;
+  }
+  const distance = `${hotel.distance_to_haram_meters} متر عن الحرم`;
+  const stars = `${hotel.star_rating} نجوم`;
+  return hotel.is_active ? `${distance} · ${stars}` : `${distance} · ${stars} · موقوف`;
 }
 
 function RenameHotelForm({ hotel }: { hotel: Hotel }) {

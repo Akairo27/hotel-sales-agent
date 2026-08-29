@@ -1,14 +1,14 @@
 import { describe, expect, it } from "vitest";
 import { renderToStaticMarkup } from "react-dom/server";
 import { PriceOverrideForm } from "./PriceOverrideForm";
-import type { Hotel, RoomType } from "@/lib/types";
+import type { HotelRef, RoomTypeRef } from "@/lib/types";
 
-const hotels: Hotel[] = [
+const hotels: HotelRef[] = [
   { id: 1, hotel_name: "فندق الاختبار", created_at: "2026-08-01T00:00:00Z" },
   { id: 2, hotel_name: "فندق آخر", created_at: "2026-08-01T00:00:00Z" },
 ];
 
-const roomTypes: RoomType[] = [
+const roomTypes: RoomTypeRef[] = [
   { id: 10, hotel_id: 1, room_type_name: "غرفة قياسية", created_at: "2026-08-01T00:00:00Z" },
   { id: 11, hotel_id: 2, room_type_name: "جناح ملكي", created_at: "2026-08-01T00:00:00Z" },
 ];

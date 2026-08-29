@@ -1,7 +1,7 @@
 "use client";
 
 import { useState } from "react";
-import type { Hotel, PriceOverride, RoomType } from "@/lib/types";
+import type { HotelRef, PriceOverride, RoomTypeRef } from "@/lib/types";
 import {
   ALERT_ERROR,
   BUTTON_DANGER,
@@ -18,8 +18,8 @@ import { endPriceOverrideNow } from "./actions";
 
 interface PriceOverridesWorkspaceProps {
   initialOverrides: PriceOverride[];
-  hotels: Hotel[];
-  roomTypes: RoomType[];
+  hotels: HotelRef[];
+  roomTypes: RoomTypeRef[];
   canEdit: boolean;
 }
 
