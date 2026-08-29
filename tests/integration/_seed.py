@@ -7,6 +7,7 @@ from __future__ import annotations
 
 from datetime import UTC, date, datetime, timedelta
 from typing import Any
+from uuid import uuid4
 
 import psycopg
 from psycopg.types.json import Json
@@ -253,3 +254,85 @@ def seed_allotment_nights(
             "VALUES (%s, %s, %s)",
             (allotment_id, night, total_rooms),
         )
+
+
+# One override-applied night, no computation-detail fields required — the
+# minimal structurally valid quotes.nights shape. See migration
+# 0009_quotes_nights_audit.sql.
+_VALID_QUOTE_NIGHTS = (
+    '[{"date": "2026-09-01", "season_id": 1, "ask": 20000, "min_allowed": 10000, '
+    '"override_applied": true}]'
+)
+
+
+def seed_quote(
+    conn: psycopg.Connection[Any],
+    hotel_id: int,
+    room_type_id: int,
+    *,
+    customer_phone: str | None = None,
+    conversation_id: int | None = None,
+    ask_price_total: int = 20_000,
+    min_allowed_total: int = 10_000,
+) -> int:
+    return returning_id(
+        conn,
+        "INSERT INTO quotes (hotel_id, room_type_id, check_in, check_out, rooms, "
+        "ask_price_total, min_allowed_total, nights, negotiation_open, "
+        "customer_phone, conversation_id) "
+        "VALUES (%s, %s, '2026-09-01', '2026-09-02', 1, %s, %s, %s::jsonb, "
+        "true, %s, %s) RETURNING id",
+        (
+            hotel_id,
+            room_type_id,
+            ask_price_total,
+            min_allowed_total,
+            _VALID_QUOTE_NIGHTS,
+            customer_phone,
+            conversation_id,
+        ),
+    )
+
+
+def seed_hold(
+    conn: psycopg.Connection[Any],
+    hotel_id: int,
+    room_type_id: int,
+    *,
+    check_in: date = date(2026, 9, 1),
+    check_out: date = date(2026, 9, 2),
+    rooms: int = 1,
+    expires_at: datetime | None = None,
+) -> int:
+    """Inserts a holds row directly, bypassing create_hold — for tests that
+    need a pre-existing hold (e.g. a bookings row referencing it) without
+    exercising services/inventory's own transaction/locking logic. A random
+    idempotency_key per call satisfies the UNIQUE constraint (migration
+    0005) without callers having to invent one."""
+    if expires_at is None:
+        expires_at = datetime.now(UTC) + timedelta(hours=12)
+    return returning_id(
+        conn,
+        "INSERT INTO holds (hotel_id, room_type_id, check_in, check_out, rooms, "
+        "expires_at, requires_full_payment, idempotency_key) "
+        "VALUES (%s, %s, %s, %s, %s, %s, false, %s) RETURNING id",
+        (
+            hotel_id,
+            room_type_id,
+            check_in,
+            check_out,
+            rooms,
+            expires_at,
+            f"test-hold-{uuid4()}",
+        ),
+    )
+
+
+def seed_conversation(
+    conn: psycopg.Connection[Any], *, customer_phone: str = "+966500000001"
+) -> int:
+    return returning_id(
+        conn,
+        "INSERT INTO conversations (customer_phone) VALUES (%s) RETURNING id",
+        (customer_phone,),
+    )
