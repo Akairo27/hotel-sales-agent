@@ -1,8 +1,20 @@
-import Link from "next/link";
 import { redirect } from "next/navigation";
 import { createClient } from "@/utils/supabase/server";
 import { getCurrentAppUser } from "@/lib/session";
 import type { AllotmentForDashboard, Hotel, RoomType } from "@/lib/types";
+import {
+  ALERT_ERROR,
+  ALERT_STATUS,
+  BUTTON_SECONDARY,
+  INPUT,
+  TABLE,
+  TABLE_ROW,
+  TABLE_WRAPPER,
+  TD,
+  TH,
+} from "@/lib/ui";
+import { AppShell } from "@/app/_components/AppShell";
+import { PageHeader } from "@/app/_components/PageHeader";
 import { updateAllotmentCost } from "./actions";
 
 export default async function AllotmentsPage({
@@ -38,50 +50,61 @@ export default async function AllotmentsPage({
   const canEditCost = appUser.app_role === "admin" && appUser.can_view_cost;
 
   return (
-    <main>
-      <p>
-        <Link href="/dashboard">&larr; لوحة التحكم</Link>
-      </p>
-      <h1>التكلفة</h1>
-      {error && <p role="alert">{error}</p>}
-      {!appUser.can_view_cost && <p>لا تملك صلاحية عرض التكلفة — راجع شاشة الصلاحيات.</p>}
-      <table>
-        <thead>
-          <tr>
-            <th>الفندق</th>
-            <th>نوع الغرفة</th>
-            <th>التاريخ</th>
-            <th>عدد الغرف</th>
-            <th>التكلفة لليلة (هللة)</th>
-          </tr>
-        </thead>
-        <tbody>
-          {(allotments ?? []).map((allotment) => (
-            <tr key={allotment.id}>
-              <td>{hotelNames.get(allotment.hotel_id) ?? allotment.hotel_id}</td>
-              <td>{roomTypeNames.get(allotment.room_type_id) ?? allotment.room_type_id}</td>
-              <td>{allotment.stay_date}</td>
-              <td>{allotment.total_rooms}</td>
-              <td>
-                {canEditCost ? (
-                  <CostForm allotment={allotment} />
-                ) : (
-                  (allotment.cost_per_night ?? "—")
-                )}
-              </td>
+    <AppShell appUser={appUser}>
+      <PageHeader title="التكلفة" description="تكلفة الليلة لكل نوع غرفة في كل تاريخ." />
+
+      {error && (
+        <p role="alert" className={`${ALERT_ERROR} mb-6`}>
+          {error}
+        </p>
+      )}
+      {!appUser.can_view_cost && (
+        <p className={`${ALERT_STATUS} mb-6`}>لا تملك صلاحية عرض التكلفة — راجع شاشة الصلاحيات.</p>
+      )}
+
+      <div className={TABLE_WRAPPER}>
+        <table className={TABLE}>
+          <thead>
+            <tr>
+              <th className={TH}>الفندق</th>
+              <th className={TH}>نوع الغرفة</th>
+              <th className={TH}>التاريخ</th>
+              <th className={TH}>عدد الغرف</th>
+              <th className={TH}>التكلفة لليلة (هللة)</th>
             </tr>
-          ))}
-        </tbody>
-      </table>
-    </main>
+          </thead>
+          <tbody>
+            {(allotments ?? []).map((allotment) => (
+              <tr key={allotment.id} className={TABLE_ROW}>
+                <td className={TD}>{hotelNames.get(allotment.hotel_id) ?? allotment.hotel_id}</td>
+                <td className={TD}>
+                  {roomTypeNames.get(allotment.room_type_id) ?? allotment.room_type_id}
+                </td>
+                <td className={TD}>{allotment.stay_date}</td>
+                <td className={TD}>{allotment.total_rooms}</td>
+                <td className={TD}>
+                  {canEditCost ? (
+                    <CostForm allotment={allotment} />
+                  ) : (
+                    (allotment.cost_per_night ?? "—")
+                  )}
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </AppShell>
   );
 }
 
 function CostForm({ allotment }: { allotment: AllotmentForDashboard }) {
   const updateThisAllotmentsCost = updateAllotmentCost.bind(null, allotment.id);
   return (
-    <form action={updateThisAllotmentsCost}>
-      <label htmlFor={`cost-${allotment.id}`}>التكلفة لليلة (هللة)</label>
+    <form action={updateThisAllotmentsCost} className="flex items-center gap-2">
+      <label htmlFor={`cost-${allotment.id}`} className="sr-only">
+        التكلفة لليلة (هللة)
+      </label>
       <input
         id={`cost-${allotment.id}`}
         name="cost_per_night"
@@ -90,8 +113,11 @@ function CostForm({ allotment }: { allotment: AllotmentForDashboard }) {
         step={1}
         defaultValue={allotment.cost_per_night ?? undefined}
         required
+        className={`${INPUT} w-32`}
       />
-      <button type="submit">حفظ</button>
+      <button type="submit" className={BUTTON_SECONDARY}>
+        حفظ
+      </button>
     </form>
   );
 }

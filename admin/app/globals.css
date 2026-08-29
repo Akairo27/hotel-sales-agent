@@ -1,26 +1,56 @@
 @import "tailwindcss";
 
+/* A dark, gold-accented hospitality palette. The dashboard is dark-only by
+   design — there is deliberately no `prefers-color-scheme: light` block to
+   keep in sync, because a second palette doubles the surface area for a
+   contrast regression on screens that show money. `color-scheme` is the one
+   thing a token cannot express: it tells the browser to render native
+   controls, scrollbars and autofill backgrounds dark too, which otherwise
+   punch white holes through the page. */
 :root {
-  --background: #ffffff;
-  --foreground: #171717;
+  color-scheme: dark;
+
+  --background: #14161a;
+  --surface: #1c1f24;
+  --surface-subtle: #232830;
+  --shell: #101216;
+  --foreground: #ece9e3;
+  --muted-foreground: #a29c90;
+  --border: #2b2f35;
+  --border-strong: #3a3f47;
+  --accent: #d4b06a;
+  --accent-hover: #e2c184;
+  --accent-foreground: #14161a;
+  --danger: #f0a88a;
+  --danger-background: #2a1a14;
 }
 
 @theme inline {
   --color-background: var(--background);
   --color-foreground: var(--foreground);
-  --font-sans: var(--font-geist-sans);
-  --font-mono: var(--font-geist-mono);
-}
-
-@media (prefers-color-scheme: dark) {
-  :root {
-    --background: #0a0a0a;
-    --foreground: #ededed;
-  }
+  --color-surface: var(--surface);
+  --color-surface-subtle: var(--surface-subtle);
+  --color-shell: var(--shell);
+  --color-border: var(--border);
+  --color-border-strong: var(--border-strong);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-accent: var(--accent);
+  --color-accent-hover: var(--accent-hover);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-danger: var(--danger);
+  --color-danger-background: var(--danger-background);
+  --font-sans: var(--font-sans);
 }
 
 body {
-  background: var(--background);
-  color: var(--foreground);
-  font-family: Arial, Helvetica, sans-serif;
+  font-family: var(--font-sans), Arial, Helvetica, sans-serif;
+}
+
+/* On a near-black surface the UA's default focus ring is effectively
+   invisible. This covers links and native controls that carry no explicit
+   ring utility from lib/ui.ts; the elements that do declare one still win,
+   since `.focus\:outline-none:focus` outranks a bare `:focus-visible`. */
+:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
 }

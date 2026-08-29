@@ -1,8 +1,10 @@
-import Link from "next/link";
 import { redirect } from "next/navigation";
 import { createClient } from "@/utils/supabase/server";
 import { getCurrentAppUser } from "@/lib/session";
 import type { Season } from "@/lib/types";
+import { ALERT_ERROR } from "@/lib/ui";
+import { AppShell } from "@/app/_components/AppShell";
+import { PageHeader } from "@/app/_components/PageHeader";
 import { SeasonsWorkspace } from "./SeasonsWorkspace";
 
 export default async function SeasonsPage({
@@ -26,16 +28,19 @@ export default async function SeasonsPage({
     .overrideTypes<Season[], { merge: false }>();
 
   return (
-    <main>
-      <p>
-        <Link href="/dashboard">&larr; لوحة التحكم</Link>
-      </p>
-      <h1>المواسم</h1>
-      {error && <p role="alert">{error}</p>}
-      <SeasonsWorkspace
-        initialSeasons={seasons ?? []}
-        isAdmin={appUser.app_role === "admin"}
+    <AppShell appUser={appUser}>
+      <PageHeader
+        title="المواسم"
+        description="تقويم المواسم وأولوياتها، مع معاينة التغطية لسنة هجرية كاملة."
       />
-    </main>
+
+      {error && (
+        <p role="alert" className={`${ALERT_ERROR} mb-6`}>
+          {error}
+        </p>
+      )}
+
+      <SeasonsWorkspace initialSeasons={seasons ?? []} isAdmin={appUser.app_role === "admin"} />
+    </AppShell>
   );
 }

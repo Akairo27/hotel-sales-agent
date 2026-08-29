@@ -1,8 +1,10 @@
-import Link from "next/link";
 import { redirect } from "next/navigation";
 import { createClient } from "@/utils/supabase/server";
 import { getCurrentAppUser } from "@/lib/session";
 import type { Hotel, PriceRuleForDashboard, RoomType, Season } from "@/lib/types";
+import { ALERT_STATUS } from "@/lib/ui";
+import { AppShell } from "@/app/_components/AppShell";
+import { PageHeader } from "@/app/_components/PageHeader";
 import { PriceRulesWorkspace } from "./PriceRulesWorkspace";
 
 export default async function PriceRulesPage() {
@@ -42,14 +44,18 @@ export default async function PriceRulesPage() {
   const canEdit = appUser.app_role === "admin" && appUser.can_view_cost;
 
   return (
-    <main>
-      <p>
-        <Link href="/dashboard">&larr; لوحة التحكم</Link>
-      </p>
-      <h1>قواعد التسعير</h1>
+    <AppShell appUser={appUser}>
+      <PageHeader
+        title="قواعد التسعير"
+        description="قواعد الهامش ومنحنى الطلب، محلولة حسب النطاق الأضيق أولاً."
+      />
+
       {!appUser.can_view_cost && (
-        <p>لا تملك صلاحية عرض التكلفة — الهامش وحد الربح الأدنى مخفيان عنك.</p>
+        <p className={`${ALERT_STATUS} mb-6`}>
+          لا تملك صلاحية عرض التكلفة — الهامش وحد الربح الأدنى مخفيان عنك.
+        </p>
       )}
+
       <PriceRulesWorkspace
         initialRules={rules ?? []}
         hotels={hotels ?? []}
@@ -57,6 +63,6 @@ export default async function PriceRulesPage() {
         seasons={seasons ?? []}
         canEdit={canEdit}
       />
-    </main>
+    </AppShell>
   );
 }

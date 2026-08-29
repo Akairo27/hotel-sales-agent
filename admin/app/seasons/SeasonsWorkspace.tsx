@@ -53,8 +53,8 @@ export function SeasonsWorkspace({ initialSeasons, isAdmin }: SeasonsWorkspacePr
   }
 
   return (
-    <div style={{ display: "flex", gap: "2rem", flexWrap: "wrap" }}>
-      <div style={{ flex: "1 1 320px" }}>
+    <div className="flex flex-wrap gap-8">
+      <div className="min-w-80 flex-1">
         <SeasonList
           seasons={seasons}
           isAdmin={isAdmin}
@@ -63,7 +63,7 @@ export function SeasonsWorkspace({ initialSeasons, isAdmin }: SeasonsWorkspacePr
           reorderError={reorderError}
         />
       </div>
-      <div style={{ flex: "2 1 480px" }}>
+      <div className="min-w-[30rem] flex-[2]">
         <CalendarPreview seasons={seasons} />
       </div>
     </div>

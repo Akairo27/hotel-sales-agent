@@ -3,6 +3,9 @@ import { redirect } from "next/navigation";
 import { createClient } from "@/utils/supabase/server";
 import { getCurrentAppUser } from "@/lib/session";
 import type { Hotel } from "@/lib/types";
+import { ALERT_ERROR, BUTTON_PRIMARY, BUTTON_SECONDARY, CARD, INPUT, LABEL, SECTION_TITLE } from "@/lib/ui";
+import { AppShell } from "@/app/_components/AppShell";
+import { PageHeader } from "@/app/_components/PageHeader";
 import { createHotel, renameHotel } from "./actions";
 
 export default async function HotelsPage({
@@ -26,48 +29,74 @@ export default async function HotelsPage({
   const isAdmin = appUser.app_role === "admin";
 
   return (
-    <main>
-      <p>
-        <Link href="/dashboard">&larr; لوحة التحكم</Link>
-      </p>
-      <h1>الفنادق</h1>
-      {error && <p role="alert">{error}</p>}
-      <ul>
+    <AppShell appUser={appUser}>
+      <PageHeader title="الفنادق" description="افتح فندقاً لإدارة أنواع غرفه." />
+
+      {error && (
+        <p role="alert" className={`${ALERT_ERROR} mb-6`}>
+          {error}
+        </p>
+      )}
+
+      <ul className="space-y-3">
         {(hotels ?? []).map((hotel) => (
-          <li key={hotel.id}>
-            <Link href={`/hotels/${hotel.id}`}>{hotel.hotel_name}</Link>
-            {isAdmin && <RenameHotelForm hotel={hotel} />}
+          <li key={hotel.id} className={CARD}>
+            <div className="flex flex-wrap items-center justify-between gap-4">
+              <Link
+                href={`/hotels/${hotel.id}`}
+                className="text-base font-medium text-foreground transition hover:text-accent"
+              >
+                {hotel.hotel_name}
+              </Link>
+              {isAdmin && <RenameHotelForm hotel={hotel} />}
+            </div>
           </li>
         ))}
       </ul>
+
       {isAdmin && <AddHotelForm />}
-    </main>
+    </AppShell>
   );
 }
 
 function RenameHotelForm({ hotel }: { hotel: Hotel }) {
   const renameThisHotel = renameHotel.bind(null, hotel.id);
   return (
-    <form action={renameThisHotel}>
-      <label htmlFor={`hotel-name-${hotel.id}`}>الاسم الجديد</label>
-      <input
-        id={`hotel-name-${hotel.id}`}
-        name="hotel_name"
-        defaultValue={hotel.hotel_name}
-        required
-      />
-      <button type="submit">حفظ</button>
+    <form action={renameThisHotel} className="flex items-end gap-2">
+      <div className="w-44">
+        <label htmlFor={`hotel-name-${hotel.id}`} className="mb-1 block text-xs text-muted-foreground">
+          الاسم الجديد
+        </label>
+        <input
+          id={`hotel-name-${hotel.id}`}
+          name="hotel_name"
+          defaultValue={hotel.hotel_name}
+          required
+          className={`${INPUT} w-full`}
+        />
+      </div>
+      <button type="submit" className={BUTTON_SECONDARY}>
+        حفظ
+      </button>
     </form>
   );
 }
 
 function AddHotelForm() {
   return (
-    <form action={createHotel}>
-      <h2>إضافة فندق</h2>
-      <label htmlFor="new-hotel-name">اسم الفندق</label>
-      <input id="new-hotel-name" name="hotel_name" required />
-      <button type="submit">إضافة</button>
-    </form>
+    <div className={`${CARD} mt-8`}>
+      <h2 className={SECTION_TITLE}>إضافة فندق</h2>
+      <form action={createHotel} className="mt-4 flex flex-wrap items-end gap-3">
+        <div className="min-w-48 flex-1">
+          <label htmlFor="new-hotel-name" className={LABEL}>
+            اسم الفندق
+          </label>
+          <input id="new-hotel-name" name="hotel_name" required className={`${INPUT} mt-1 w-full`} />
+        </div>
+        <button type="submit" className={BUTTON_PRIMARY}>
+          إضافة
+        </button>
+      </form>
+    </div>
   );
 }

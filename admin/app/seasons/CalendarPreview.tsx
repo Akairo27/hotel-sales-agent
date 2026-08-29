@@ -13,6 +13,7 @@ import {
 } from "@/lib/seasonCalendar";
 import { monthName } from "@/lib/monthNames";
 import { seasonColor, GAP_COLOR } from "@/lib/seasonColor";
+import { CARD, SECTION_TITLE, SELECT } from "@/lib/ui";
 
 interface CalendarPreviewProps {
   seasons: Season[];
@@ -90,11 +91,15 @@ export function CalendarPreview({ seasons }: CalendarPreviewProps) {
   );
 
   return (
-    <section>
-      <h2>معاينة التقويم</h2>
-      <label>
+    <section className={CARD}>
+      <h2 className={SECTION_TITLE}>معاينة التقويم</h2>
+      <label className="mt-4 block text-sm font-medium text-foreground">
         السنة الهجرية
-        <select value={hijriYear} onChange={(event) => setHijriYear(Number(event.target.value))}>
+        <select
+          value={hijriYear}
+          onChange={(event) => setHijriYear(Number(event.target.value))}
+          className={`${SELECT} mt-1 w-40`}
+        >
           {yearOptions.map((year) => (
             <option key={year} value={year}>
               {year} هـ
@@ -103,70 +108,59 @@ export function CalendarPreview({ seasons }: CalendarPreviewProps) {
         </select>
       </label>
 
-      <ul>
+      <ul className="mt-4 flex flex-wrap gap-x-4 gap-y-2">
         {nonDefaultSeasons.map((season) => (
-          <li key={season.id}>
+          <li key={season.id} className="flex items-center gap-1.5 text-sm text-foreground">
             <span
               aria-hidden
-              style={{
-                display: "inline-block",
-                width: "0.9em",
-                height: "0.9em",
-                backgroundColor: seasonColor(season.id),
-                marginInlineEnd: "0.4em",
-              }}
+              className="h-3 w-3 shrink-0 rounded-full"
+              style={{ backgroundColor: seasonColor(season.id) }}
             />
             {season.season_name}
           </li>
         ))}
-        <li>
-          <span
-            aria-hidden
-            style={{
-              display: "inline-block",
-              width: "0.9em",
-              height: "0.9em",
-              backgroundColor: GAP_COLOR,
-              marginInlineEnd: "0.4em",
-            }}
-          />
+        <li className="flex items-center gap-1.5 text-sm text-foreground">
+          <span aria-hidden className="h-3 w-3 shrink-0 rounded-full" style={{ backgroundColor: GAP_COLOR }} />
           {defaultSeasonName} (افتراضي — يغطي الفجوات)
         </li>
       </ul>
 
-      {months.map((monthDays, index) => {
-        const monthNumber = index + 1;
-        if (monthDays.length === 0) {
-          return null;
-        }
-        const firstDay = monthDays[0];
-        const lastDay = monthDays[monthDays.length - 1];
-        return (
-          <div key={monthNumber}>
-            <strong>{monthName("hijri", monthNumber)}</strong>{" "}
-            <span style={{ color: "#6b7280", fontSize: "0.85em" }}>
-              {firstDay ? formatGregorian(firstDay.date) : ""}
-              {" – "}
-              {lastDay ? formatGregorian(lastDay.date) : ""}
-            </span>
-            <div style={{ display: "flex", gap: "2px" }}>
-              {monthDays.map((day) => (
-                <div
-                  key={day.date.toISOString()}
-                  title={dayLabel(day, defaultSeasonName)}
-                  style={{
-                    width: "14px",
-                    height: "14px",
-                    ...dayStyle(day),
-                  }}
-                />
-              ))}
+      <div className="mt-6 space-y-5">
+        {months.map((monthDays, index) => {
+          const monthNumber = index + 1;
+          if (monthDays.length === 0) {
+            return null;
+          }
+          const firstDay = monthDays[0];
+          const lastDay = monthDays[monthDays.length - 1];
+          return (
+            <div key={monthNumber}>
+              <strong className="text-sm font-medium text-foreground">
+                {monthName("hijri", monthNumber)}
+              </strong>{" "}
+              <span className="text-sm text-muted-foreground">
+                {firstDay ? formatGregorian(firstDay.date) : ""}
+                {" – "}
+                {lastDay ? formatGregorian(lastDay.date) : ""}
+              </span>
+              <div className="mt-2 overflow-x-auto">
+                <div className="flex w-max gap-0.5">
+                  {monthDays.map((day) => (
+                    <div
+                      key={day.date.toISOString()}
+                      title={dayLabel(day, defaultSeasonName)}
+                      className="h-3.5 w-3.5 rounded-sm"
+                      style={dayStyle(day)}
+                    />
+                  ))}
+                </div>
+              </div>
             </div>
-          </div>
-        );
-      })}
+          );
+        })}
+      </div>
 
-      <p style={{ color: "#6b7280", fontSize: "0.85em" }}>
+      <p className="mt-6 text-sm text-muted-foreground">
         المدى المعروض: {formatGregorian(hijriYearGregorianSpan(hijriYear).start)} –{" "}
         {formatGregorian(hijriYearGregorianSpan(hijriYear).end)} (ميلادي)
       </p>

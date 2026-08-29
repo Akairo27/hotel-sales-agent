@@ -32,7 +32,10 @@ describe("PriceOverrideForm", () => {
 
   it("disables the room-type select before a hotel is chosen", () => {
     const html = fieldsetHtml();
-    const selectStart = html.indexOf("نوع الغرفة");
+    // Anchored on the label-select junction itself, not just the label
+    // text "نوع الغرفة" — the form's own "الفندق ونوع الغرفة" section
+    // heading contains that same substring earlier in the markup.
+    const selectStart = html.indexOf("نوع الغرفة<select");
     const selectEnd = html.indexOf("</select>", selectStart);
     expect(html.slice(selectStart, selectEnd)).toContain("disabled=\"\"");
   });

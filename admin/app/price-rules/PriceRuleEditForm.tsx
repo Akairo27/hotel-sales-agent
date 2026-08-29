@@ -12,6 +12,18 @@ import type {
   PriceRuleForDashboard,
   PriceRuleScope,
 } from "@/lib/types";
+import {
+  ACTION_BAR,
+  ALERT_ERROR,
+  BUTTON_DANGER,
+  BUTTON_PRIMARY,
+  BUTTON_SECONDARY,
+  CHECKBOX,
+  CHECKBOX_LABEL,
+  FIELDSET,
+  INPUT,
+  LEGEND,
+} from "@/lib/ui";
 import { BandRowsEditor, type GenericBand } from "./BandRowsEditor";
 import { setPriceRuleActive, upsertPriceRule } from "./actions";
 
@@ -43,7 +55,6 @@ interface PriceRuleEditFormProps {
   rule: PriceRuleForDashboard | null;
   scope: PriceRuleScope;
   scopeId: number | null;
-  scopeLabel: string;
   onSaved: () => void;
 }
 
@@ -59,7 +70,6 @@ export function PriceRuleEditForm({
   rule,
   scope,
   scopeId,
-  scopeLabel,
   onSaved,
 }: PriceRuleEditFormProps) {
   const isGlobal = scope === "global";
@@ -189,111 +199,134 @@ export function PriceRuleEditForm({
   }
 
   return (
-    <div>
-      <h3>{scopeLabel}</h3>
-      {error && <p role="alert">{error}</p>}
+    <div className="space-y-5">
+      {error && (
+        <p role="alert" className={ALERT_ERROR}>
+          {error}
+        </p>
+      )}
 
       {!isGlobal && rule !== null && (
-        <p>
+        <div className="flex flex-wrap items-center gap-3">
           {rule.is_active ? (
-            <button type="button" onClick={() => handleToggleActive(false)}>
+            <button type="button" onClick={() => handleToggleActive(false)} className={BUTTON_DANGER}>
               تعطيل هذه القاعدة
             </button>
           ) : (
-            <button type="button" onClick={() => handleToggleActive(true)}>
+            <button type="button" onClick={() => handleToggleActive(true)} className={BUTTON_SECONDARY}>
               تفعيل هذه القاعدة
             </button>
           )}
           {!rule.is_active && (
-            <strong> — هذه القاعدة معطَّلة ولا تؤثر على التسعير حالياً.</strong>
+            <strong className="text-sm text-danger">
+              هذه القاعدة معطَّلة ولا تؤثر على التسعير حالياً.
+            </strong>
           )}
-        </p>
+        </div>
       )}
 
-      <fieldset>
-        <legend>الهامش المستهدف</legend>
-        {!isGlobal && (
-          <label>
-            <input
-              type="checkbox"
-              checked={overrideMargin}
-              onChange={(event) => setOverrideMargin(event.target.checked)}
-            />
-            تخصيص لهذا النطاق (بدل الوراثة من النطاق الأعم)
-          </label>
-        )}
-        {overrideMargin && (
-          <label>
-            الهامش (نقطة أساس، 10000 = 100%)
-            <input
-              type="number"
-              min={0}
-              step={1}
-              value={marginBps}
-              onChange={(event) => setMarginBps(Number(event.target.value))}
-            />
-          </label>
-        )}
+      <fieldset className={FIELDSET}>
+        <legend className={LEGEND}>الهامش المستهدف</legend>
+        <div className="space-y-3">
+          {!isGlobal && (
+            <label className={CHECKBOX_LABEL}>
+              <input
+                type="checkbox"
+                checked={overrideMargin}
+                onChange={(event) => setOverrideMargin(event.target.checked)}
+                className={CHECKBOX}
+              />
+              تخصيص لهذا النطاق (بدل الوراثة من النطاق الأعم)
+            </label>
+          )}
+          {overrideMargin && (
+            <label className="block text-sm font-medium text-foreground">
+              الهامش (نقطة أساس، 10000 = 100%)
+              <input
+                type="number"
+                min={0}
+                step={1}
+                value={marginBps}
+                onChange={(event) => setMarginBps(Number(event.target.value))}
+                className={`${INPUT} mt-1 w-32`}
+              />
+            </label>
+          )}
+        </div>
       </fieldset>
 
-      <fieldset>
-        <legend>حد الربح الأدنى حسب مدة الحجز</legend>
-        {!isGlobal && (
-          <label>
-            <input
-              type="checkbox"
-              checked={overrideMinProfit}
-              onChange={(event) => setOverrideMinProfit(event.target.checked)}
-            />
-            تخصيص لهذا النطاق
-          </label>
-        )}
-        {overrideMinProfit && (
-          <BandRowsEditor
-            bands={minProfitBands}
-            onChange={setMinProfitBands}
-            valueLabel="الحد الأدنى للربح (هللة)"
-            allowOpenEnded
-          />
-        )}
-      </fieldset>
-
-      <fieldset>
-        <legend>منحنى الطلب</legend>
-        {!isGlobal && (
-          <label>
-            <input
-              type="checkbox"
-              checked={overrideDemandCurve}
-              onChange={(event) => setOverrideDemandCurve(event.target.checked)}
-            />
-            تخصيص لهذا النطاق
-          </label>
-        )}
-        {overrideDemandCurve && (
-          <>
-            <h4>حسب نسبة الإشغال (0 إلى 1)</h4>
+      <fieldset className={FIELDSET}>
+        <legend className={LEGEND}>حد الربح الأدنى حسب مدة الحجز</legend>
+        <div className="space-y-3">
+          {!isGlobal && (
+            <label className={CHECKBOX_LABEL}>
+              <input
+                type="checkbox"
+                checked={overrideMinProfit}
+                onChange={(event) => setOverrideMinProfit(event.target.checked)}
+                className={CHECKBOX}
+              />
+              تخصيص لهذا النطاق
+            </label>
+          )}
+          {overrideMinProfit && (
             <BandRowsEditor
-              bands={occupancyBands}
-              onChange={setOccupancyBands}
-              valueLabel="المضاعِف (نقطة أساس)"
-              allowOpenEnded={false}
-              step={0.01}
-            />
-            <h4>حسب مدة الحجز</h4>
-            <BandRowsEditor
-              bands={demandLeadTimeBands}
-              onChange={setDemandLeadTimeBands}
-              valueLabel="المضاعِف (نقطة أساس)"
+              bands={minProfitBands}
+              onChange={setMinProfitBands}
+              valueLabel="الحد الأدنى للربح (هللة)"
               allowOpenEnded
             />
-          </>
-        )}
+          )}
+        </div>
       </fieldset>
 
-      <button type="button" onClick={handleSave} disabled={saving}>
-        {saving ? "جارٍ الحفظ…" : "حفظ"}
-      </button>
+      <fieldset className={FIELDSET}>
+        <legend className={LEGEND}>منحنى الطلب</legend>
+        <div className="space-y-4">
+          {!isGlobal && (
+            <label className={CHECKBOX_LABEL}>
+              <input
+                type="checkbox"
+                checked={overrideDemandCurve}
+                onChange={(event) => setOverrideDemandCurve(event.target.checked)}
+                className={CHECKBOX}
+              />
+              تخصيص لهذا النطاق
+            </label>
+          )}
+          {overrideDemandCurve && (
+            <>
+              <div>
+                <h4 className="mb-2 text-sm font-medium text-foreground">
+                  حسب نسبة الإشغال (0 إلى 1)
+                </h4>
+                <BandRowsEditor
+                  bands={occupancyBands}
+                  onChange={setOccupancyBands}
+                  valueLabel="المضاعِف (نقطة أساس)"
+                  allowOpenEnded={false}
+                  step={0.01}
+                />
+              </div>
+              <div>
+                <h4 className="mb-2 text-sm font-medium text-foreground">حسب مدة الحجز</h4>
+                <BandRowsEditor
+                  bands={demandLeadTimeBands}
+                  onChange={setDemandLeadTimeBands}
+                  valueLabel="المضاعِف (نقطة أساس)"
+                  allowOpenEnded
+                />
+              </div>
+            </>
+          )}
+        </div>
+      </fieldset>
+
+      <div className={ACTION_BAR}>
+        <button type="button" onClick={handleSave} disabled={saving} className={BUTTON_PRIMARY}>
+          {saving ? "جارٍ الحفظ…" : "حفظ"}
+        </button>
+      </div>
     </div>
   );
 }

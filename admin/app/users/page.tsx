@@ -1,8 +1,11 @@
-import Link from "next/link";
 import { redirect } from "next/navigation";
 import { createClient } from "@/utils/supabase/server";
 import { getCurrentAppUser } from "@/lib/session";
 import type { AppUser } from "@/lib/types";
+import { ROLE_LABELS } from "@/lib/roleLabels";
+import { ALERT_ERROR, BUTTON_SECONDARY, CARD } from "@/lib/ui";
+import { AppShell } from "@/app/_components/AppShell";
+import { PageHeader } from "@/app/_components/PageHeader";
 import { updateAppRole, updateCanViewCost } from "./actions";
 
 export default async function UsersPage({
@@ -27,24 +30,37 @@ export default async function UsersPage({
     .overrideTypes<AppUser[], { merge: false }>();
 
   return (
-    <main>
-      <p>
-        <Link href="/dashboard">&larr; لوحة التحكم</Link>
-      </p>
-      <h1>الصلاحيات</h1>
-      {error && <p role="alert">{error}</p>}
-      <p>كل تغيير هنا يُسجَّل في سجل التغييرات — من غيّر، ماذا، ومتى.</p>
-      <ul>
+    <AppShell appUser={appUser}>
+      <PageHeader
+        title="الصلاحيات"
+        description="كل تغيير هنا يُسجَّل في سجل التغييرات — من غيّر، ماذا، ومتى."
+      />
+
+      {error && (
+        <p role="alert" className={`${ALERT_ERROR} mb-6`}>
+          {error}
+        </p>
+      )}
+
+      <ul className="space-y-3">
         {(users ?? []).map((user) => (
-          <li key={user.id}>
-            <strong>{user.full_name}</strong>
-            {!user.is_active && " (غير نشط)"}
-            <RoleForm user={user} />
-            <CanViewCostForm user={user} />
+          <li key={user.id} className={CARD}>
+            <div className="flex flex-wrap items-center justify-between gap-4">
+              <div>
+                <strong className="text-base font-medium text-foreground">{user.full_name}</strong>
+                {!user.is_active && (
+                  <span className="ms-2 text-sm text-muted-foreground">(غير نشط)</span>
+                )}
+              </div>
+              <div className="flex flex-wrap gap-2">
+                <RoleForm user={user} />
+                <CanViewCostForm user={user} />
+              </div>
+            </div>
           </li>
         ))}
       </ul>
-    </main>
+    </AppShell>
   );
 }
 
@@ -54,8 +70,8 @@ function RoleForm({ user }: { user: AppUser }) {
   return (
     <form action={updateThisUsersRole}>
       <input type="hidden" name="app_role" value={nextRole} />
-      <button type="submit">
-        الدور: {user.app_role} — تحويل إلى {nextRole}
+      <button type="submit" className={BUTTON_SECONDARY}>
+        الدور: {ROLE_LABELS[user.app_role]} — تحويل إلى {ROLE_LABELS[nextRole]}
       </button>
     </form>
   );
@@ -67,7 +83,7 @@ function CanViewCostForm({ user }: { user: AppUser }) {
   return (
     <form action={updateThisUsersCostVisibility}>
       <input type="hidden" name="can_view_cost" value={nextValue} />
-      <button type="submit">
+      <button type="submit" className={BUTTON_SECONDARY}>
         عرض التكلفة: {user.can_view_cost ? "مفعّل" : "غير مفعّل"} —{" "}
         {user.can_view_cost ? "إلغاء" : "تفعيل"}
       </button>

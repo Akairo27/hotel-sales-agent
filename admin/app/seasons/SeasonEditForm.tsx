@@ -4,6 +4,17 @@ import { useState } from "react";
 import type { CalendarType, Season } from "@/lib/types";
 import { endOfMonthSentinel } from "@/lib/seasonCalendar";
 import { monthName, MONTH_NUMBERS } from "@/lib/monthNames";
+import {
+  ACTION_BAR,
+  BUTTON_PRIMARY,
+  CHECKBOX,
+  CHECKBOX_LABEL,
+  FIELDSET,
+  INPUT,
+  LABEL,
+  LEGEND,
+  SELECT,
+} from "@/lib/ui";
 import { updateSeasonBounds } from "./actions";
 
 interface SeasonEditFormProps {
@@ -44,90 +55,105 @@ export function SeasonEditForm({ season, onChange }: SeasonEditFormProps) {
   }
 
   return (
-    <form action={boundAction}>
-      <label>
+    <form action={boundAction} className="space-y-4 border-t border-border pt-4">
+      <label className={LABEL}>
         اسم الموسم
         <input
           name="season_name"
           value={season.season_name}
           onChange={(event) => update({ season_name: event.target.value })}
           required
+          className={`${INPUT} mt-1 w-full`}
         />
       </label>
 
-      <label>
+      <label className={LABEL}>
         التقويم
         <select
           name="calendar_type"
           value={season.calendar_type}
           onChange={(event) => update({ calendar_type: event.target.value as CalendarType })}
+          className={`${SELECT} mt-1 w-full sm:w-64`}
         >
           <option value="hijri">هجري</option>
           <option value="gregorian">ميلادي</option>
         </select>
       </label>
 
-      <fieldset>
-        <legend>البداية</legend>
-        <select
-          name="start_month"
-          value={season.start_month}
-          onChange={(event) => update({ start_month: Number(event.target.value) })}
-        >
-          {MONTH_NUMBERS.map((monthNumber) => (
-            <option key={monthNumber} value={monthNumber}>
-              {monthName(season.calendar_type, monthNumber)}
-            </option>
-          ))}
-        </select>
-        <input
-          type="number"
-          name="start_day"
-          min={1}
-          max={31}
-          value={season.start_day}
-          onChange={(event) => update({ start_day: Number(event.target.value) })}
-          required
-        />
-      </fieldset>
-
-      <fieldset>
-        <legend>النهاية</legend>
-        <select
-          name="end_month"
-          value={season.end_month}
-          onChange={(event) => update({ end_month: Number(event.target.value) })}
-        >
-          {MONTH_NUMBERS.map((monthNumber) => (
-            <option key={monthNumber} value={monthNumber}>
-              {monthName(season.calendar_type, monthNumber)}
-            </option>
-          ))}
-        </select>
-        {endsAtMonthEnd ? (
-          <input type="hidden" name="end_day" value={season.end_day} />
-        ) : (
+      <fieldset className={FIELDSET}>
+        <legend className={LEGEND}>البداية</legend>
+        <div className="flex flex-wrap gap-3">
+          <select
+            name="start_month"
+            value={season.start_month}
+            onChange={(event) => update({ start_month: Number(event.target.value) })}
+            className={`${SELECT} w-40`}
+          >
+            {MONTH_NUMBERS.map((monthNumber) => (
+              <option key={monthNumber} value={monthNumber}>
+                {monthName(season.calendar_type, monthNumber)}
+              </option>
+            ))}
+          </select>
           <input
             type="number"
-            name="end_day"
+            name="start_day"
             min={1}
             max={31}
-            value={season.end_day}
-            onChange={(event) => update({ end_day: Number(event.target.value) })}
+            value={season.start_day}
+            onChange={(event) => update({ start_day: Number(event.target.value) })}
             required
+            className={`${INPUT} w-20`}
           />
-        )}
-        <label>
-          <input
-            type="checkbox"
-            checked={endsAtMonthEnd}
-            onChange={(event) => toggleEndsAtMonthEnd(event.target.checked)}
-          />
-          حتى نهاية الشهر
-        </label>
+        </div>
       </fieldset>
 
-      <button type="submit">حفظ</button>
+      <fieldset className={FIELDSET}>
+        <legend className={LEGEND}>النهاية</legend>
+        <div className="flex flex-wrap items-center gap-3">
+          <select
+            name="end_month"
+            value={season.end_month}
+            onChange={(event) => update({ end_month: Number(event.target.value) })}
+            className={`${SELECT} w-40`}
+          >
+            {MONTH_NUMBERS.map((monthNumber) => (
+              <option key={monthNumber} value={monthNumber}>
+                {monthName(season.calendar_type, monthNumber)}
+              </option>
+            ))}
+          </select>
+          {endsAtMonthEnd ? (
+            <input type="hidden" name="end_day" value={season.end_day} />
+          ) : (
+            <input
+              type="number"
+              name="end_day"
+              min={1}
+              max={31}
+              value={season.end_day}
+              onChange={(event) => update({ end_day: Number(event.target.value) })}
+              required
+              className={`${INPUT} w-20`}
+            />
+          )}
+          <label className={CHECKBOX_LABEL}>
+            <input
+              type="checkbox"
+              checked={endsAtMonthEnd}
+              onChange={(event) => toggleEndsAtMonthEnd(event.target.checked)}
+              className={CHECKBOX}
+            />
+            حتى نهاية الشهر
+          </label>
+        </div>
+      </fieldset>
+
+      <div className={ACTION_BAR}>
+        <button type="submit" className={BUTTON_PRIMARY}>
+          حفظ
+        </button>
+      </div>
     </form>
   );
 }
