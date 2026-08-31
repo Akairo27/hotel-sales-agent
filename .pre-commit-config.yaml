@@ -29,7 +29,13 @@ repos:
         # mypy resolves its own file set from pyproject.toml; passing the
         # staged filenames would type-check them out of package context.
         pass_filenames: false
-        additional_dependencies: ["pytest==9.1.1", "psycopg==3.3.4", "hijridate==2.6.0"]
+        additional_dependencies:
+          [
+            "pytest==9.1.1",
+            "psycopg==3.3.4",
+            "hijridate==2.6.0",
+            "fastapi==0.141.1",
+          ]
 
   - repo: https://github.com/gitleaks/gitleaks
     rev: v8.30.1
