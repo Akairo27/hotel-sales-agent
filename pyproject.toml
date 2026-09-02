@@ -9,6 +9,7 @@ dependencies = [
     "psycopg[binary]==3.3.4",
     "fastapi==0.141.1",
     "uvicorn==0.52.4",
+    "google-genai==2.20.0",
 ]
 
 [dependency-groups]
