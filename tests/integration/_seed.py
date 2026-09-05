@@ -336,3 +336,25 @@ def seed_conversation(
         "INSERT INTO conversations (customer_phone) VALUES (%s) RETURNING id",
         (customer_phone,),
     )
+
+
+def seed_message(
+    conn: psycopg.Connection[Any],
+    conversation_id: int,
+    *,
+    direction: str,
+    body: str,
+    customer_phone: str = "+966500000001",
+) -> int:
+    """Inserts one messages row. created_at is left to its DEFAULT now() —
+    callers that need a specific ordering insert in the order they want
+    created_at to sort in and rely on the column's monotonically
+    increasing default, same as every other append-only timestamp in this
+    schema.
+    """
+    return returning_id(
+        conn,
+        "INSERT INTO messages (conversation_id, customer_phone, direction, body) "
+        "VALUES (%s, %s, %s, %s) RETURNING id",
+        (conversation_id, customer_phone, direction, body),
+    )
