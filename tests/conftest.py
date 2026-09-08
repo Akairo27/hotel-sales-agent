@@ -1,7 +1,7 @@
 """Shared fixtures for tests that need a real Postgres instance.
 
 TEST_DATABASE_URL must point at an already-existing, otherwise-empty
-Postgres 17 database. If it is unset, every test depending on these
+Postgres 18 database. If it is unset, every test depending on these
 fixtures is skipped explicitly rather than faked with a mock connection.
 """
 
