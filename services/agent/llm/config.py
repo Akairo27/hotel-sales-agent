@@ -6,13 +6,12 @@ LLM_MODEL says" — CLAUDE.md §9 requires the exact model version to be
 pinned and reviewed, so a deployment cannot silently move to an unreviewed
 model just by changing an environment variable.
 
-ALLOWED_MODELS ships empty. Populating it requires running
-`client.models.list()` against a real Gemini API key to confirm the exact
-pinned model string exists and is not a floating alias, then committing
-that string here in a reviewed change — see the PR description for the
-exact command. Every entry point that needs a model (load_llm_settings)
-fails loudly with LlmConfigurationError until this is done; there is no
-default model and no silent fallback.
+"gemini-3.7-flash" was confirmed live via `client.models.list()` against a
+real API key (not recalled from training data) — it reports a dated
+snapshot version ("3.7-flash-08-2026", not a "-latest"/"-preview" floating
+alias) and supports generateContent. Every entry point that needs a model
+(load_llm_settings) fails loudly with LlmConfigurationError if LLM_MODEL
+names anything else; there is no silent fallback.
 """
 
 from __future__ import annotations
@@ -23,7 +22,7 @@ from dataclasses import dataclass
 
 from services.agent.llm.errors import LlmConfigurationError
 
-ALLOWED_MODELS: frozenset[str] = frozenset()
+ALLOWED_MODELS: frozenset[str] = frozenset({"gemini-3.7-flash"})
 
 # ARCHITECTURE.md §7: "the last 10 messages only" is sent as context on
 # every call — not the full conversation history.
