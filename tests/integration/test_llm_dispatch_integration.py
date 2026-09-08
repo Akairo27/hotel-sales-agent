@@ -64,7 +64,7 @@ def _seed_priceable_stay(conn: psycopg.Connection[Any]) -> tuple[int, int]:
         conn,
         scope="global",
         target_margin_bps=2_000,
-        min_profit_by_lead_time=flat_min_profit(3_000),
+        min_profit_by_lead_time=flat_min_profit(1_000),
         demand_curve=flat_demand_curve(),
     )
     return hotel_id, room_type_id
