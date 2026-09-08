@@ -12,6 +12,7 @@ import pytest
 ARCHITECTURE_PACKAGES = [
     "lib",
     "services.agent",
+    "services.agent.llm",
     "services.inventory",
     "services.pricing",
     "services.worker",
