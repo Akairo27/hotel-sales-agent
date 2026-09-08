@@ -127,6 +127,45 @@ def test_get_quote_dispatch_reports_unpriced_when_no_allotment_exists(
     }
 
 
+def test_get_quote_dispatch_reports_unpriced_despite_a_valid_price_rule(
+    db_conn: psycopg.Connection[Any],
+) -> None:
+    """A fully resolvable global price rule must not change the outcome —
+    the missing-allotment check has to fire on its own, not as a side
+    effect of price-rule resolution failing first (the exact ordering
+    bug this test guards against: see dispatch.py's module docstring).
+    """
+    hotel_id, room_type_id = seed_hotel_and_room_type(db_conn)
+    _seed_default_season(db_conn)
+    seed_price_rule(
+        db_conn,
+        scope="global",
+        target_margin_bps=2_000,
+        min_profit_by_lead_time=flat_min_profit(1_000),
+        demand_curve=flat_demand_curve(),
+    )
+    args = {
+        "hotel_id": hotel_id,
+        "room_type_id": room_type_id,
+        "check_in": "2026-09-10",
+        "check_out": "2026-09-11",
+        "rooms": 1,
+    }
+
+    result = dispatch_get_quote(
+        db_conn, args, now=_NOW, customer_phone=None, conversation_id=None
+    )
+
+    assert result == {
+        "priced": False,
+        "reason": "no_allotment_for_dates",
+        "hotel_id": hotel_id,
+        "room_type_id": room_type_id,
+        "check_in": "2026-09-10",
+        "check_out": "2026-09-11",
+    }
+
+
 def test_check_availability_dispatch_reflects_real_inventory(
     db_conn: psycopg.Connection[Any],
 ) -> None:

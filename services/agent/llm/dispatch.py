@@ -17,18 +17,26 @@ This is where those two rules are actually enforced, not just documented:
 Arguments come from the model, which can hallucinate types, omit
 required fields, or send a date range that fails the underlying
 services' own validation — all of that is InvalidToolArgumentsError, an
-expected failure mode of a function-calling model, not a bug here. An
-AllotmentNotFoundError from get_quote (no allotment configured for those
-dates at all) is likewise reported back as an unpriced result rather than
-raised, so the model can tell the customer rather than the whole turn
-failing. Every other pricing exception (a price_rules misconfiguration —
-IncompletePriceRuleChainError, NoMatchingBandError,
-InconsistentPriceConfigurationError) is a business-data problem, not a
-customer-facing outcome, and is deliberately left to propagate: this
-module has no escalate tool to route it to — this PR scopes the agent to
-check_availability and get_quote only (see tools.py's module docstring
-for why search_alternatives, the third tool PLAN.md's المرحلة ٤ names,
-is not declared yet), so the caller crashing the turn is more honest than
+expected failure mode of a function-calling model, not a bug here. A
+missing allotment for the requested dates is likewise reported back as
+an unpriced result rather than raised, so the model can tell the
+customer rather than the whole turn failing — dispatch_get_quote checks
+allotment coverage itself, before ever calling compute_quote, rather
+than relying on compute_quote's internal AllotmentNotFoundError: that
+error is only raised partway through pricing a night, after price-rule
+resolution already ran, so a date range with no allotment *and* no
+price rule configured surfaced IncompletePriceRuleChainError instead —
+the wrong one of the two, and unhandled. The except AllotmentNotFoundError
+below stays as a backstop for the narrow TOCTOU window between this
+check and compute_quote's own read. Every other pricing exception (a
+price_rules misconfiguration — IncompletePriceRuleChainError,
+NoMatchingBandError, InconsistentPriceConfigurationError) is a
+business-data problem, not a customer-facing outcome, and is
+deliberately left to propagate: this module has no escalate tool to
+route it to — this PR scopes the agent to check_availability and
+get_quote only (see tools.py's module docstring for why
+search_alternatives, the third tool PLAN.md's المرحلة ٤ names, is not
+declared yet), so the caller crashing the turn is more honest than
 inventing a way to paper over it here.
 """
 
@@ -36,7 +44,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import date, datetime
-from typing import Any
+from typing import Any, cast
 
 import psycopg
 
@@ -153,6 +161,26 @@ def quote_to_tool_result(quote: Quote) -> dict[str, Any]:
     }
 
 
+def _allotment_covers_every_night(
+    conn: psycopg.Connection[Any], stay: StayArgs
+) -> bool:
+    """Whether an `allotments` row exists for every night of the stay.
+
+    Deliberately a standalone query here rather than a services/pricing
+    or services/inventory change: it lets get_quote report the unpriced
+    result before compute_quote ever runs, without touching how either
+    service resolves its own exceptions internally.
+    """
+    expected_nights = (stay.check_out - stay.check_in).days
+    row = conn.execute(
+        "SELECT COUNT(*) FROM allotments "
+        "WHERE hotel_id = %s AND room_type_id = %s "
+        "AND stay_date >= %s AND stay_date < %s",
+        (stay.hotel_id, stay.room_type_id, stay.check_in, stay.check_out),
+    ).fetchone()
+    return int(cast(tuple[Any, ...], row)[0]) == expected_nights
+
+
 def _unpriced_result(stay: StayArgs, *, reason: str) -> dict[str, Any]:
     return {
         "priced": False,
@@ -201,6 +229,8 @@ def dispatch_get_quote(
     result the model may relay to the customer.
     """
     stay = parse_stay_args(args)
+    if not _allotment_covers_every_night(conn, stay):
+        return _unpriced_result(stay, reason="no_allotment_for_dates")
     try:
         quote = compute_quote(
             conn,
