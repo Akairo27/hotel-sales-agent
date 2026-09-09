@@ -235,24 +235,28 @@ def test_inactive_admin_cannot_insert_hotel(
 
 
 def test_rls_denies_anon_on_hotels(db_conn: psycopg.Connection[Any]) -> None:
-    """anon has no grant on hotels at all — same as every other table in
-    this schema — so this fails before RLS is even reached: without schema
-    USAGE, Postgres can't resolve the unqualified table name for that role
-    and raises UndefinedTable, not a table-level permission error."""
+    """anon has real Supabase-default schema USAGE on public (see
+    tests/supabase_default_acl_baseline.sql), so Postgres resolves the
+    table name fine; migration 0001's own REVOKE ALL ON TABLE hotels FROM
+    anon is what denies it, raising InsufficientPrivilege, not
+    UndefinedTable."""
     _seed_hotel(db_conn)
 
     db_conn.execute("SET SESSION AUTHORIZATION anon")
     try:
-        with pytest.raises(psycopg.errors.UndefinedTable):
+        with pytest.raises(psycopg.errors.InsufficientPrivilege):
             db_conn.execute("SELECT * FROM hotels").fetchall()
     finally:
         db_conn.execute("RESET SESSION AUTHORIZATION")
 
 
 def test_rls_denies_anon_on_room_types(db_conn: psycopg.Connection[Any]) -> None:
+    """Same reasoning as test_rls_denies_anon_on_hotels: anon can resolve
+    the table name via its schema USAGE grant, and migration 0001's own
+    REVOKE ALL ON TABLE room_types FROM anon is what actually denies it."""
     db_conn.execute("SET SESSION AUTHORIZATION anon")
     try:
-        with pytest.raises(psycopg.errors.UndefinedTable):
+        with pytest.raises(psycopg.errors.InsufficientPrivilege):
             db_conn.execute("SELECT * FROM room_types").fetchall()
     finally:
         db_conn.execute("RESET SESSION AUTHORIZATION")
