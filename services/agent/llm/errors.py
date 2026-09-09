@@ -19,6 +19,11 @@ class ConversationNotFoundError(LlmError):
     The caller is expected to have created the conversation row before
     ever calling into this module — this module only reads conversation
     state (ARCHITECTURE.md §7), never creates it.
+
+    Reused by services.agent.output_guard.enforce_outbound_text for the
+    same underlying condition (its escalation-opening INSERT ... SELECT
+    matches zero rows) rather than defining a second class for the same
+    meaning — CLAUDE.md §2's "one way to do each thing."
     """
 
 

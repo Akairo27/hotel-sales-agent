@@ -274,6 +274,7 @@ def seed_quote(
     conversation_id: int | None = None,
     ask_price_total: int = 20_000,
     min_allowed_total: int = 10_000,
+    nights: str = _VALID_QUOTE_NIGHTS,
 ) -> int:
     return returning_id(
         conn,
@@ -287,7 +288,7 @@ def seed_quote(
             room_type_id,
             ask_price_total,
             min_allowed_total,
-            _VALID_QUOTE_NIGHTS,
+            nights,
             customer_phone,
             conversation_id,
         ),
