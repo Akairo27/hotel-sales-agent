@@ -105,7 +105,7 @@ def _schema(test_database_url: str) -> None:
     migration's own REVOKE statements need something to actually revoke
     for this suite to prove what it claims. See that file's own comment
     for why it's the one place this baseline is defined, and
-    scripts/verify_default_acl_baseline.py for how it's kept from
+    tests/verify_default_acl_baseline.py for how it's kept from
     silently drifting away from what Supabase actually does.
     """
     with psycopg.connect(test_database_url, autocommit=True) as conn:
