@@ -253,9 +253,18 @@ def test_masking_view_shows_everything_with_cost_visibility(
 
 
 def test_anon_cannot_select_price_rules(db_conn: psycopg.Connection[Any]) -> None:
+    """anon has real Supabase-default schema USAGE on public (see
+    tests/supabase_default_acl_baseline.sql), so Postgres resolves the
+    view name fine. Unlike the base tables in this schema,
+    price_rules_for_dashboard (created by migration 0018, replaced by
+    0020) carries no per-object REVOKE of its own — it relies entirely on
+    migration 0012's ALTER DEFAULT PRIVILEGES lockdown, which denies anon
+    by default and is never re-granted back to it (only authenticated
+    gets GRANT SELECT). Either way the result is InsufficientPrivilege,
+    not UndefinedTable."""
     db_conn.execute("SET SESSION AUTHORIZATION anon")
     try:
-        with pytest.raises(psycopg.errors.UndefinedTable):
+        with pytest.raises(psycopg.errors.InsufficientPrivilege):
             db_conn.execute("SELECT * FROM price_rules_for_dashboard").fetchall()
     finally:
         db_conn.execute("RESET SESSION AUTHORIZATION")

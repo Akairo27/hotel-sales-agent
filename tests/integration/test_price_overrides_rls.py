@@ -466,9 +466,14 @@ def test_sales_without_can_view_cost_can_read_price_overrides(
 
 
 def test_anon_cannot_select_price_overrides(db_conn: psycopg.Connection[Any]) -> None:
+    """anon has real Supabase-default schema USAGE on public (see
+    tests/supabase_default_acl_baseline.sql), so Postgres resolves the
+    table name fine; migration 0007's own REVOKE ALL ON TABLE
+    price_overrides FROM anon is what denies it, raising
+    InsufficientPrivilege, not UndefinedTable."""
     db_conn.execute("SET SESSION AUTHORIZATION anon")
     try:
-        with pytest.raises(psycopg.errors.UndefinedTable):
+        with pytest.raises(psycopg.errors.InsufficientPrivilege):
             db_conn.execute("SELECT * FROM price_overrides").fetchall()
     finally:
         db_conn.execute("RESET SESSION AUTHORIZATION")
