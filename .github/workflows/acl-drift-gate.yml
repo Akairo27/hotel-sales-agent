@@ -1,0 +1,89 @@
+name: ACL Drift Gate
+
+# Verifies tests/supabase_default_acl_baseline.sql (the assumed default
+# ACL every local RLS test is built on) still matches what a real,
+# never-migrated Supabase project actually grants — see
+# tests/verify_default_acl_baseline.py's module docstring and PLAN.md
+# ("بوابة قبل المرحلة ٤") for why this exists.
+#
+# This job is meant to be a REQUIRED check on any PR touching
+# db/migrations/ — but it deliberately does not use
+# `on: pull_request: paths: db/migrations/**` to scope that. A required
+# check that only triggers on a path filter never runs on a PR that
+# doesn't touch that path, and GitHub treats a required check that never
+# ran as permanently pending, blocking that PR's merge forever. Instead,
+# the job always triggers and a step inside it checks `git diff` for
+# db/migrations/ itself, skipping the real (network-dependent) check
+# with a clean success when nothing there changed.
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: acl-drift-gate-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  UV_VERSION: "0.12.5"
+
+jobs:
+  acl-drift:
+    name: acl drift gate
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # Full history so the diff step below can always reach the PR's
+          # base commit / the previous push's tip, not just the checked
+          # out commit itself.
+          fetch-depth: 0
+
+      - name: Check whether db/migrations/ changed
+        id: diff
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          BEFORE_SHA: ${{ github.event.before }}
+        run: |
+          set -euo pipefail
+          if [ "${EVENT_NAME}" = "pull_request" ]; then
+            base="${BASE_SHA}"
+          else
+            base="${BEFORE_SHA}"
+          fi
+          if [ -n "${base}" ] && git rev-parse --verify --quiet "${base}^{commit}" >/dev/null; then
+            changed="$(git diff --name-only "${base}" HEAD -- db/migrations/)"
+          else
+            # No usable base to diff against (e.g. main's very first push).
+            # Fail open to running the real check rather than skip a gate
+            # we can't prove is unaffected.
+            changed="db/migrations/"
+          fi
+          if [ -n "${changed}" ]; then
+            echo "touched=true" >> "${GITHUB_OUTPUT}"
+          else
+            echo "touched=false" >> "${GITHUB_OUTPUT}"
+          fi
+
+      - uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
+        if: steps.diff.outputs.touched == 'true'
+        with:
+          version: ${{ env.UV_VERSION }}
+
+      - name: Install locked dependencies
+        if: steps.diff.outputs.touched == 'true'
+        run: uv sync --frozen
+
+      - name: Verify Supabase default-ACL baseline still matches reality
+        if: steps.diff.outputs.touched == 'true'
+        env:
+          ACL_BASELINE_DATABASE_URL: ${{ secrets.ACL_BASELINE_DATABASE_URL }}
+        run: uv run python tests/verify_default_acl_baseline.py
+
+      - name: db/migrations/ untouched — nothing to verify
+        if: steps.diff.outputs.touched == 'false'
+        run: echo "This change doesn't touch db/migrations/; skipping the ACL drift check."
