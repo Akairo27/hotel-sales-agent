@@ -151,15 +151,18 @@ def test_inactive_admin_cannot_insert_amenity(
 
 
 def test_rls_denies_anon_on_hotel_amenities(db_conn: psycopg.Connection[Any]) -> None:
-    """anon has no grant on hotel_amenities at all — same as every other
-    table in this schema — so this fails before RLS is even reached: without
-    schema USAGE, Postgres cannot resolve the unqualified table name for
-    that role and raises UndefinedTable, not a table-level permission
-    error. Same expectation as test_rls_denies_anon_on_hotels."""
+    """anon has real Supabase-default schema USAGE on public (see
+    tests/supabase_default_acl_baseline.sql), so Postgres resolves the
+    table name fine; what denies it is InsufficientPrivilege, not
+    UndefinedTable. hotel_amenities (migration 0023) is doubly protected:
+    its own REVOKE ALL ON TABLE ... FROM anon, and (independently, since
+    0023 runs after 0012) migration 0012's schema-wide default-privileges
+    lockdown — confirmed by disabling each alone (still denied) and both
+    together (only then does anon actually gain SELECT)."""
     _seed_hotel_with_amenity(db_conn)
     db_conn.execute("SET SESSION AUTHORIZATION anon")
     try:
-        with pytest.raises(psycopg.errors.UndefinedTable):
+        with pytest.raises(psycopg.errors.InsufficientPrivilege):
             db_conn.execute("SELECT * FROM hotel_amenities").fetchall()
     finally:
         db_conn.execute("RESET SESSION AUTHORIZATION")

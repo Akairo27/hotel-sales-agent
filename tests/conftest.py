@@ -17,6 +17,9 @@ import pytest
 from psycopg import sql
 
 MIGRATIONS_DIR = Path(__file__).resolve().parent.parent / "db" / "migrations"
+_DEFAULT_ACL_BASELINE_PATH = (
+    Path(__file__).resolve().parent / "supabase_default_acl_baseline.sql"
+)
 
 _ROLES_SQL = """
 DO $$
@@ -95,13 +98,22 @@ def _schema(test_database_url: str) -> None:
     """Recreate the public schema and apply every migration, once per session.
 
     Postgres roles are cluster-wide, not per-database, so they are created
-    if absent rather than by the schema reset.
+    if absent rather than by the schema reset. Applies
+    supabase_default_acl_baseline.sql right after recreating the schema
+    and before any migration in db/migrations/ — a real Supabase project
+    starts with those permissive defaults already in place, so a
+    migration's own REVOKE statements need something to actually revoke
+    for this suite to prove what it claims. See that file's own comment
+    for why it's the one place this baseline is defined, and
+    tests/verify_default_acl_baseline.py for how it's kept from
+    silently drifting away from what Supabase actually does.
     """
     with psycopg.connect(test_database_url, autocommit=True) as conn:
         conn.execute(_ROLES_SQL)
         conn.execute(_AUTH_SCHEMA_SQL)
         conn.execute("DROP SCHEMA public CASCADE")
         conn.execute("CREATE SCHEMA public")
+        conn.execute(_DEFAULT_ACL_BASELINE_PATH.read_text(encoding="utf-8"))
         for migration in sorted(MIGRATIONS_DIR.glob("*.sql")):
             conn.execute(migration.read_text(encoding="utf-8"))
     return None

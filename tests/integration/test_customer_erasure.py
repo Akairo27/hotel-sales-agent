@@ -119,13 +119,12 @@ def test_authenticated_cannot_call_erase_customer_phone(
 def test_anon_cannot_call_erase_customer_phone(
     db_conn: psycopg.Connection[Any],
 ) -> None:
-    """anon has no schema USAGE at all locally, so this fails one step
-    earlier than the authenticated case — same local-vs-real-Supabase
-    divergence documented in test_default_privileges_lockdown.py; the
-    security outcome (zero access), not the error code, is what matters."""
+    """anon has schema USAGE (tests/supabase_default_acl_baseline.sql
+    simulates the real Supabase default) but no EXECUTE grant on this
+    function — permission denied, same failure mode as authenticated."""
     db_conn.execute("SET SESSION AUTHORIZATION anon")
     try:
-        with pytest.raises(psycopg.errors.UndefinedFunction):
+        with pytest.raises(psycopg.errors.InsufficientPrivilege):
             db_conn.execute(
                 "SELECT quotes_erase_customer_phone(%s)", ("+966500000001",)
             )

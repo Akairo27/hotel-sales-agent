@@ -278,15 +278,20 @@ def test_service_role_can_update_booking_status(
 def test_rls_denies_anon_on_agent_tables(
     db_conn: psycopg.Connection[Any], table_name: str
 ) -> None:
-    """anon has no grant on any of the four tables — same as every other
-    table in this schema — so this fails before RLS is even reached:
-    without schema USAGE, Postgres cannot resolve the unqualified table
-    name for that role. Same expectation as
-    test_rls_denies_anon_on_hotel_amenities."""
+    """anon has real Supabase-default schema USAGE on public (see
+    tests/supabase_default_acl_baseline.sql), so Postgres resolves each
+    table name fine; what denies it is InsufficientPrivilege, not
+    UndefinedTable. All four tables (migration 0024) are doubly
+    protected, same as hotel_amenities: each one's own
+    REVOKE ALL ON TABLE ... FROM anon, and (independently, since 0024
+    runs after 0012) migration 0012's schema-wide default-privileges
+    lockdown — confirmed by disabling each alone (still denied) and both
+    together (only then does anon actually gain SELECT). Same
+    expectation as test_rls_denies_anon_on_hotel_amenities."""
     select = sql.SQL("SELECT * FROM {table}").format(table=sql.Identifier(table_name))
     db_conn.execute("SET SESSION AUTHORIZATION anon")
     try:
-        with pytest.raises(psycopg.errors.UndefinedTable):
+        with pytest.raises(psycopg.errors.InsufficientPrivilege):
             db_conn.execute(select)
     finally:
         db_conn.execute("RESET SESSION AUTHORIZATION")

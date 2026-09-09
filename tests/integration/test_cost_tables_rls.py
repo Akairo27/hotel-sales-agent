@@ -81,14 +81,15 @@ def test_authenticated_cannot_select_cost_table(
 def test_anon_cannot_select_cost_table(
     db_conn: psycopg.Connection[Any], table: str
 ) -> None:
-    """anon has no schema USAGE at all, so this fails one step earlier than
-    the authenticated case — relation not found, not permission denied.
-    Same outcome (zero rows reachable), different failure mode; see
-    test_rls_denies_anon in test_app_users_and_roles_rls.py for why."""
+    """anon has schema USAGE (tests/supabase_default_acl_baseline.sql
+    simulates the real Supabase default) but no table-level grant on any
+    of these — permission denied at the table, same failure mode as
+    authenticated; see test_rls_denies_anon in
+    test_app_users_and_roles_rls.py for why."""
     select = sql.SQL("SELECT * FROM {table}").format(table=sql.Identifier(table))
     db_conn.execute("SET SESSION AUTHORIZATION anon")
     try:
-        with pytest.raises(psycopg.errors.UndefinedTable):
+        with pytest.raises(psycopg.errors.InsufficientPrivilege):
             db_conn.execute(select)
     finally:
         db_conn.execute("RESET SESSION AUTHORIZATION")
