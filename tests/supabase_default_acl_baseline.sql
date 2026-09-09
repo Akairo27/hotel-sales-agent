@@ -8,7 +8,7 @@
 --      tests/integration/ runs against the same starting posture the
 --      real database has, not a plain Postgres install that was never
 --      vulnerable to this default in the first place.
---   2. scripts/verify_default_acl_baseline.py applies it to a set of
+--   2. tests/verify_default_acl_baseline.py applies it to a set of
 --      assertions it checks against a real, pristine, never-migrated
 --      Supabase project's actual pg_default_acl/has_schema_privilege
 --      state, so a change to Supabase's own provisioning template shows
