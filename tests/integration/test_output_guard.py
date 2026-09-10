@@ -20,7 +20,9 @@ from lib.money import format_halalas_as_sar
 from services.agent.llm.dispatch import dispatch_get_quote
 from services.agent.llm.errors import ConversationNotFoundError
 from services.agent.output_guard.enforcement import (
+    REASON_FOREIGN_CURRENCY,
     REASON_MISMATCH,
+    REASON_MISSING_CURRENCY,
     REASON_UNPARSEABLE,
     enforce_outbound_text,
 )
@@ -325,6 +327,62 @@ def test_an_unparseable_blocked_reply_gets_the_unparseable_reason(
         "SELECT reason FROM escalations WHERE id = %s", (verdict.escalation_id,)
     ).fetchone()
     assert reason == (REASON_UNPARSEABLE,)
+
+
+def test_a_foreign_labelled_real_total_is_blocked_with_the_foreign_reason(
+    db_conn: psycopg.Connection[Any],
+) -> None:
+    """The real total, relabelled in a foreign currency, must block end
+    to end against a real database — not merely pass extraction/decision
+    in isolation."""
+    hotel_id, room_type_id = seed_hotel_and_room_type(db_conn)
+    conversation_id = seed_conversation(db_conn)
+    seed_quote(
+        db_conn,
+        hotel_id,
+        room_type_id,
+        conversation_id=conversation_id,
+        ask_price_total=135_000,
+        min_allowed_total=90_000,
+    )
+
+    verdict = enforce_outbound_text(
+        db_conn, conversation_id=conversation_id, text="Your total is 1,350.00 USD"
+    )
+
+    assert verdict.allowed is False
+    reason = db_conn.execute(
+        "SELECT reason FROM escalations WHERE id = %s", (verdict.escalation_id,)
+    ).fetchone()
+    assert reason == (REASON_FOREIGN_CURRENCY,)
+
+
+def test_a_real_total_with_no_currency_marker_is_blocked_with_the_missing_reason(
+    db_conn: psycopg.Connection[Any],
+) -> None:
+    """The real total with no currency word at all — closing this is
+    what makes the deny-list unnecessary to enumerate every unlisted
+    currency, since an unlisted one looks identical to no label at all."""
+    hotel_id, room_type_id = seed_hotel_and_room_type(db_conn)
+    conversation_id = seed_conversation(db_conn)
+    seed_quote(
+        db_conn,
+        hotel_id,
+        room_type_id,
+        conversation_id=conversation_id,
+        ask_price_total=135_000,
+        min_allowed_total=90_000,
+    )
+
+    verdict = enforce_outbound_text(
+        db_conn, conversation_id=conversation_id, text="Your total is 1,350.00"
+    )
+
+    assert verdict.allowed is False
+    reason = db_conn.execute(
+        "SELECT reason FROM escalations WHERE id = %s", (verdict.escalation_id,)
+    ).fetchone()
+    assert reason == (REASON_MISSING_CURRENCY,)
 
 
 def test_a_reply_with_both_a_mismatch_and_an_unparseable_amount_is_reason_mismatch(

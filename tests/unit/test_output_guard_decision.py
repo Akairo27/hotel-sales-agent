@@ -7,7 +7,9 @@ from __future__ import annotations
 
 from services.agent.output_guard.decision import (
     AMOUNT_BELOW_FLOOR,
+    AMOUNT_FOREIGN_CURRENCY,
     AMOUNT_MATCHED,
+    AMOUNT_NO_CURRENCY_MARKER,
     AMOUNT_NOT_IN_QUOTES,
     AMOUNT_UNPARSEABLE,
     AllowedAmounts,
@@ -155,6 +157,52 @@ def test_one_valid_and_one_invalid_amount_still_blocks() -> None:
     )
     assert [f.reason for f in findings] == [AMOUNT_MATCHED, AMOUNT_NOT_IN_QUOTES]
     assert amounts_are_allowed(findings) is False
+
+
+def test_a_real_total_with_a_foreign_currency_label_is_blocked() -> None:
+    """ "1,350.00 USD" is the *real* total, just relabelled — decision.py
+    must block it as AMOUNT_FOREIGN_CURRENCY regardless of the value
+    matching, not report a clean AMOUNT_MATCHED."""
+    findings = evaluate_amounts("That's 1,350.00 USD", _ALLOWED)
+    assert [f.reason for f in findings] == [AMOUNT_FOREIGN_CURRENCY]
+    assert amounts_are_allowed(findings) is False
+
+
+def test_a_real_total_with_no_currency_marker_at_all_is_blocked() -> None:
+    """The other half of the closed gap: no enumeration of foreign
+    currencies can ever be complete, so a marker-less real number
+    ("1,350.00" with no currency word at all) must also block, not pass
+    as a match."""
+    findings = evaluate_amounts("Your total is 1,350.00", _ALLOWED)
+    assert [f.reason for f in findings] == [AMOUNT_NO_CURRENCY_MARKER]
+    assert amounts_are_allowed(findings) is False
+
+
+def test_an_unlisted_currency_label_blocks_the_same_way_as_no_label() -> None:
+    """No deny-list can enumerate every world currency — "złoty" proves
+    the require-a-SAR-marker mechanism, not the deny-list, is what closes
+    this: an unlisted currency is not "foreign_currency" (nothing on the
+    deny-list matched), it is "no_currency_marker" (no SAR marker either),
+    and it still blocks."""
+    findings = evaluate_amounts("1,350.00 złoty", _ALLOWED)
+    assert [f.reason for f in findings] == [AMOUNT_NO_CURRENCY_MARKER]
+
+
+def test_a_marker_less_amount_that_does_not_match_is_still_not_in_quotes() -> None:
+    """AMOUNT_NO_CURRENCY_MARKER only fires on the would-otherwise-match
+    path — a marker-less amount that is simply wrong keeps reporting
+    AMOUNT_NOT_IN_QUOTES, unchanged from before this PR."""
+    findings = evaluate_amounts("Your total is 900.00", _ALLOWED)
+    assert [f.reason for f in findings] == [AMOUNT_NOT_IN_QUOTES]
+
+
+def test_an_unparseable_foreign_labelled_amount_is_still_unparseable() -> None:
+    """Reason precedence: unparseable is checked before foreign-currency
+    in evaluate_amounts's per-candidate chain, unchanged from before this
+    PR — a malformed run has no reliable value to reason about at all,
+    foreign-labelled or not."""
+    findings = evaluate_amounts("1,2,3.4.5 USD", _ALLOWED)
+    assert [f.reason for f in findings] == [AMOUNT_UNPARSEABLE]
 
 
 def test_the_indonesian_rendering_of_a_valid_price_is_allowed() -> None:

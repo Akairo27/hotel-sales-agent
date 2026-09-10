@@ -141,16 +141,113 @@ def test_a_grouped_or_two_decimal_number_is_a_candidate_without_any_marker() -> 
     (decimal,) = extract_candidate_amounts("450.00 per night")
     assert grouped.halalas == 125_000
     assert grouped.has_currency_marker is False
+    assert grouped.foreign_currency_marker is None
     assert decimal.halalas == 45_000
     assert decimal.has_currency_marker is False
+    assert decimal.foreign_currency_marker is None
 
 
 def test_a_foreign_currency_amount_is_still_a_candidate() -> None:
     """Money-shaped without SAR is still flagged — this system never
     legitimately states a non-SAR amount, so any such number is
-    suspicious by construction, not exempted."""
+    suspicious by construction, not exempted. Strengthened, not merely
+    incidental: foreign_currency_marker records exactly which token
+    triggered it, which is what lets decision.py block it outright
+    (AMOUNT_FOREIGN_CURRENCY) rather than by the coincidence of the value
+    also being wrong."""
     (candidate,) = extract_candidate_amounts("about 240.00 USD")
     assert candidate.halalas == 24_000
+    assert candidate.foreign_currency_marker == "USD"
+    assert candidate.has_currency_marker is False
+
+
+@pytest.mark.parametrize(
+    ("text", "expected_marker"),
+    [
+        ("1,350.00 USD", "USD"),
+        ("1,350.00 EUR", "EUR"),
+        ("$1,350.00", "$"),
+        ("US$1,350.00", "$"),
+        ("€1,350.00", "€"),
+        ("Rp1.350.000", "Rp"),
+        ("I can do it for 900 USD", "USD"),
+        ("360 US dollars", "US dollars"),
+        ("1,350.00 دولار", "دولار"),
+        ("1,350.00 يورو", "يورو"),
+        ("1,350.00 ريال قطري", "ريال قطري"),
+        ("1,350.00 Qatari riyal", "Qatari riyal"),
+        ("900 omani rial", "omani rial"),
+    ],
+)
+def test_a_foreign_currency_token_promotes_and_marks_the_candidate(
+    text: str, expected_marker: str
+) -> None:
+    """Every class of foreign-currency token this module recognizes: ISO
+    code, symbol (bare and compound), the Indonesian Rupiah symbol
+    (glued to its digits, no space), a spelled-out word, Arabic words,
+    and riyals/rials qualified by a nationality other than Saudi — which
+    are a different currency spelled with the SAR marker word, not SAR
+    itself. Several of these ("900 USD", "Rp1.350.000") are not
+    money-shaped and would be invisible without the marker promoting
+    them into candidates at all."""
+    (candidate,) = extract_candidate_amounts(text)
+    assert candidate.foreign_currency_marker == expected_marker
+    assert candidate.has_currency_marker is False
+
+
+@pytest.mark.parametrize(
+    "text",
+    ["1,350.00 ريال سعودي", "1,350.00 Saudi riyals", "1,350.00 SAUDI RIYAL"],
+)
+def test_a_saudi_qualified_riyal_is_sar_not_foreign(text: str) -> None:
+    """ "Saudi riyal(s)" must not fall through to the bare "riyal"
+    handling by accident and must never be mistaken for a foreign
+    qualifier — this is the one nationality-qualified riyal that is
+    legitimate."""
+    (candidate,) = extract_candidate_amounts(text)
+    assert candidate.has_currency_marker is True
+    assert candidate.foreign_currency_marker is None
+
+
+def test_a_foreign_marker_does_not_match_case_insensitively_for_rp() -> None:
+    """Rp is deliberately case-sensitive (see the module's comment on
+    _FOREIGN_BODY) — "corp 1,350.00" and a lowercase "rp" must not be
+    mistaken for the Indonesian Rupiah symbol. The number is still a
+    candidate either way, since "1,350.00" is money-shaped on its own;
+    what this pins is that neither case counts as foreign."""
+    (corp,) = extract_candidate_amounts("corp 1,350.00")
+    assert corp.foreign_currency_marker is None
+    (lowercase_rp,) = extract_candidate_amounts("rp1.350.000")
+    assert lowercase_rp.foreign_currency_marker is None
+
+
+def test_usd_does_not_match_inside_an_unrelated_word() -> None:
+    """Mirrors test_currency_marker_does_not_match_inside_an_unrelated_
+    word for the foreign side: "USDA" must not be read as "USD"."""
+    (candidate,) = extract_candidate_amounts("1,350.00 USDA")
+    assert candidate.foreign_currency_marker is None
+    assert candidate.has_currency_marker is False
+
+
+def test_a_marker_separated_from_the_number_by_a_word_is_not_adjacent() -> None:
+    """The false positive this PR fixes: the old fixed-size search
+    window let a currency marker "mark" a number elsewhere in the same
+    sentence as long as it fell within 12 characters, even across
+    intervening words. "for 3 nights" sits between "SAR" and "3" here —
+    since that gap contains letters, not just punctuation/whitespace,
+    "3" must not be treated as SAR-marked, and (being neither
+    money-shaped nor marked) must not be a candidate at all."""
+    candidates = extract_candidate_amounts("Your total is 1,350.00 SAR for 3 nights.")
+    assert len(candidates) == 1
+    assert candidates[0].halalas == 135_000
+
+
+def test_a_marker_glued_directly_to_the_number_is_still_adjacent() -> None:
+    """The zero-gap end of the same spectrum — no punctuation at all
+    between the marker and the number must still count."""
+    (candidate,) = extract_candidate_amounts("SAR900.00")
+    assert candidate.has_currency_marker is True
+    assert candidate.halalas == 90_000
 
 
 @pytest.mark.parametrize(

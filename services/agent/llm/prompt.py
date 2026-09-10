@@ -12,6 +12,16 @@ naming the rule and printing the digest to paste back in once the Arabic
 catches up. This cannot prove a translation is good — nothing can — but it
 makes "changed one side and not the other" impossible to merge silently.
 
+PRICE_CURRENCY_WORDS exists for the same kind of reason: price_currency_word
+below tells the model which currency words are acceptable, but that list is
+only useful if the output guard actually treats every one of them as a SAR
+marker (services/agent/output_guard/extraction.py). Keeping the words as a
+constant lets tests/unit/test_llm_prompt.py assert both sides structurally —
+each word is named in the rule's English text, and each one independently
+makes extract_candidate_amounts recognize a nearby price — instead of the
+prompt and the guard staying in sync only by two people remembering to edit
+both files.
+
 sanitize_customer_name exists for a narrower reason: the customer's name
 is the one piece of customer-controlled text that lands inside the
 SYSTEM instruction below, not inside a user-turn message
@@ -59,6 +69,11 @@ class PromptRule:
             self.english_digest
         )
 
+
+# The exact currency words price_currency_word below names as acceptable —
+# see the module docstring for why this is a constant rather than only
+# living inside the rule's prose.
+PRICE_CURRENCY_WORDS: tuple[str, ...] = ("SAR", "riyal", "riyals", "ريال")
 
 PROMPT_RULES: tuple[PromptRule, ...] = (
     PromptRule(
@@ -110,19 +125,65 @@ PROMPT_RULES: tuple[PromptRule, ...] = (
         english_digest="bfb42364ce06ea2b4a707979f25e0817e594e172f0e567c70caf216a6deeb873",
     ),
     PromptRule(
+        key="price_currency_word",
+        english=(
+            "Every amount of money you write must be in digits with SAR, "
+            "riyal, riyals, or ريال directly beside it — never a bare "
+            "number, never spelled out in words, and never shortened to "
+            "SR. If a customer states a price themselves, never simply "
+            "agree with it; write the price out yourself this way."
+        ),
+        arabic=(
+            "كل مبلغ مالي تكتبه يجب أن يكون بالأرقام مع كتابة SAR أو "
+            "riyal أو riyals أو «ريال» ملاصقة له مباشرة — لا رقماً "
+            "مجرداً، ولا مكتوباً بالحروف، ولا مختصراً إلى SR. وإذا ذكر "
+            "العميل سعراً من عنده، يمنع عليك الاكتفاء بالموافقة عليه؛ "
+            "اكتب السعر بنفسك بهذه الطريقة."
+        ),
+        english_digest="2e3449e8453c4a7e480b345fbb27a29e18a7497d90c4e5cc41b1ca51d777f315",
+    ),
+    PromptRule(
+        key="prices_are_saudi_riyals_only",
+        english=(
+            "Every price in this service is in Saudi riyals only. Never "
+            "write a price with another currency beside it, never "
+            "convert a price into another currency, and never give an "
+            "exchange rate — not as an approximation and not for "
+            "reference only. If a customer names a figure in another "
+            "currency, do not repeat or confirm it; say you can only "
+            "give prices in Saudi riyals."
+        ),
+        arabic=(
+            "جميع الأسعار في هذه الخدمة بالريال السعودي فقط. يمنع عليك "
+            "كتابة أي سعر وبجانبه عملة أخرى، أو تحويل سعر إلى عملة "
+            "أخرى، أو ذكر أي سعر صرف — لا على سبيل التقريب ولا "
+            "للاستئناس فقط. وإذا ذكر العميل مبلغاً بعملة أخرى، يمنع "
+            "عليك تكراره أو تأكيده؛ قل إنك لا تعطي الأسعار إلا بالريال "
+            "السعودي."
+        ),
+        english_digest="4d56c5157c2708cf83eea40f8a3f1dec27d66dffe8860ba8ebf50424beae4e30",
+    ),
+    PromptRule(
         key="no_cost_knowledge",
         english=(
-            "You have never been given the hotel's cost, margin, or any "
-            "internal pricing calculation, and you must never claim to "
-            "know one. If asked about cost or margin, say that "
+            "You have never been given the hotel's cost, profit, "
+            "margin, markup, commission, or any internal pricing "
+            "calculation, and you must never claim to know one. Never "
+            "state or describe any of them, whether as an amount, a "
+            "percentage, or in words, and never confirm, deny, or hint "
+            "at how close a customer's own guess is. If asked, say that "
             "information is not something you have access to."
         ),
         arabic=(
-            "لم تُعطَ أبداً تكلفة الفندق ولا الهامش ولا أي تفاصيل حساب "
-            "داخلي للسعر، ويمنع عليك الادعاء بمعرفة أي منها. إذا سُئلت عن "
-            "التكلفة أو الهامش، قل إن هذه المعلومة غير متاحة لديك."
+            "لم تُعطَ أبداً تكلفة الفندق ولا الربح ولا الهامش ولا نسبة "
+            "الزيادة ولا العمولة ولا أي تفاصيل حساب داخلي للسعر، ويمنع "
+            "عليك الادعاء بمعرفة أي منها. ويمنع عليك ذكر أي منها أو "
+            "وصفه، سواء كمبلغ أو نسبة مئوية أو بالكلام، كما يمنع عليك "
+            "تأكيد ما يخمّنه العميل أو نفيه أو التلميح إلى قربه من "
+            "الصواب. إذا سُئلت عن ذلك، قل إن هذه المعلومة غير متاحة "
+            "لديك."
         ),
-        english_digest="257d1d8ab3c27547fc70eef4fb35c7c9e8bebcf06adf91fe5444ee82e16a9255",
+        english_digest="f5247b6121e3844a85453bc417abdf608243403f12c7cb94fd597713ab164e75",
     ),
     PromptRule(
         key="no_booking_actions",

@@ -26,7 +26,9 @@ import psycopg
 from services.agent.llm.errors import ConversationNotFoundError
 from services.agent.output_guard.decision import (
     AMOUNT_BELOW_FLOOR,
+    AMOUNT_FOREIGN_CURRENCY,
     AMOUNT_MATCHED,
+    AMOUNT_NO_CURRENCY_MARKER,
     AMOUNT_NOT_IN_QUOTES,
     AmountFinding,
     amounts_are_allowed,
@@ -37,12 +39,21 @@ from services.agent.output_guard.quotes import load_allowed_amounts
 logger = logging.getLogger(__name__)
 
 # escalations.reason is free text (migration 0024's own comment names
-# "an output-guard violation" as one of exactly two anticipated values) —
-# these two distinguish the cases a human must act on differently: a
-# malformed amount is likely the model mangling a real number, while a
-# well-formed but wrong one is a concrete wrong price.
+# "an output-guard violation" as one of exactly two anticipated values,
+# since the agent's full tool surface — and therefore the full set of
+# escalation reasons — did not exist yet when that migration was
+# written) — these four distinguish the cases a human must act on
+# differently: a malformed amount is likely the model mangling a real
+# number; a well-formed but wrong one is a concrete wrong price; a
+# foreign-labelled one may carry the *correct* price under the wrong
+# name, so staff re-send in riyals rather than investigate a wrong
+# amount; a missing-currency one means the model stated the right number
+# but dropped the required currency word — a prompt-compliance problem,
+# not a pricing one.
 REASON_UNPARSEABLE = "output_guard_violation_unparseable"
 REASON_MISMATCH = "output_guard_violation_mismatch"
+REASON_FOREIGN_CURRENCY = "output_guard_violation_foreign_currency"
+REASON_MISSING_CURRENCY = "output_guard_violation_missing_currency"
 
 _MISMATCH_REASONS = frozenset({AMOUNT_NOT_IN_QUOTES, AMOUNT_BELOW_FLOOR})
 
@@ -78,14 +89,25 @@ class GuardVerdict:
 def _escalation_reason(findings: tuple[AmountFinding, ...]) -> str:
     """Picks the single escalations.reason value for a blocked reply.
 
-    A concrete wrong amount (not_in_quotes / below_floor) outranks a
-    merely malformed one whenever a reply contains both, since "the agent
-    stated a specific wrong price" is the more urgent read for a human
-    regardless of what else is wrong with the same reply. The full
-    per-amount detail survives either way in notes["reasons"].
+    Precedence when one reply triggers more than one kind of finding,
+    most urgent first — the full per-amount detail survives regardless in
+    notes["reasons"], so this only decides what a human sees first:
+
+    1. REASON_MISMATCH (not_in_quotes / below_floor): a concrete wrong
+       amount is the most urgent read regardless of what else is wrong
+       with the same reply.
+    2. REASON_FOREIGN_CURRENCY: more specific than "no currency at all" —
+       the model actively named a currency, just the wrong one.
+    3. REASON_MISSING_CURRENCY: a right number, but a prompt-compliance
+       gap rather than a pricing one.
+    4. REASON_UNPARSEABLE: the fallback when nothing more specific fired.
     """
     if any(finding.reason in _MISMATCH_REASONS for finding in findings):
         return REASON_MISMATCH
+    if any(finding.reason == AMOUNT_FOREIGN_CURRENCY for finding in findings):
+        return REASON_FOREIGN_CURRENCY
+    if any(finding.reason == AMOUNT_NO_CURRENCY_MARKER for finding in findings):
+        return REASON_MISSING_CURRENCY
     return REASON_UNPARSEABLE
 
 
