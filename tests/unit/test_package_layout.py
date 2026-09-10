@@ -13,6 +13,7 @@ ARCHITECTURE_PACKAGES = [
     "lib",
     "services.agent",
     "services.agent.llm",
+    "services.agent.output_guard",
     "services.inventory",
     "services.pricing",
     "services.worker",
