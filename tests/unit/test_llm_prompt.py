@@ -9,11 +9,13 @@ from __future__ import annotations
 
 from services.agent.llm.config import MAX_CUSTOMER_NAME_LENGTH
 from services.agent.llm.prompt import (
+    PRICE_CURRENCY_WORDS,
     PROMPT_RULES,
     PromptRule,
     render_system_instruction,
     sanitize_customer_name,
 )
+from services.agent.output_guard.extraction import extract_candidate_amounts
 
 
 def _rule(key: str) -> PromptRule:
@@ -41,6 +43,37 @@ def test_every_rule_digest_matches_its_english_text() -> None:
 def test_rule_keys_are_unique() -> None:
     keys = [rule.key for rule in PROMPT_RULES]
     assert len(keys) == len(set(keys))
+
+
+def test_customer_name_is_data_is_the_last_rule() -> None:
+    """render_system_instruction appends the display-name line after
+    every rule's English text (prompt.py's own render function), and
+    customer_name_is_data's English opens "If a customer's display name
+    appears below" — so it must stay the final rule, or that "below"
+    stops being true. Nothing else in PROMPT_RULES depends on order, but
+    this one does, and nothing enforced it before this rule started
+    getting company mid-tuple."""
+    assert PROMPT_RULES[-1].key == "customer_name_is_data"
+
+
+def test_every_currency_word_the_prompt_names_is_recognized_by_the_guard() -> None:
+    """Structural tripwire, not a spot-check: for the prompt to actually
+    close the currency-word gap, every word price_currency_word tells the
+    model it may use must (a) really appear in that rule's English text,
+    and (b) really be recognized as a SAR marker by the output guard —
+    otherwise the model could follow the rule to the letter and still
+    produce a price the guard cannot see as legitimate."""
+    currency_rule = next(
+        rule for rule in PROMPT_RULES if rule.key == "price_currency_word"
+    )
+    for word in PRICE_CURRENCY_WORDS:
+        assert word in currency_rule.english, f"{word!r} is not named in the rule"
+
+        (candidate,) = extract_candidate_amounts(f"1,350.00 {word}")
+        assert candidate.has_currency_marker is True, (
+            f"{word!r} is not recognized as a SAR marker by the guard"
+        )
+        assert candidate.foreign_currency_marker is None
 
 
 def test_render_system_instruction_without_name_omits_the_name_line() -> None:

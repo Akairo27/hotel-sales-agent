@@ -18,21 +18,50 @@ verbatim is a floor leak, not a legitimate echo — it is what makes
 AMOUNT_BELOW_FLOOR distinguishable from AMOUNT_NOT_IN_QUOTES at all,
 since every genuinely allowed amount is already >= its own quote's floor
 by the quotes_min_allowed_not_above_ask database constraint.
+
+Two more reasons sit alongside the value check, both currency-shaped
+rather than value-shaped — prompt.py's prices_are_saudi_riyals_only and
+price_currency_word are the corresponding prompt-side rules, but the
+guard exists to hold even if the model ignores them:
+
+- AMOUNT_FOREIGN_CURRENCY: a candidate adjacent to a foreign-currency
+  marker (extraction.CandidateAmount.foreign_currency_marker) blocks
+  outright, regardless of whether its halalas value happens to equal a
+  real amount — "1,350.00 USD" is the real total with the wrong label,
+  and a right number in the wrong currency is exactly what this guard
+  must not let through.
+- AMOUNT_NO_CURRENCY_MARKER: a candidate that matches a real amount but
+  carries no marker at all — neither SAR nor foreign — blocks instead of
+  passing as a clean match. Enumerating every foreign currency can never
+  be complete ("1,350.00 złoty"), and a bare "1,350.00" with no currency
+  word is the same hole spelled differently; requiring the one currency
+  this system actually uses closes both without an enumeration.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
 
-from services.agent.output_guard.extraction import extract_candidate_amounts
+from services.agent.output_guard.extraction import (
+    CandidateAmount,
+    extract_candidate_amounts,
+)
 
 AMOUNT_MATCHED = "matched"
 AMOUNT_NOT_IN_QUOTES = "not_in_quotes"
 AMOUNT_BELOW_FLOOR = "below_floor"
 AMOUNT_UNPARSEABLE = "unparseable"
+AMOUNT_FOREIGN_CURRENCY = "foreign_currency"
+AMOUNT_NO_CURRENCY_MARKER = "no_currency_marker"
 
 BLOCKING_AMOUNT_REASONS = frozenset(
-    {AMOUNT_NOT_IN_QUOTES, AMOUNT_BELOW_FLOOR, AMOUNT_UNPARSEABLE}
+    {
+        AMOUNT_NOT_IN_QUOTES,
+        AMOUNT_BELOW_FLOOR,
+        AMOUNT_UNPARSEABLE,
+        AMOUNT_FOREIGN_CURRENCY,
+        AMOUNT_NO_CURRENCY_MARKER,
+    }
 )
 
 
@@ -62,6 +91,21 @@ class AmountFinding:
     reason: str
 
 
+def _reason_for_matched_candidate(candidate: CandidateAmount) -> str:
+    """The reason for a candidate whose value matches a real amount.
+
+    A match with no currency marker at all — neither SAR nor foreign —
+    is not a clean AMOUNT_MATCHED: see the module docstring for why an
+    unmarked right number is its own hole, distinct from a wrongly
+    labelled one. foreign_currency_marker is never set here (that case
+    is handled earlier in evaluate_amounts, before a value match is even
+    checked), so only the marker-less case needs deciding.
+    """
+    if candidate.has_currency_marker:
+        return AMOUNT_MATCHED
+    return AMOUNT_NO_CURRENCY_MARKER
+
+
 def evaluate_amounts(text: str, allowed: AllowedAmounts) -> tuple[AmountFinding, ...]:
     """Checks every candidate financial amount in text against allowed.
 
@@ -76,9 +120,18 @@ def evaluate_amounts(text: str, allowed: AllowedAmounts) -> tuple[AmountFinding,
         if candidate.halalas is None:
             findings.append(AmountFinding(candidate.raw, None, AMOUNT_UNPARSEABLE))
             continue
+        if candidate.foreign_currency_marker is not None:
+            findings.append(
+                AmountFinding(candidate.raw, candidate.halalas, AMOUNT_FOREIGN_CURRENCY)
+            )
+            continue
         if candidate.halalas in allowed.amounts_halalas:
             findings.append(
-                AmountFinding(candidate.raw, candidate.halalas, AMOUNT_MATCHED)
+                AmountFinding(
+                    candidate.raw,
+                    candidate.halalas,
+                    _reason_for_matched_candidate(candidate),
+                )
             )
             continue
         if (

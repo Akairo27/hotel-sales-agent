@@ -8,7 +8,8 @@ and normalizes each one to an integer halalas value — the only unit
 CLAUDE.md rule 5 allows money to exist in.
 
 A digit run only qualifies as a candidate if it is either:
-  1. adjacent to a currency marker (SAR, ريال, ﷼, ...), or
+  1. adjacent to a currency marker — SAR (riyal, ريال, ﷼, ...) or a
+     foreign one (USD, $, دولار, ...), or
   2. shaped like money on its own: thousands-grouped digits (1,250 /
      1.250) or a bare number with a two-decimal fraction and a
      three-or-more-digit integer part (450.00).
@@ -21,11 +22,38 @@ reaches four digits, thousands grouping, so this shape is not a
 coincidence being avoided; it is the one shape real money never fails to
 have.
 
-Known, documented gap: a bare unmarked integer with no separator and no
-decimal fraction ("I can do it for 900") is invisible to this module.
-Closing it needs the model to be required to state a currency word with
-every price it gives — a prompt.py change, not an extraction heuristic —
-and is the very next piece of work after this one, not a someday item.
+"Adjacent" means nothing but a short run of punctuation/whitespace sits
+between the marker and the digit run — a letter or digit in between means
+they are not actually adjacent. This is what keeps "1,350.00 SAR for 3
+nights" from also flagging the "3": the gap between "SAR" and "3" is
+" for ", which contains letters, so it fails the adjacency check even
+though "3" sits inside the old fixed-size search window this module used
+to have. The check is still bounded to a small span around each digit run
+(_MAX_MARKER_SPAN) — not for correctness, only so the check stays O(1)
+per digit run instead of rescanning arbitrarily far across the text.
+
+Two currency-aware behaviors sit on top of the marker/shape split:
+
+- A digit run adjacent to a *foreign* currency marker (USD, $, قطري
+  ريال, ...) is promoted to a candidate regardless of its shape and is
+  never a legitimate amount (services/agent/output_guard/decision.py
+  blocks it as AMOUNT_FOREIGN_CURRENCY) — prices in this system are
+  always Saudi riyals (prompt.py's prices_are_saudi_riyals_only), so any
+  labelled foreign amount is suspicious by construction, not exempted.
+- A money-shaped candidate that carries *no* marker at all — neither SAR
+  nor foreign — is still a candidate (unchanged), but decision.py treats
+  a value match with no marker as AMOUNT_NO_CURRENCY_MARKER rather than a
+  clean match. This is what closes a price stated with an unlisted or
+  omitted currency ("1,350.00 złoty", or a bare "1,350.00" with no
+  currency word at all) — enumerating every world currency can never be
+  complete, but requiring the one currency this system actually uses is.
+
+Known, documented gap: a bare, ungrouped integer with no decimal fraction
+and no marker ("I can do it for 900") is still not money-shaped and still
+never becomes a candidate at all — no shape-based or marker-based rule
+here can see it, since there is nothing to detect. Closing it needed the
+model to be required to state a currency word with every price it gives —
+a prompt.py change (price_currency_word), not an extraction heuristic.
 
 Also out of scope: a percentage, in any script or digit set, is never a
 candidate here — it is not an amount.
@@ -55,23 +83,101 @@ _SEPARATOR_CHARS = ".," + chr(0x066B) + chr(0x066C)
 # needed here.
 _DIGIT_RUN = re.compile(rf"\d(?:[\d{re.escape(_SEPARATOR_CHARS)}]*\d)?")
 
+# How many characters of pure punctuation/whitespace may separate a
+# marker from the digit run it marks. This is not "search a window for
+# any marker" like this module used to do — see _classify_marker — it
+# only bounds how far outside a digit run the anchored check needs to
+# look, so that check stays O(1) instead of O(len(text)). Real SAR/
+# foreign-currency renderings never have more than a space or two of
+# punctuation between the number and its currency word.
+_MAX_MARKER_GAP = 8
+
+# The longest marker phrase this module recognizes ("american dollars",
+# 16 characters) plus _MAX_MARKER_GAP, rounded up with margin for
+# multi-space gaps. Bounds the before/after slices _classify_marker
+# looks at.
+_MAX_MARKER_SPAN = 32
+
+_GAP = rf"[^\w]{{0,{_MAX_MARKER_GAP}}}"
+
+# --- SAR markers -------------------------------------------------------
 # Word-bounded so "SAR" cannot match inside an unrelated word (e.g. a
 # name). Case-insensitive; Arabic has no case, so its markers are plain
-# substrings instead, checked separately below.
-_LATIN_MARKER_PATTERN = re.compile(r"\b(?:SAR|riyals?|rials?)\b", re.IGNORECASE)
+# substrings instead (no \b — Arabic morphology makes enumerating every
+# inflected suffix impractical, and the stem alone has negligible
+# collision risk against unrelated Arabic text, same reasoning this
+# module has always used).
+_SAR_LATIN_ALTS = r"saudi\s+riyals?|saudi\s+rials?|SAR|riyals?|rials?"
 
-# "ريال" (Arabic yeh, U+064A) is matched as a bare substring — Arabic
-# morphology makes enumerating every inflected suffix (ريالات، ريالاً،
-# ريالا) impractical, and the stem alone has negligible collision risk
-# against unrelated Arabic text. "ریال" (Farsi yeh, U+06CC) is a
-# deliberately separate entry, not a typo: unicodedata.normalize("NFKC",
-# "﷼") produces exactly that spelling — verified directly against a real
-# interpreter, not assumed — so a marker list built only from the
-# "obvious" Arabic yeh spelling would silently fail to recognize the
-# rial sign once normalize_for_scanning has already run.
-_ARABIC_MARKERS: tuple[str, ...] = ("ريال", "ریال", "ر.س")
+# "ريال" (Arabic yeh, U+064A) is the Saudi riyal's own word. "ریال"
+# (Farsi yeh, U+06CC) is a deliberately separate entry, not a typo:
+# unicodedata.normalize("NFKC", "﷼") produces exactly that spelling —
+# verified directly against a real interpreter, not assumed — so a
+# marker list built only from the "obvious" Arabic yeh spelling would
+# silently fail to recognize the rial sign once normalize_for_scanning
+# has already run. "ريال سعودي" is listed explicitly even though bare
+# "ريال" already covers most orderings, for the marker-before-the-number
+# case, where only the text ending right at the number is checked.
+_SAR_ARABIC_MARKERS: tuple[str, ...] = ("ريال سعودي", "ريال", "ریال", "ر.س")
+_SAR_ARABIC_ALTS = "|".join(re.escape(marker) for marker in _SAR_ARABIC_MARKERS)
 
-_MARKER_SEARCH_WINDOW = 12
+_SAR_BODY = rf"(?:\b(?:{_SAR_LATIN_ALTS})\b|{_SAR_ARABIC_ALTS})"
+_SAR_BEFORE_PATTERN = re.compile(rf"{_SAR_BODY}{_GAP}\Z", re.IGNORECASE)
+_SAR_AFTER_PATTERN = re.compile(rf"{_GAP}{_SAR_BODY}", re.IGNORECASE)
+
+# --- Foreign-currency markers -------------------------------------------
+# A price adjacent to any of these is blocked outright, regardless of its
+# value (decision.AMOUNT_FOREIGN_CURRENCY) — this system never
+# legitimately states a non-SAR price. Riyals/rials qualified by a
+# nationality other than Saudi are a different currency spelled with the
+# base SAR word ("qatari riyal", "ريال قطري", ...) — _classify_marker
+# checks foreign markers before SAR ones, so a qualified phrase is never
+# miscounted as SAR even though it contains "riyal"/"ريال" as a
+# substring.
+_FOREIGN_LATIN_ALTS = (
+    r"US\s+dollars?|american\s+dollars?|"
+    r"qatari\s+riyals?|omani\s+rials?|yemeni\s+rials?|iranian\s+rials?|"
+    r"USD|EUR|GBP|IDR|AED|KWD|BHD|QAR|OMR|JPY|CNY|INR|TRY|EGP|PKR|MYR|"
+    r"dollars?|dolar|euros?|pounds?|dirhams?|dinars?|rupiah|rupees?|yen|lira"
+)
+
+# Symbols are already non-word characters, so they need no \b guard —
+# they cannot accidentally match "inside" a word.
+_FOREIGN_SYMBOLS: tuple[str, ...] = ("$", "€", "£", "¥", "₹")
+_FOREIGN_SYMBOL_ALTS = "|".join(re.escape(symbol) for symbol in _FOREIGN_SYMBOLS)
+
+_FOREIGN_ARABIC_MARKERS: tuple[str, ...] = (
+    "ريال قطري",
+    "ريال عماني",
+    "ريال يمني",
+    "ريال إيراني",
+    "دولار",
+    "يورو",
+    "جنيه",
+    "درهم",
+    "دينار",
+    "روبية",
+    "روبيه",
+    "ليرة",
+)
+_FOREIGN_ARABIC_ALTS = "|".join(re.escape(marker) for marker in _FOREIGN_ARABIC_MARKERS)
+
+# "Rp" (Indonesian Rupiah) only gets a leading \b, never a trailing one:
+# "\bRp\b" fails on "Rp1.350.000" — verified against a real interpreter —
+# because "p" and "1" are both word characters, so no boundary exists
+# between them, and the real Indonesian rendering is always glued to the
+# digits with no space. Kept case-sensitive via the scoped (?-i:...) flag
+# group — "rp" lowercase collides too easily with ordinary text ("corp",
+# "warp") to treat case-insensitively, unlike the fully-spelled words
+# above where \b already does that job.
+_FOREIGN_BODY = (
+    rf"(?:\b(?:{_FOREIGN_LATIN_ALTS})\b"
+    rf"|{_FOREIGN_SYMBOL_ALTS}"
+    rf"|\b(?-i:Rp)"
+    rf"|{_FOREIGN_ARABIC_ALTS})"
+)
+_FOREIGN_BEFORE_PATTERN = re.compile(rf"{_FOREIGN_BODY}{_GAP}\Z", re.IGNORECASE)
+_FOREIGN_AFTER_PATTERN = re.compile(rf"{_GAP}{_FOREIGN_BODY}", re.IGNORECASE)
 
 
 @dataclass(frozen=True)
@@ -82,11 +188,18 @@ class CandidateAmount:
     number at all (see parse_amount_to_halalas) — a genuinely malformed
     or adversarially mangled amount, not merely an unusual but valid
     rendering.
+
+    has_currency_marker is True only for a SAR marker. foreign_currency_
+    marker holds the exact matched foreign-currency text when a foreign
+    marker sits adjacent (kept for the escalation record), and is None
+    otherwise — including when a SAR marker is what qualified the
+    candidate. The two are mutually exclusive: see _classify_marker.
     """
 
     raw: str
     halalas: int | None
     has_currency_marker: bool
+    foreign_currency_marker: str | None
 
 
 def normalize_for_scanning(text: str) -> str:
@@ -104,17 +217,36 @@ def normalize_for_scanning(text: str) -> str:
     return "".join(ch for ch in normalized if unicodedata.category(ch) != "Cf")
 
 
-def _has_nearby_currency_marker(text: str, start: int, end: int) -> bool:
-    window_start = max(0, start - _MARKER_SEARCH_WINDOW)
-    window_end = min(len(text), end + _MARKER_SEARCH_WINDOW)
-    before = text[window_start:start]
-    after = text[end:window_end]
-    for chunk in (before, after):
-        if _LATIN_MARKER_PATTERN.search(chunk):
-            return True
-        if any(marker in chunk for marker in _ARABIC_MARKERS):
-            return True
-    return False
+def _classify_marker(text: str, start: int, end: int) -> tuple[bool, str | None]:
+    """Whether a SAR marker and/or a foreign-currency marker sits
+    immediately beside the digit run at [start, end) in text.
+
+    "Immediately beside" means an anchored match against a small slice
+    on each side, not "found somewhere nearby" — see the module
+    docstring for why that distinction is what keeps a stray digit
+    elsewhere in the sentence from being wrongly marked.
+
+    Foreign wins when both a SAR and a foreign marker are adjacent (e.g.
+    "1,350.00 SAR / USD") — decision.py treats any foreign marker as an
+    outright block regardless of value, so ambiguity must resolve toward
+    blocking, not allowing.
+
+    Returns (has_sar_marker, foreign_marker_text). foreign_marker_text is
+    the exact matched substring when a foreign marker won, else None.
+    """
+    before = text[max(0, start - _MAX_MARKER_SPAN) : start]
+    after = text[end : end + _MAX_MARKER_SPAN]
+
+    foreign_match = _FOREIGN_BEFORE_PATTERN.search(
+        before
+    ) or _FOREIGN_AFTER_PATTERN.match(after)
+    if foreign_match:
+        return False, foreign_match.group().strip()
+
+    has_sar_marker = bool(
+        _SAR_BEFORE_PATTERN.search(before) or _SAR_AFTER_PATTERN.match(after)
+    )
+    return has_sar_marker, None
 
 
 def _is_grouped(groups: list[str]) -> bool:
@@ -194,26 +326,32 @@ def extract_candidate_amounts(text: str) -> tuple[CandidateAmount, ...]:
     """Finds every plausible stated price in text and normalizes each to
     halalas. See the module docstring for what qualifies as a candidate.
 
-    Two linear passes (find digit runs, then check a bounded window
-    around each for a marker) rather than one combined regex: a single
+    Two linear passes (find digit runs, then check a bounded span around
+    each for a marker) rather than one combined regex: a single
     alternation pattern measured roughly 4 seconds against a 40KB
     adversarial input from quadratic backtracking in testing, while this
     two-pass form measures a few milliseconds on the same input — a
     correctness requirement here, not a style preference, since this
-    function's input is attacker-influenceable model output.
+    function's input is attacker-influenceable model output. The marker
+    check itself is O(1) per digit run (see _MAX_MARKER_SPAN), so this
+    stays linear overall.
     """
     normalized = normalize_for_scanning(text)
     candidates: list[CandidateAmount] = []
     for match in _DIGIT_RUN.finditer(normalized):
         raw = match.group()
-        has_marker = _has_nearby_currency_marker(normalized, match.start(), match.end())
-        if not has_marker and not _is_money_shaped(raw):
+        has_sar_marker, foreign_marker = _classify_marker(
+            normalized, match.start(), match.end()
+        )
+        is_marked = has_sar_marker or foreign_marker is not None
+        if not is_marked and not _is_money_shaped(raw):
             continue
         candidates.append(
             CandidateAmount(
                 raw=raw,
                 halalas=parse_amount_to_halalas(raw),
-                has_currency_marker=has_marker,
+                has_currency_marker=has_sar_marker,
+                foreign_currency_marker=foreign_marker,
             )
         )
     return tuple(candidates)

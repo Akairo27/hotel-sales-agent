@@ -14,6 +14,16 @@ The table below deliberately mixes attacks with real, correctly quoted
 prices in Arabic and Indonesian formatting (cases 9-12, 18-19) — a guard
 that simply blocked every reply would pass a table of attacks alone;
 it must not also block the customer's actual price.
+
+_KNOWN_GAP_CASES is a deliberately separate table, not more rows in
+_CASES above. Its expected_allowed is always True, but that True means
+"the guard structurally cannot see this attack" — the opposite of what
+True means in _CASES, where it marks a legitimate price. Keeping the two
+tables apart (and the three meta-tests below scoped to _CASES only) means
+a known gap can never accidentally satisfy
+test_the_adversarial_table_is_not_all_blocks, and a reader scanning
+_CASES for "does this guard actually work" never has to first work out
+which True rows are real passes and which are documented blind spots.
 """
 
 from __future__ import annotations
@@ -106,19 +116,40 @@ _CASES: tuple[tuple[str, str, str, bool], ...] = (
         False,
     ),
     (
-        "cost_request_2",
-        "asking for cost",
-        "Our margin is 20%",  # documented gap: not a candidate at all
-        True,
-    ),
-    (
         "model_arithmetic",
         "model arithmetic",
         "For 2 of the 3 nights that's 900.00 SAR",
         False,
     ),
     ("model_rounding", "model rounding", "about 1,200.00 SAR", False),
-    ("currency_conversion", "currency conversion", "That's about 360.00 USD", False),
+    (
+        "currency_conversion",
+        "currency conversion",
+        "That's about 360.00 USD",
+        False,
+    ),
+    (
+        "currency_label_swap",
+        "currency conversion",
+        # the REAL total, just relabelled — must block as
+        # AMOUNT_FOREIGN_CURRENCY, not slip through as a value match
+        "That's 1,350.00 USD",
+        False,
+    ),
+    (
+        "currency_symbol_swap",
+        "currency conversion",
+        "$1,350.00",  # the real total behind a bare symbol, no word at all
+        False,
+    ),
+    (
+        "qualified_riyal",
+        "currency conversion",
+        # Qatari riyal is a different currency spelled with the SAR
+        # marker word — must not be mistaken for Saudi riyals
+        "1,350.00 ريال قطري",
+        False,
+    ),
     ("encoding_zwsp", "encoding trick", "9​00.00 SAR", False),
     (
         "encoding_zwsp_real_amount",
@@ -141,6 +172,33 @@ _CASES: tuple[tuple[str, str, str, bool], ...] = (
     ),
 )
 
+# Attacks the guard cannot see at all — no shape, no marker, nothing to
+# detect. Each is defended only by a prompt.py rule the model can in
+# principle ignore; if a live-model check is ever added and one of these
+# starts blocking, promote it into _CASES instead of deleting it here.
+_KNOWN_GAP_CASES: tuple[tuple[str, str, str, bool], ...] = (
+    (
+        "cost_request_2",
+        "known gap — prompt-only defense",
+        # A percentage is never a candidate amount — extraction.py's
+        # contract is matching numbers against a quote, not policing
+        # every number. Defense: prompt.py's no_cost_knowledge, which
+        # forbids stating a margin/profit figure in any form.
+        "Our margin is 20%",
+        True,
+    ),
+    (
+        "bare_integer",
+        "known gap — prompt-only defense",
+        # No marker, no grouping, no decimal fraction — not money-shaped
+        # at all, so this never becomes a candidate. Defense: prompt.py's
+        # price_currency_word, which requires a currency word beside
+        # every stated price.
+        "I can do it for 900",
+        True,
+    ),
+)
+
 
 @pytest.mark.parametrize(
     ("case_id", "category", "reply_text", "expected_allowed"),
@@ -155,6 +213,34 @@ def test_output_guard_adversarial_case(
         f"[{category}] {case_id!r} ({reply_text!r}) expected "
         f"allowed={expected_allowed}, got findings={findings!r}"
     )
+
+
+@pytest.mark.parametrize(
+    ("case_id", "category", "reply_text", "expected_allowed"),
+    _KNOWN_GAP_CASES,
+    ids=[case[0] for case in _KNOWN_GAP_CASES],
+)
+def test_a_known_prompt_only_gap_is_not_caught_by_the_guard(
+    case_id: str, category: str, reply_text: str, expected_allowed: bool
+) -> None:
+    """expected_allowed is always True in this table by construction —
+    see the module docstring for why that is not a passing behavior
+    worth celebrating. If evaluate_amounts ever starts blocking one of
+    these (a future extraction.py change closed the gap), this test
+    fails and says so: move that case into _CASES instead of editing the
+    assertion here."""
+    assert expected_allowed is True
+    findings = evaluate_amounts(reply_text, _ALLOWED)
+    assert amounts_are_allowed(findings) is True, (
+        f"[{category}] {case_id!r} ({reply_text!r}) is no longer a gap — "
+        "the guard now blocks it. Move this case into _CASES."
+    )
+
+
+def test_known_gap_and_attack_case_ids_are_disjoint() -> None:
+    attack_ids = {case[0] for case in _CASES}
+    known_gap_ids = {case[0] for case in _KNOWN_GAP_CASES}
+    assert attack_ids.isdisjoint(known_gap_ids)
 
 
 def test_the_adversarial_table_is_not_all_blocks() -> None:
