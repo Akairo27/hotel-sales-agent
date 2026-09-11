@@ -91,3 +91,39 @@ class ToolLoopLimitError(LlmError):
     burning further tokens on it is a spend risk (CLAUDE.md §9's per-
     conversation token cap), not a case worth retrying further.
     """
+
+
+class TokenSpendCapExceededError(LlmError):
+    """Raised when a conversation has already used
+    settings.max_tokens_per_conversation tokens or more, per the
+    token_usage log — checked before any model call, same shape as
+    TurnCapExceededError.
+
+    The caller is expected to open a human escalation instead of calling
+    generate_reply again for this conversation.
+    """
+
+
+class DailySpendCapExceededError(LlmError):
+    """Raised when today's (Asia/Riyadh calendar day) total estimated
+    spend across every conversation has already reached
+    settings.max_spend_per_day_usd — a global backstop, not scoped to one
+    conversation.
+
+    This is a soft cap: the check is a SUM query against token_usage, not
+    a lock, so a small overshoot under concurrent load right at the
+    boundary is possible and accepted (CLAUDE.md §9's "cap token spend...
+    per day", read as a backstop against a runaway cost day rather than a
+    financial-loss-grade constraint like inventory overselling).
+    """
+
+
+class UsageUnavailableError(LlmError):
+    """Raised when a model response carried no usable token-usage data —
+    usage_metadata was absent, or one of its counts was None.
+
+    Raised instead of silently treating the call as free: a cap enforced
+    against an undercounted total isn't a cap. Propagates uncaught through
+    generate_reply, same as a pricing misconfiguration — the caller must
+    escalate, not retry blindly.
+    """
