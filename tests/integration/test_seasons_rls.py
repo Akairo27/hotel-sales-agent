@@ -178,15 +178,16 @@ def test_inactive_admin_cannot_insert_season(
 
 
 def test_rls_denies_anon_on_seasons(db_conn: psycopg.Connection[Any]) -> None:
-    """anon has no grant on seasons at all — same as every other table in
-    this schema — so this fails before RLS is even reached: without schema
-    USAGE, Postgres can't resolve the unqualified table name for that role
-    and raises UndefinedTable, not a table-level permission error."""
+    """anon has real Supabase-default schema USAGE on public (see
+    tests/supabase_default_acl_baseline.sql), so Postgres resolves the
+    table name fine; migration 0002's own REVOKE ALL ON TABLE seasons FROM
+    anon (seasons predates migration 0012's schema-wide lockdown) is what
+    denies it, raising InsufficientPrivilege, not UndefinedTable."""
     _seed_season(db_conn)
 
     db_conn.execute("SET SESSION AUTHORIZATION anon")
     try:
-        with pytest.raises(psycopg.errors.UndefinedTable):
+        with pytest.raises(psycopg.errors.InsufficientPrivilege):
             db_conn.execute("SELECT * FROM seasons").fetchall()
     finally:
         db_conn.execute("RESET SESSION AUTHORIZATION")
