@@ -8,15 +8,12 @@ through dispatch.py, and returns an AgentReply. It never writes to
 conversations or messages, and it never sends anything to a customer —
 both belong to the not-yet-built webhook.
 
-*** Spend caps are surfaced, not enforced. *** AgentReply.usage reports
-token counts for this call; nothing here accumulates them across calls or
-refuses based on them. CLAUDE.md §9 requires a per-conversation and
-per-number-per-day token/spend cap (.env.example's
-LLM_MAX_TOKENS_PER_CONVERSATION / LLM_MAX_SPEND_PER_DAY_USD);
-enforcing it needs a persisted counter, which belongs with whichever PR
-wires the WhatsApp webhook. **The webhook must not merge until that
-enforcement exists** — it is what first lets an unbounded stranger spend
-the client's model budget.
+Spend caps are checked, not written. check_token_spend_caps runs right
+after the turn-cap check, before any model call, against the token_usage
+log (services.agent.llm.caps) — but generate_reply never inserts into
+that log itself. Recording a call's usage happens only once a reply has
+passed the output guard and been sent, which is the webhook's job
+(services.agent.llm.caps.record_token_usage), not this module's.
 """
 
 from __future__ import annotations
@@ -28,6 +25,7 @@ from typing import Any
 import psycopg
 from google.genai import types
 
+from services.agent.llm.caps import check_token_spend_caps
 from services.agent.llm.client import ModelTransport
 from services.agent.llm.config import MAX_TOOL_ITERATIONS, MESSAGE_WINDOW, LlmSettings
 from services.agent.llm.context import (
@@ -36,7 +34,11 @@ from services.agent.llm.context import (
     load_recent_messages,
 )
 from services.agent.llm.dispatch import dispatch_tool
-from services.agent.llm.errors import ToolLoopLimitError, TurnCapExceededError
+from services.agent.llm.errors import (
+    ToolLoopLimitError,
+    TurnCapExceededError,
+    UsageUnavailableError,
+)
 from services.agent.llm.prompt import render_system_instruction
 
 
@@ -86,13 +88,40 @@ class AgentReply:
 
 
 def _usage_from(response: types.GenerateContentResponse) -> UsageTotals:
+    """Extracts one model call's token usage.
+
+    thoughts_token_count (the SDK's separate field for extended-thinking
+    tokens) is folded into candidates_tokens, not tracked on its own:
+    Gemini bills thinking tokens at the output rate, and
+    services.agent.llm.pricing.estimate_cost_usd's two-bucket formula
+    would silently undercount any call that used extended thinking if
+    this weren't added in. Unlike the three fields below, its absence is
+    not a sign of a broken response — a call that used no extended
+    thinking legitimately reports none — so it defaults to 0 rather than
+    raising. total_token_count is left untouched: the SDK already
+    includes thinking tokens in that figure, so re-adding them here would
+    double-count against the per-conversation token cap.
+
+    Raises:
+        UsageUnavailableError: usage_metadata is absent, or one of its
+            three required counts is None. An untelemetered call is not
+            a free call — treating it as zero would let real spend go
+            uncounted against every cap this module and caps.py check.
+    """
     usage = response.usage_metadata
     if usage is None:
-        return UsageTotals.zero()
+        raise UsageUnavailableError("model response carried no usage_metadata")
+    if (
+        usage.prompt_token_count is None
+        or usage.candidates_token_count is None
+        or usage.total_token_count is None
+    ):
+        raise UsageUnavailableError("model response usage_metadata is incomplete")
+    candidates_tokens = usage.candidates_token_count + (usage.thoughts_token_count or 0)
     return UsageTotals(
-        prompt_tokens=usage.prompt_token_count or 0,
-        candidates_tokens=usage.candidates_token_count or 0,
-        total_tokens=usage.total_token_count or 0,
+        prompt_tokens=usage.prompt_token_count,
+        candidates_tokens=candidates_tokens,
+        total_tokens=usage.total_token_count,
     )
 
 
@@ -113,6 +142,14 @@ async def generate_reply(
             settings.max_conversation_turns (CLAUDE.md §9) — raised
             before any model call; the caller must escalate instead of
             calling this again for this conversation.
+        TokenSpendCapExceededError: this conversation's logged token
+            usage has already reached settings.max_tokens_per_conversation
+            — raised before any model call, same as the turn cap.
+        DailySpendCapExceededError: today's (Asia/Riyadh calendar day)
+            estimated spend across every conversation has already
+            reached settings.max_spend_per_day_usd.
+        UsageUnavailableError: a model response carried no usable
+            token-usage data — see _usage_from.
         ToolLoopLimitError: the model kept calling tools past
             MAX_TOOL_ITERATIONS without producing a final reply.
         ModelUnavailableError: the model transport failed.
@@ -127,6 +164,9 @@ async def generate_reply(
             f"conversation {conversation_id} is at its turn cap "
             f"({settings.max_conversation_turns})"
         )
+    check_token_spend_caps(
+        conn, conversation_id=conversation_id, now=now, settings=settings
+    )
 
     messages = load_recent_messages(conn, conversation_id, limit=MESSAGE_WINDOW)
     contents = build_contents(messages)

@@ -12,6 +12,7 @@ from __future__ import annotations
 import asyncio
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
+from decimal import Decimal
 from typing import Any
 
 import pytest
@@ -21,7 +22,13 @@ from services.agent.llm import conversation as conversation_module
 from services.agent.llm.config import MAX_TOOL_ITERATIONS, LlmSettings
 from services.agent.llm.context import ConversationState
 from services.agent.llm.conversation import generate_reply
-from services.agent.llm.errors import ToolLoopLimitError, TurnCapExceededError
+from services.agent.llm.errors import (
+    DailySpendCapExceededError,
+    TokenSpendCapExceededError,
+    ToolLoopLimitError,
+    TurnCapExceededError,
+    UsageUnavailableError,
+)
 
 _NOW = datetime(2026, 9, 1, tzinfo=UTC)
 _NOT_A_CONNECTION: Any = object()
@@ -32,6 +39,8 @@ _SETTINGS = LlmSettings(
     timeout_ms=20_000,
     max_conversation_turns=20,
     max_tokens_per_conversation=50_000,
+    max_spend_per_day_usd=Decimal("5.00"),
+    max_messages_per_number_per_day=50,
 )
 
 
@@ -96,6 +105,11 @@ def _stub_conversation_state(
         conversation_module,
         "load_recent_messages",
         lambda _conn, _conversation_id, **_kwargs: [],
+    )
+    monkeypatch.setattr(
+        conversation_module,
+        "check_token_spend_caps",
+        lambda _conn, **_kwargs: None,
     )
 
 
@@ -220,3 +234,170 @@ def test_generate_reply_raises_after_exceeding_the_tool_iteration_limit(
             )
         )
     assert len(transport.calls) == MAX_TOOL_ITERATIONS
+
+
+def test_generate_reply_refuses_when_the_conversation_token_cap_is_hit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _stub_conversation_state(monkeypatch, turn_count=0)
+
+    def _raise_token_cap(
+        _conn: Any, *, conversation_id: int, now: Any, settings: Any
+    ) -> None:
+        del conversation_id, now, settings
+        raise TokenSpendCapExceededError("conversation 1 is at its token cap")
+
+    monkeypatch.setattr(conversation_module, "check_token_spend_caps", _raise_token_cap)
+    transport = FakeTransport([_text_response("should never be reached")])
+
+    with pytest.raises(TokenSpendCapExceededError):
+        asyncio.run(
+            generate_reply(
+                _NOT_A_CONNECTION,
+                conversation_id=1,
+                customer_name=None,
+                transport=transport,
+                settings=_SETTINGS,
+                now=_NOW,
+            )
+        )
+    assert transport.calls == []
+
+
+def test_generate_reply_refuses_when_the_daily_spend_cap_is_hit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _stub_conversation_state(monkeypatch, turn_count=0)
+
+    def _raise_daily_cap(
+        _conn: Any, *, conversation_id: int, now: Any, settings: Any
+    ) -> None:
+        del conversation_id, now, settings
+        raise DailySpendCapExceededError("today's spend is at the daily cap")
+
+    monkeypatch.setattr(conversation_module, "check_token_spend_caps", _raise_daily_cap)
+    transport = FakeTransport([_text_response("should never be reached")])
+
+    with pytest.raises(DailySpendCapExceededError):
+        asyncio.run(
+            generate_reply(
+                _NOT_A_CONNECTION,
+                conversation_id=1,
+                customer_name=None,
+                transport=transport,
+                settings=_SETTINGS,
+                now=_NOW,
+            )
+        )
+    assert transport.calls == []
+
+
+def test_generate_reply_raises_usage_unavailable_when_metadata_is_missing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _stub_conversation_state(monkeypatch, turn_count=0)
+    content = types.Content(role="model", parts=[types.Part.from_text(text="hi")])
+    response_with_no_usage = types.GenerateContentResponse(
+        candidates=[types.Candidate(content=content)], usage_metadata=None
+    )
+    transport = FakeTransport([response_with_no_usage])
+
+    with pytest.raises(UsageUnavailableError):
+        asyncio.run(
+            generate_reply(
+                _NOT_A_CONNECTION,
+                conversation_id=1,
+                customer_name=None,
+                transport=transport,
+                settings=_SETTINGS,
+                now=_NOW,
+            )
+        )
+
+
+def test_generate_reply_folds_thinking_tokens_into_candidates_tokens(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Gemini bills extended-thinking tokens at the output rate but the
+    SDK reports them in their own thoughts_token_count field, separate
+    from candidates_token_count — _usage_from must fold them in so
+    pricing.estimate_cost_usd's two-bucket formula doesn't silently
+    undercount a call that used extended thinking."""
+    _stub_conversation_state(monkeypatch, turn_count=0)
+    content = types.Content(role="model", parts=[types.Part.from_text(text="hi")])
+    response_with_thinking = types.GenerateContentResponse(
+        candidates=[types.Candidate(content=content)],
+        usage_metadata=types.GenerateContentResponseUsageMetadata(
+            prompt_token_count=10,
+            candidates_token_count=5,
+            thoughts_token_count=40,
+            total_token_count=55,
+        ),
+    )
+    transport = FakeTransport([response_with_thinking])
+
+    reply = asyncio.run(
+        generate_reply(
+            _NOT_A_CONNECTION,
+            conversation_id=1,
+            customer_name=None,
+            transport=transport,
+            settings=_SETTINGS,
+            now=_NOW,
+        )
+    )
+
+    assert reply.usage.prompt_tokens == 10
+    assert reply.usage.candidates_tokens == 45
+    assert reply.usage.total_tokens == 55
+
+
+def test_generate_reply_treats_absent_thinking_tokens_as_zero(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """thoughts_token_count is legitimately None for a call that used no
+    extended thinking — unlike the three required usage fields, its
+    absence must not raise UsageUnavailableError."""
+    _stub_conversation_state(monkeypatch, turn_count=0)
+    transport = FakeTransport([_text_response("hello", total_tokens=28)])
+
+    reply = asyncio.run(
+        generate_reply(
+            _NOT_A_CONNECTION,
+            conversation_id=1,
+            customer_name=None,
+            transport=transport,
+            settings=_SETTINGS,
+            now=_NOW,
+        )
+    )
+
+    assert reply.usage.candidates_tokens == 2
+
+
+def test_generate_reply_raises_usage_unavailable_when_metadata_is_incomplete(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _stub_conversation_state(monkeypatch, turn_count=0)
+    content = types.Content(role="model", parts=[types.Part.from_text(text="hi")])
+    response_with_partial_usage = types.GenerateContentResponse(
+        candidates=[types.Candidate(content=content)],
+        usage_metadata=types.GenerateContentResponseUsageMetadata(
+            prompt_token_count=10,
+            candidates_token_count=None,
+            total_token_count=None,
+        ),
+    )
+    transport = FakeTransport([response_with_partial_usage])
+
+    with pytest.raises(UsageUnavailableError):
+        asyncio.run(
+            generate_reply(
+                _NOT_A_CONNECTION,
+                conversation_id=1,
+                customer_name=None,
+                transport=transport,
+                settings=_SETTINGS,
+                now=_NOW,
+            )
+        )
