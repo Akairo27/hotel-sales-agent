@@ -19,6 +19,7 @@ from __future__ import annotations
 import os
 from collections.abc import Mapping
 from dataclasses import dataclass
+from decimal import Decimal, InvalidOperation
 
 from services.agent.llm.errors import LlmConfigurationError
 
@@ -54,6 +55,8 @@ class LlmSettings:
     timeout_ms: int
     max_conversation_turns: int
     max_tokens_per_conversation: int
+    max_spend_per_day_usd: Decimal
+    max_messages_per_number_per_day: int
 
 
 def _require(env: Mapping[str, str], key: str) -> str:
@@ -69,6 +72,24 @@ def _require_positive_int(env: Mapping[str, str], key: str) -> int:
         value = int(raw)
     except ValueError as exc:
         raise LlmConfigurationError(f"{key}={raw!r} is not an integer") from exc
+    if value <= 0:
+        raise LlmConfigurationError(f"{key}={value} must be positive")
+    return value
+
+
+def _require_positive_decimal(env: Mapping[str, str], key: str) -> Decimal:
+    raw = _require(env, key)
+    try:
+        value = Decimal(raw)
+    except InvalidOperation as exc:
+        raise LlmConfigurationError(f"{key}={raw!r} is not a decimal number") from exc
+    # Decimal("inf")/"nan" parse without raising InvalidOperation above, so
+    # they need their own check: an infinite cap would never trip
+    # DailySpendCapExceededError (CLAUDE.md §9's mandatory daily cap
+    # silently disabled), and NaN raises InvalidOperation on the plain
+    # `<=` comparison below instead of the intended LlmConfigurationError.
+    if not value.is_finite():
+        raise LlmConfigurationError(f"{key}={value} must be a finite number")
     if value <= 0:
         raise LlmConfigurationError(f"{key}={value} must be positive")
     return value
@@ -100,5 +121,11 @@ def load_llm_settings(env: Mapping[str, str] | None = None) -> LlmSettings:
         ),
         max_tokens_per_conversation=_require_positive_int(
             active_env, "LLM_MAX_TOKENS_PER_CONVERSATION"
+        ),
+        max_spend_per_day_usd=_require_positive_decimal(
+            active_env, "LLM_MAX_SPEND_PER_DAY_USD"
+        ),
+        max_messages_per_number_per_day=_require_positive_int(
+            active_env, "MAX_MESSAGES_PER_NUMBER_PER_DAY"
         ),
     )

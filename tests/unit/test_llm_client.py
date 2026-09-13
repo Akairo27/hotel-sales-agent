@@ -13,6 +13,7 @@ other async function in this repository.
 from __future__ import annotations
 
 import asyncio
+from decimal import Decimal
 from typing import Any
 
 import httpx
@@ -29,6 +30,8 @@ _SETTINGS = LlmSettings(
     timeout_ms=20_000,
     max_conversation_turns=20,
     max_tokens_per_conversation=50_000,
+    max_spend_per_day_usd=Decimal("5.00"),
+    max_messages_per_number_per_day=50,
 )
 
 
