@@ -253,10 +253,20 @@ def test_rls_denies_anon_even_when_granted_table_select(
     db_conn: psycopg.Connection[Any],
 ) -> None:
     """RLS is the last line of defence: even an explicit table-level GRANT
-    must not expose rows to anon, because zero policies are defined."""
+    must not expose rows to anon, because zero policies are defined.
+
+    Schema USAGE is not granted or revoked here: anon already has it from
+    tests/supabase_default_acl_baseline.sql (simulating the real Supabase
+    default), same reasoning as
+    test_rls_denies_authenticated_even_when_granted_table_select below —
+    a teardown REVOKE would strip that session-wide grant for every anon
+    test that runs afterward, not just undo something this test set up.
+    Confirmed the hard way: this test used to also GRANT/REVOKE schema
+    USAGE around itself, and its own teardown REVOKE silently broke every
+    later anon-based RLS test in the same pytest session (UndefinedTable
+    instead of InsufficientPrivilege) until this fix."""
     _seed_single_room_night(db_conn)
 
-    db_conn.execute("GRANT USAGE ON SCHEMA public TO anon")
     db_conn.execute("GRANT SELECT ON hotels TO anon")
     try:
         db_conn.execute("SET SESSION AUTHORIZATION anon")
@@ -265,7 +275,6 @@ def test_rls_denies_anon_even_when_granted_table_select(
     finally:
         db_conn.execute("RESET SESSION AUTHORIZATION")
         db_conn.execute("REVOKE SELECT ON hotels FROM anon")
-        db_conn.execute("REVOKE USAGE ON SCHEMA public FROM anon")
 
 
 def test_rls_denies_authenticated_even_when_granted_table_select(
