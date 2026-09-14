@@ -16,6 +16,7 @@ import contextlib
 import hashlib
 import hmac
 import json
+import logging
 from collections.abc import Iterator
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -29,6 +30,7 @@ from google.genai import types
 
 from services.agent import webhook as webhook_module
 from services.agent.llm.caps import record_token_usage
+from services.agent.llm.client import ModelTransport
 from services.agent.llm.config import LlmSettings
 from services.agent.llm.conversation import UsageTotals
 from services.agent.main import app
@@ -85,6 +87,29 @@ class _FakeTransport:
                 candidates_token_count=self.candidates_tokens,
                 total_token_count=self.prompt_tokens + self.candidates_tokens,
             ),
+        )
+
+
+@dataclass
+class _NoUsageTransport:
+    """Returns a reply with no usage_metadata at all — the exact shape
+    conversation.py's _usage_from raises UsageUnavailableError against
+    (tests/unit/test_llm_conversation.py covers that function directly;
+    this double exists only to drive that path through the real webhook
+    endpoint)."""
+
+    calls: list[str] = field(default_factory=list)
+
+    async def generate(
+        self, *, contents: list[types.Content], system_instruction: str
+    ) -> types.GenerateContentResponse:
+        del contents, system_instruction
+        self.calls.append("call")
+        content = types.Content(
+            role="model", parts=[types.Part.from_text(text="hello from the model")]
+        )
+        return types.GenerateContentResponse(
+            candidates=[types.Candidate(content=content)], usage_metadata=None
         )
 
 
@@ -184,7 +209,7 @@ def _set_llm_settings(monkeypatch: pytest.MonkeyPatch, settings: LlmSettings) ->
     monkeypatch.setattr(webhook_module, "get_llm_settings", lambda: settings)
 
 
-def _set_transport(monkeypatch: pytest.MonkeyPatch, transport: _FakeTransport) -> None:
+def _set_transport(monkeypatch: pytest.MonkeyPatch, transport: ModelTransport) -> None:
     monkeypatch.setattr(
         webhook_module, "get_model_transport", lambda _settings: transport
     )
@@ -262,6 +287,148 @@ def test_receive_message_with_valid_signature_processes_and_records_usage(
         (_PHONE,),
     ).fetchone()
     assert usage_row == (50, 10, 60)
+
+
+def test_receive_message_returns_200_and_logs_when_usage_is_unavailable(
+    webhook_client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+    db_conn: psycopg.Connection[Any],
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The model call already happened (real spend) by the time
+    UsageUnavailableError is raised — a 500 here would make Meta retry,
+    and the retry can only resolve as a duplicate (see the module
+    docstring), permanently losing this call's usage. Must be 200, logged,
+    not retried."""
+    _set_llm_settings(monkeypatch, _settings())
+    transport = _NoUsageTransport()
+    _set_transport(monkeypatch, transport)
+    caplog.set_level(logging.ERROR, logger="services.agent.webhook")
+    payload = _whatsapp_payload(wa_id=_WA_ID, message_id="wamid.no-usage", body="hello")
+
+    response = _post(
+        webhook_client, payload, signature=_sign(json.dumps(payload).encode())
+    )
+
+    assert response.status_code == 200
+    assert response.json() == {"status": "usage_unavailable"}
+    assert len(transport.calls) == 1
+    conversation_row = db_conn.execute(
+        "SELECT id FROM conversations WHERE customer_phone = %s", (_PHONE,)
+    ).fetchone()
+    assert conversation_row is not None
+    usage_row = db_conn.execute(
+        "SELECT count(*) FROM token_usage WHERE customer_phone = %s", (_PHONE,)
+    ).fetchone()
+    assert usage_row == (0,)
+
+    error_records = [r for r in caplog.records if r.levelno == logging.ERROR]
+    assert len(error_records) == 1
+    logged = json.loads(error_records[0].getMessage())
+    assert logged["event"] == "usage_unavailable"
+    assert logged["conversation_id"] == conversation_row[0]
+
+
+def test_receive_message_returns_200_and_logs_when_record_token_usage_fails(
+    webhook_client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+    db_conn: psycopg.Connection[Any],
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """record_token_usage failing after a successful model call is the
+    same shape of risk as UsageUnavailableError: spend already happened,
+    the row just never lands. A 500 would make Meta retry into a
+    duplicate no-op that can never write the missing row (see the module
+    docstring) — must be 200, logged, not retried."""
+    _set_llm_settings(monkeypatch, _settings())
+    transport = _FakeTransport(prompt_tokens=50, candidates_tokens=10)
+    _set_transport(monkeypatch, transport)
+
+    def _raise_db_error(
+        _conn: psycopg.Connection[Any],
+        *,
+        conversation_id: int,
+        customer_phone: str,
+        usage: UsageTotals,
+        now: datetime,
+    ) -> None:
+        del conversation_id, customer_phone, usage, now
+        raise psycopg.OperationalError("simulated connection failure")
+
+    monkeypatch.setattr(webhook_module, "record_token_usage", _raise_db_error)
+    caplog.set_level(logging.ERROR, logger="services.agent.webhook")
+    payload = _whatsapp_payload(
+        wa_id=_WA_ID, message_id="wamid.usage-write-fails", body="hello"
+    )
+
+    response = _post(
+        webhook_client, payload, signature=_sign(json.dumps(payload).encode())
+    )
+
+    assert response.status_code == 200
+    assert response.json() == {"status": "usage_not_recorded"}
+    assert len(transport.calls) == 1
+    conversation_row = db_conn.execute(
+        "SELECT id FROM conversations WHERE customer_phone = %s", (_PHONE,)
+    ).fetchone()
+    assert conversation_row is not None
+    usage_row = db_conn.execute(
+        "SELECT count(*) FROM token_usage WHERE customer_phone = %s", (_PHONE,)
+    ).fetchone()
+    assert usage_row == (0,)
+
+    error_records = [r for r in caplog.records if r.levelno == logging.ERROR]
+    assert len(error_records) == 1
+    logged = json.loads(error_records[0].getMessage())
+    assert logged["event"] == "record_token_usage_failed"
+    assert logged["conversation_id"] == conversation_row[0]
+    assert logged["prompt_tokens"] == 50
+    assert logged["candidates_tokens"] == 10
+    assert logged["total_tokens"] == 60
+
+
+def test_receive_message_returns_200_when_record_token_usage_raises_a_non_db_error(
+    webhook_client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The except clause around record_token_usage is deliberately
+    `except Exception`, not `except psycopg.Error` — a bug in this module
+    or an unexpected value has the exact same permanent-gap consequence as
+    a database error (see the module docstring), so it must be caught the
+    same way. A RuntimeError proves the catch isn't narrowed to the
+    database-error case the previous test already covers."""
+    _set_llm_settings(monkeypatch, _settings())
+    transport = _FakeTransport(prompt_tokens=50, candidates_tokens=10)
+    _set_transport(monkeypatch, transport)
+
+    def _raise_unexpected_error(
+        _conn: psycopg.Connection[Any],
+        *,
+        conversation_id: int,
+        customer_phone: str,
+        usage: UsageTotals,
+        now: datetime,
+    ) -> None:
+        del conversation_id, customer_phone, usage, now
+        raise RuntimeError("simulated bug, not a database failure")
+
+    monkeypatch.setattr(webhook_module, "record_token_usage", _raise_unexpected_error)
+    caplog.set_level(logging.ERROR, logger="services.agent.webhook")
+    payload = _whatsapp_payload(
+        wa_id=_WA_ID, message_id="wamid.usage-write-bug", body="hello"
+    )
+
+    response = _post(
+        webhook_client, payload, signature=_sign(json.dumps(payload).encode())
+    )
+
+    assert response.status_code == 200
+    assert response.json() == {"status": "usage_not_recorded"}
+    error_records = [r for r in caplog.records if r.levelno == logging.ERROR]
+    assert len(error_records) == 1
+    logged = json.loads(error_records[0].getMessage())
+    assert logged["event"] == "record_token_usage_failed"
 
 
 def test_receive_message_with_invalid_signature_is_rejected_with_no_trace(

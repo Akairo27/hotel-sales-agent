@@ -26,6 +26,24 @@ Order matters and is deliberate:
    the moment the model was called, and a spend cap that only sees usage
    from calls that got all the way to a successful send would not be
    capping anything for as long as the send/guard PR is not yet merged.
+
+Two failure modes below are deliberately non-propagating, both logged at
+ERROR and answered with 200 rather than left to bubble into an unhandled
+500:
+
+- generate_reply raising UsageUnavailableError: the model call already
+  happened (real spend), but the response carried no usable usage data.
+- record_token_usage itself raising, for any reason: the model call
+  already succeeded and its usage figures are known, but the INSERT
+  failed.
+
+In both cases, a 500 would make Meta retry the delivery — and the retry
+cannot help, because migration 0024's idempotent message insert makes any
+retry resolve as a duplicate before ever reaching generate_reply or
+record_token_usage again (see _insert_inbound_message below). That would
+turn one already-spent, unrecorded model call into a *permanently*
+unrecorded one instead of a merely late one. Returning 200 stops the
+retry; the ERROR log is what makes the gap visible instead.
 """
 
 from __future__ import annotations
@@ -57,6 +75,7 @@ from services.agent.llm.errors import (
     DailySpendCapExceededError,
     TokenSpendCapExceededError,
     TurnCapExceededError,
+    UsageUnavailableError,
 )
 
 logger = logging.getLogger(__name__)
@@ -337,13 +356,44 @@ async def receive_message(request: Request) -> JSONResponse:
             DailySpendCapExceededError,
         ):
             return JSONResponse({"status": "capped"})
+        except UsageUnavailableError:
+            logger.error(
+                json.dumps(
+                    {
+                        "event": "usage_unavailable",
+                        "conversation_id": conversation_id,
+                    }
+                )
+            )
+            return JSONResponse({"status": "usage_unavailable"})
 
-        record_token_usage(
-            conn,
-            conversation_id=conversation_id,
-            customer_phone=inbound.customer_phone,
-            usage=reply.usage,
-            now=now,
-        )
+        try:
+            record_token_usage(
+                conn,
+                conversation_id=conversation_id,
+                customer_phone=inbound.customer_phone,
+                usage=reply.usage,
+                now=now,
+            )
+        except Exception:
+            # Deliberately not narrowed to psycopg.Error: whatever the
+            # failure mode — a database error, a bug in this module, an
+            # unexpected value — the retry-into-a-permanent-gap risk this
+            # except exists to prevent (see the module docstring) does not
+            # care why the INSERT didn't happen. A narrower catch would
+            # leave that same gap open for any failure mode it didn't
+            # anticipate.
+            logger.error(
+                json.dumps(
+                    {
+                        "event": "record_token_usage_failed",
+                        "conversation_id": conversation_id,
+                        "prompt_tokens": reply.usage.prompt_tokens,
+                        "candidates_tokens": reply.usage.candidates_tokens,
+                        "total_tokens": reply.usage.total_tokens,
+                    }
+                )
+            )
+            return JSONResponse({"status": "usage_not_recorded"})
 
     return JSONResponse({"status": "processed"})
