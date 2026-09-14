@@ -113,6 +113,54 @@ class _NoUsageTransport:
         )
 
 
+@dataclass
+class _ToolCallingTransport:
+    """Always calls check_availability with a fixed, real-dispatched set
+    of args -- no hotel/room-type/inventory rows exist in this module's
+    fresh, truncated test schema (tests/conftest.py's db_conn fixture), so
+    dispatch_tool runs for real and returns {"available": False} rather
+    than raising, and generate_reply's tool-calling loop keeps iterating.
+    This drives several real model calls in one turn, so the mid-loop
+    spend-cap recheck (conversation.py) can be exercised end to end
+    through the real webhook against a real, non-mocked
+    check_token_spend_caps -- not just at the wiring level
+    (tests/unit/test_llm_conversation.py) or the caps.py-arithmetic level
+    (tests/integration/test_llm_caps.py)."""
+
+    prompt_tokens: int
+    candidates_tokens: int
+    calls: list[str] = field(default_factory=list)
+
+    async def generate(
+        self, *, contents: list[types.Content], system_instruction: str
+    ) -> types.GenerateContentResponse:
+        del contents, system_instruction
+        self.calls.append("call")
+        content = types.Content(
+            role="model",
+            parts=[
+                types.Part.from_function_call(
+                    name="check_availability",
+                    args={
+                        "hotel_id": 1,
+                        "room_type_id": 1,
+                        "check_in": "2026-01-01",
+                        "check_out": "2026-01-02",
+                        "rooms": 1,
+                    },
+                )
+            ],
+        )
+        return types.GenerateContentResponse(
+            candidates=[types.Candidate(content=content)],
+            usage_metadata=types.GenerateContentResponseUsageMetadata(
+                prompt_token_count=self.prompt_tokens,
+                candidates_token_count=self.candidates_tokens,
+                total_token_count=self.prompt_tokens + self.candidates_tokens,
+            ),
+        )
+
+
 def _whatsapp_payload(
     *,
     wa_id: str,
@@ -503,6 +551,57 @@ def test_receive_message_stores_message_but_skips_model_when_conversation_cap_ex
         (conversation_id,),
     ).fetchone()
     assert row == ("wamid.capped",)
+    # The cap was already at its limit before this turn made any model
+    # call at all (usage_so_far is zero) — nothing new to record, so the
+    # only token_usage row is the one seeded directly above, not a second
+    # one from this request.
+    usage_row_count = db_conn.execute(
+        "SELECT count(*) FROM token_usage WHERE conversation_id = %s",
+        (conversation_id,),
+    ).fetchone()
+    assert usage_row_count == (1,)
+
+
+def test_receive_message_records_partial_usage_when_the_cap_crosses_mid_turn(
+    webhook_client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+    db_conn: psycopg.Connection[Any],
+) -> None:
+    """conversation.py now re-checks the spend cap before every model call
+    in its tool-calling loop, not just once before it — so a turn that
+    starts under the cap can still cross it mid-loop, after one or more
+    real (already-paid-for) model calls happened earlier in the same
+    turn. That usage must not be discarded: TokenSpendCapExceededError
+    carries it as usage_so_far, and the webhook records it before
+    returning "capped" — proven here end to end, through the real
+    endpoint and a real, non-mocked check_token_spend_caps, not just at
+    the wiring level (tests/unit/test_llm_conversation.py) or the
+    caps.py-arithmetic level (tests/integration/test_llm_caps.py)."""
+    # Each real model call reports 30 tokens. The 50-token cap is still
+    # under after 1 call (30) but crossed by the pre-check before a 3rd
+    # call would happen (60 >= 50) — so exactly 2 model calls should
+    # happen, and the recorded row should cover exactly those two.
+    settings = _settings(max_tokens_per_conversation=50)
+    _set_llm_settings(monkeypatch, settings)
+    transport = _ToolCallingTransport(prompt_tokens=25, candidates_tokens=5)
+    _set_transport(monkeypatch, transport)
+    payload = _whatsapp_payload(
+        wa_id=_WA_ID, message_id="wamid.crosses-mid-turn", body="hello"
+    )
+
+    response = _post(
+        webhook_client, payload, signature=_sign(json.dumps(payload).encode())
+    )
+
+    assert response.status_code == 200
+    assert response.json() == {"status": "capped"}
+    assert len(transport.calls) == 2
+    usage_row = db_conn.execute(
+        "SELECT prompt_tokens, candidates_tokens, total_tokens FROM token_usage "
+        "WHERE customer_phone = %s",
+        (_PHONE,),
+    ).fetchone()
+    assert usage_row == (50, 10, 60)
 
 
 def test_receive_message_stores_message_but_skips_model_when_daily_rate_cap_exceeded(

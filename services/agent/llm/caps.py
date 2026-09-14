@@ -4,8 +4,10 @@ Pure-ish functions (conn + explicit `now` in, following
 services/worker/hold_expiry.py's pattern of never reading the clock
 itself). Three checks, one write:
 
-- check_token_spend_caps: called from generate_reply, right after the
-  existing turn-cap check, before any model call.
+- check_token_spend_caps: called from generate_reply, before every
+  transport.generate() call inside its tool-calling loop (not just once
+  before the loop) — see its own docstring for why usage_so_far is a
+  required argument, not a default.
 - record_token_usage: NOT called by generate_reply — see
   conversation.py's module docstring, generate_reply never writes to the
   database. The webhook calls this once a reply has passed the output
@@ -61,22 +63,37 @@ def check_token_spend_caps(
     conversation_id: int,
     now: datetime,
     settings: LlmSettings,
+    usage_so_far: UsageTotals,
 ) -> None:
-    """Raises if this conversation's or today's total spend is at or
-    above its cap. Called from generate_reply, right after the existing
-    turn-cap check, before any model call.
+    """Raises if this conversation's or today's total spend — committed
+    usage from token_usage plus usage_so_far from the current turn's own
+    model calls so far — is at or above its cap.
+
+    Called from generate_reply before every transport.generate() call in
+    its tool-calling loop, not just once before the loop starts.
+    usage_so_far is required, not defaulted to zero: generate_reply never
+    writes to token_usage itself (the webhook does, once the whole turn
+    ends — see conversation.py's module docstring), so without
+    usage_so_far this function would be blind to spend from earlier
+    iterations of the very turn it is checking, and re-checking would
+    change nothing. Every caller must state explicitly what this turn has
+    already spent; pass UsageTotals.zero() for a turn-start check.
 
     Raises:
-        TokenSpendCapExceededError: conversation_id's token_usage total
-            has already reached settings.max_tokens_per_conversation.
+        TokenSpendCapExceededError: conversation_id's token_usage total,
+            plus usage_so_far, has already reached
+            settings.max_tokens_per_conversation. Carries usage_so_far so
+            the caller can record it before discarding the turn — see
+            that error's own docstring.
         DailySpendCapExceededError: today's (Asia/Riyadh calendar day)
-            estimated spend across every conversation has already reached
-            settings.max_spend_per_day_usd. A soft cap — the check below
-            is a SUM query, not a lock, so a small overshoot under
-            concurrent load right at the boundary is possible and
-            accepted. Logs one structured ERROR event every time this is
-            raised, with no deduplication: each blocked customer is a
-            real customer who got no help.
+            estimated spend across every conversation, plus usage_so_far,
+            has already reached settings.max_spend_per_day_usd. A soft cap
+            — the check below is a SUM query, not a lock, so a small
+            overshoot under concurrent load right at the boundary is
+            possible and accepted. Logs one structured ERROR event every
+            time this is raised, with no deduplication: each blocked
+            customer is a real customer who got no help. Also carries
+            usage_so_far.
     """
     conversation_row = conn.execute(
         "SELECT COALESCE(SUM(total_tokens), 0) FROM token_usage "
@@ -85,12 +102,13 @@ def check_token_spend_caps(
     ).fetchone()
     if conversation_row is None:
         raise RuntimeError("SELECT SUM(...) with no GROUP BY returned no row")
-    conversation_total_tokens: int = conversation_row[0]
+    conversation_total_tokens: int = conversation_row[0] + usage_so_far.total_tokens
     if conversation_total_tokens >= settings.max_tokens_per_conversation:
         raise TokenSpendCapExceededError(
             f"conversation {conversation_id} has used "
             f"{conversation_total_tokens} tokens, at or above its cap "
-            f"({settings.max_tokens_per_conversation})"
+            f"({settings.max_tokens_per_conversation})",
+            usage_so_far=usage_so_far,
         )
 
     day = riyadh_calendar_day(now)
@@ -103,7 +121,8 @@ def check_token_spend_caps(
     ).fetchone()
     if daily_row is None:
         raise RuntimeError("SELECT SUM(...) with no GROUP BY returned no row")
-    daily_prompt_tokens, daily_candidates_tokens = daily_row
+    daily_prompt_tokens = daily_row[0] + usage_so_far.prompt_tokens
+    daily_candidates_tokens = daily_row[1] + usage_so_far.candidates_tokens
     daily_spend_usd = estimate_cost_usd(
         prompt_tokens=daily_prompt_tokens, candidates_tokens=daily_candidates_tokens
     )
@@ -122,7 +141,8 @@ def check_token_spend_caps(
         raise DailySpendCapExceededError(
             f"today's ({day.isoformat()}) estimated spend "
             f"({daily_spend_usd} USD) is at or above the daily cap "
-            f"({settings.max_spend_per_day_usd} USD)"
+            f"({settings.max_spend_per_day_usd} USD)",
+            usage_so_far=usage_so_far,
         )
 
 

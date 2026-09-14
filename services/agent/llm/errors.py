@@ -7,6 +7,11 @@ a bare Exception, per CLAUDE.md §2.
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from services.agent.llm.conversation import UsageTotals
+
 
 class LlmError(Exception):
     """Base class for every exception this package raises."""
@@ -94,21 +99,39 @@ class ToolLoopLimitError(LlmError):
 
 
 class TokenSpendCapExceededError(LlmError):
-    """Raised when a conversation has already used
-    settings.max_tokens_per_conversation tokens or more, per the
-    token_usage log — checked before any model call, same shape as
-    TurnCapExceededError.
+    """Raised when a conversation's total token usage — committed usage
+    from token_usage plus usage_so_far from the current turn's own model
+    calls — has reached settings.max_tokens_per_conversation or more.
+
+    No longer raised only before any model call: conversation.py
+    re-checks this cap before every transport.generate() call inside its
+    tool-calling loop (not just once before the loop), so this can now be
+    raised after one or more real, already-paid-for model calls happened
+    earlier in the same turn. usage_so_far carries exactly that
+    already-spent usage so the caller (webhook.py) can record it before
+    discarding the turn as capped — dropping it here would silently lose
+    real spend the same way an unhandled UsageUnavailableError would (see
+    webhook.py's module docstring).
 
     The caller is expected to open a human escalation instead of calling
     generate_reply again for this conversation.
     """
 
+    def __init__(self, message: str, *, usage_so_far: UsageTotals) -> None:
+        super().__init__(message)
+        self.usage_so_far = usage_so_far
+
 
 class DailySpendCapExceededError(LlmError):
     """Raised when today's (Asia/Riyadh calendar day) total estimated
-    spend across every conversation has already reached
-    settings.max_spend_per_day_usd — a global backstop, not scoped to one
-    conversation.
+    spend across every conversation — committed spend plus usage_so_far
+    from the current turn's own model calls — has reached
+    settings.max_spend_per_day_usd or more. A global backstop, not scoped
+    to one conversation.
+
+    Carries usage_so_far for the same reason and under the same
+    now-possible-mid-turn timing as TokenSpendCapExceededError — see that
+    class's docstring.
 
     This is a soft cap: the check is a SUM query against token_usage, not
     a lock, so a small overshoot under concurrent load right at the
@@ -116,6 +139,10 @@ class DailySpendCapExceededError(LlmError):
     per day", read as a backstop against a runaway cost day rather than a
     financial-loss-grade constraint like inventory overselling).
     """
+
+    def __init__(self, message: str, *, usage_so_far: UsageTotals) -> None:
+        super().__init__(message)
+        self.usage_so_far = usage_so_far
 
 
 class UsageUnavailableError(LlmError):

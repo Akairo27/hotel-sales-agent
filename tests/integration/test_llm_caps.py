@@ -68,7 +68,11 @@ def test_check_token_spend_caps_allows_one_token_under_the_conversation_cap(
     )
 
     check_token_spend_caps(
-        db_conn, conversation_id=conversation_id, now=_NOW, settings=settings
+        db_conn,
+        conversation_id=conversation_id,
+        now=_NOW,
+        settings=settings,
+        usage_so_far=UsageTotals.zero(),
     )
 
 
@@ -87,7 +91,11 @@ def test_check_token_spend_caps_raises_at_the_exact_conversation_cap(
 
     with pytest.raises(TokenSpendCapExceededError):
         check_token_spend_caps(
-            db_conn, conversation_id=conversation_id, now=_NOW, settings=settings
+            db_conn,
+            conversation_id=conversation_id,
+            now=_NOW,
+            settings=settings,
+            usage_so_far=UsageTotals.zero(),
         )
 
 
@@ -108,7 +116,11 @@ def test_check_token_spend_caps_sums_usage_across_several_calls(
 
     with pytest.raises(TokenSpendCapExceededError):
         check_token_spend_caps(
-            db_conn, conversation_id=conversation_id, now=_NOW, settings=settings
+            db_conn,
+            conversation_id=conversation_id,
+            now=_NOW,
+            settings=settings,
+            usage_so_far=UsageTotals.zero(),
         )
 
 
@@ -135,12 +147,20 @@ def test_check_token_spend_caps_conversation_cap_is_isolated_per_conversation(
 
     with pytest.raises(TokenSpendCapExceededError):
         check_token_spend_caps(
-            db_conn, conversation_id=capped_conversation_id, now=_NOW, settings=settings
+            db_conn,
+            conversation_id=capped_conversation_id,
+            now=_NOW,
+            settings=settings,
+            usage_so_far=UsageTotals.zero(),
         )
     # A different conversation (and phone number) — must not be blocked by
     # the other conversation's usage.
     check_token_spend_caps(
-        db_conn, conversation_id=other_conversation_id, now=_NOW, settings=settings
+        db_conn,
+        conversation_id=other_conversation_id,
+        now=_NOW,
+        settings=settings,
+        usage_so_far=UsageTotals.zero(),
     )
 
 
@@ -163,7 +183,11 @@ def test_check_token_spend_caps_daily_cap_is_global_across_phone_numbers(
     )
     # $0.000075 is still under the $0.00015 cap.
     check_token_spend_caps(
-        db_conn, conversation_id=conversation_b, now=_NOW, settings=settings
+        db_conn,
+        conversation_id=conversation_b,
+        now=_NOW,
+        settings=settings,
+        usage_so_far=UsageTotals.zero(),
     )
 
     record_token_usage(
@@ -178,7 +202,11 @@ def test_check_token_spend_caps_daily_cap_is_global_across_phone_numbers(
     # blocked because the cap is global.
     with pytest.raises(DailySpendCapExceededError):
         check_token_spend_caps(
-            db_conn, conversation_id=conversation_a, now=_NOW, settings=settings
+            db_conn,
+            conversation_id=conversation_a,
+            now=_NOW,
+            settings=settings,
+            usage_so_far=UsageTotals.zero(),
         )
 
 
@@ -206,6 +234,7 @@ def test_check_token_spend_caps_daily_cap_resets_on_the_riyadh_calendar_day(
             conversation_id=conversation_id,
             now=datetime(2026, 9, 1, 10, 0, 0, tzinfo=UTC),
             settings=settings,
+            usage_so_far=UsageTotals.zero(),
         )
 
     # One second later in UTC, Riyadh's calendar day has already turned
@@ -216,6 +245,7 @@ def test_check_token_spend_caps_daily_cap_resets_on_the_riyadh_calendar_day(
         conversation_id=conversation_id,
         now=datetime(2026, 9, 1, 21, 0, 0, tzinfo=UTC),
         settings=settings,
+        usage_so_far=UsageTotals.zero(),
     )
 
 
@@ -236,7 +266,11 @@ def test_check_token_spend_caps_logs_the_daily_cap_block_every_time(
     for _ in range(3):
         with pytest.raises(DailySpendCapExceededError):
             check_token_spend_caps(
-                db_conn, conversation_id=conversation_id, now=_NOW, settings=settings
+                db_conn,
+                conversation_id=conversation_id,
+                now=_NOW,
+                settings=settings,
+                usage_so_far=UsageTotals.zero(),
             )
 
     error_records = [r for r in caplog.records if r.levelno == logging.ERROR]
@@ -245,6 +279,121 @@ def test_check_token_spend_caps_logs_the_daily_cap_block_every_time(
         payload = json.loads(record.getMessage())
         assert payload["event"] == "daily_spend_cap_exceeded"
         assert payload["conversation_id"] == conversation_id
+
+
+def test_check_token_spend_caps_includes_usage_so_far_in_the_conversation_total(
+    db_conn: psycopg.Connection[Any],
+) -> None:
+    """usage_so_far represents the current turn's own model calls, not yet
+    committed to token_usage (generate_reply never writes there itself —
+    see conversation.py's module docstring). It must still count toward
+    the per-conversation cap: without this, a mid-turn recheck would see
+    the same committed total every time and never actually stop a turn
+    that is overshooting live."""
+    settings = _settings(max_tokens_per_conversation=100)
+    conversation_id = seed_conversation(db_conn, customer_phone=_PHONE)
+    record_token_usage(
+        db_conn,
+        conversation_id=conversation_id,
+        customer_phone=_PHONE,
+        usage=UsageTotals(60, 0, 60),
+        now=_NOW,
+    )
+
+    # 60 committed + 39 in-flight = 99, still under the 100 cap.
+    check_token_spend_caps(
+        db_conn,
+        conversation_id=conversation_id,
+        now=_NOW,
+        settings=settings,
+        usage_so_far=UsageTotals(39, 0, 39),
+    )
+
+    # 60 committed + 40 in-flight = 100, at the cap — nothing new was
+    # committed between the two calls, only usage_so_far changed.
+    with pytest.raises(TokenSpendCapExceededError):
+        check_token_spend_caps(
+            db_conn,
+            conversation_id=conversation_id,
+            now=_NOW,
+            settings=settings,
+            usage_so_far=UsageTotals(40, 0, 40),
+        )
+
+
+def test_check_token_spend_caps_includes_usage_so_far_in_the_daily_total(
+    db_conn: psycopg.Connection[Any],
+) -> None:
+    """Same reasoning as the conversation-total test above, applied to the
+    global daily cap: usage_so_far's prompt/candidates tokens must be
+    folded into the committed daily sums before estimating cost, or a
+    turn already in flight could push the whole system's daily spend over
+    the cap without this check ever noticing until the *next* turn."""
+    # 1000 prompt tokens costs 1000 * $0.75 / 1_000_000 = $0.00075.
+    settings = _settings(max_spend_per_day_usd=Decimal("0.00075"))
+    conversation_id = seed_conversation(db_conn, customer_phone=_PHONE)
+
+    # Nothing committed yet; 1000 in-flight prompt tokens alone already
+    # estimate to exactly the cap.
+    with pytest.raises(DailySpendCapExceededError):
+        check_token_spend_caps(
+            db_conn,
+            conversation_id=conversation_id,
+            now=_NOW,
+            settings=settings,
+            usage_so_far=UsageTotals(1000, 0, 1000),
+        )
+
+    # One token fewer in flight stays under the cap.
+    check_token_spend_caps(
+        db_conn,
+        conversation_id=conversation_id,
+        now=_NOW,
+        settings=settings,
+        usage_so_far=UsageTotals(999, 0, 999),
+    )
+
+
+def test_check_token_spend_caps_conversation_cap_error_carries_usage_so_far(
+    db_conn: psycopg.Connection[Any],
+) -> None:
+    """TokenSpendCapExceededError must carry the exact usage_so_far it was
+    raised with: the caller (webhook.py) records it before discarding the
+    turn, so a wrong or missing value here means recorded spend would not
+    match what actually happened."""
+    settings = _settings(max_tokens_per_conversation=10)
+    conversation_id = seed_conversation(db_conn, customer_phone=_PHONE)
+    usage_so_far = UsageTotals(7, 4, 11)
+
+    with pytest.raises(TokenSpendCapExceededError) as exc_info:
+        check_token_spend_caps(
+            db_conn,
+            conversation_id=conversation_id,
+            now=_NOW,
+            settings=settings,
+            usage_so_far=usage_so_far,
+        )
+
+    assert exc_info.value.usage_so_far == usage_so_far
+
+
+def test_check_token_spend_caps_daily_cap_error_carries_usage_so_far(
+    db_conn: psycopg.Connection[Any],
+) -> None:
+    settings = _settings(max_spend_per_day_usd=Decimal("0.00001"))
+    conversation_id = seed_conversation(db_conn, customer_phone=_PHONE)
+    usage_so_far = UsageTotals(1000, 200, 1200)
+
+    with pytest.raises(DailySpendCapExceededError) as exc_info:
+        check_token_spend_caps(
+            db_conn,
+            conversation_id=conversation_id,
+            now=_NOW,
+            settings=settings,
+            usage_so_far=usage_so_far,
+        )
+
+    assert exc_info.value.usage_so_far == usage_so_far
 
 
 def test_record_token_usage_and_check_token_spend_caps_round_trip(

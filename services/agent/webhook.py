@@ -18,30 +18,43 @@ Order matters and is deliberate:
    complaint can be investigated.
 3. Check the per-number-per-day message rate (services.agent.llm.caps),
    before generate_reply is even called.
-4. Call generate_reply, which enforces the per-conversation token cap
-   (and the global daily spend cap) internally before making any model
-   call itself.
+4. Call generate_reply, which re-checks the per-conversation token cap
+   (and the global daily spend cap) before every model call it makes
+   internally, not only before the first — so it can now raise a cap
+   error after one or more real model calls already happened in this
+   same turn, not only before any of them.
 5. Record the usage generate_reply actually reports. This runs whether or
    not the reply ever reaches a customer: real money was already spent
    the moment the model was called, and a spend cap that only sees usage
    from calls that got all the way to a successful send would not be
    capping anything for as long as the send/guard PR is not yet merged.
 
-Two failure modes below are deliberately non-propagating, both logged at
-ERROR and answered with 200 rather than left to bubble into an unhandled
-500:
+Three failure modes below are deliberately non-propagating, all logged at
+ERROR (or, for the cap case, already logged by check_token_spend_caps
+itself for the daily cap) and answered with 200 rather than left to
+bubble into an unhandled 500:
 
+- generate_reply raising TokenSpendCapExceededError or
+  DailySpendCapExceededError with a nonzero usage_so_far: one or more
+  real model calls already happened this turn before the cap tripped on
+  a later one. That usage is recorded (via the same
+  _record_usage_or_log_failure helper as the normal path) before the
+  turn is treated as capped — dropping it would silently reopen the
+  exact gap the two failure modes below exist to close, just via a third
+  door. (usage_so_far is zero when the cap was already at or over its
+  limit before this turn's first model call — same as before this
+  module re-checked mid-turn — so there is nothing to record then.)
 - generate_reply raising UsageUnavailableError: the model call already
   happened (real spend), but the response carried no usable usage data.
 - record_token_usage itself raising, for any reason: the model call
   already succeeded and its usage figures are known, but the INSERT
   failed.
 
-In both cases, a 500 would make Meta retry the delivery — and the retry
-cannot help, because migration 0024's idempotent message insert makes any
-retry resolve as a duplicate before ever reaching generate_reply or
-record_token_usage again (see _insert_inbound_message below). That would
-turn one already-spent, unrecorded model call into a *permanently*
+In all three cases, a 500 would make Meta retry the delivery — and the
+retry cannot help, because migration 0024's idempotent message insert
+makes any retry resolve as a duplicate before ever reaching generate_reply
+or record_token_usage again (see _insert_inbound_message below). That
+would turn one already-spent, unrecorded model call into a *permanently*
 unrecorded one instead of a merely late one. Returning 200 stops the
 retry; the ERROR log is what makes the gap visible instead.
 """
@@ -70,7 +83,7 @@ from services.agent.llm.caps import (
 )
 from services.agent.llm.client import GeminiTransport, ModelTransport
 from services.agent.llm.config import LlmSettings, load_llm_settings
-from services.agent.llm.conversation import generate_reply
+from services.agent.llm.conversation import UsageTotals, generate_reply
 from services.agent.llm.errors import (
     DailySpendCapExceededError,
     TokenSpendCapExceededError,
@@ -257,6 +270,50 @@ def _insert_inbound_message(
     return int(row[0]) if row is not None else None
 
 
+def _record_usage_or_log_failure(
+    conn: psycopg.Connection[Any],
+    *,
+    conversation_id: int,
+    customer_phone: str,
+    usage: UsageTotals,
+    now: datetime,
+) -> bool:
+    """Attempts record_token_usage; on any failure (deliberately not
+    narrowed to psycopg.Error — see the call site this was extracted
+    from), logs at ERROR with the conversation id and usage figures
+    instead of propagating, and returns False rather than raising.
+    Returns True on success.
+
+    Shared by every call site in this module that must not lose usage to
+    an unhandled 500 — the module docstring explains why: this module's
+    two other call sites are the normal post-reply write, and the write
+    for usage a mid-turn spend cap already collected via
+    TokenSpendCapExceededError/DailySpendCapExceededError's usage_so_far.
+    """
+    try:
+        record_token_usage(
+            conn,
+            conversation_id=conversation_id,
+            customer_phone=customer_phone,
+            usage=usage,
+            now=now,
+        )
+    except Exception:
+        logger.error(
+            json.dumps(
+                {
+                    "event": "record_token_usage_failed",
+                    "conversation_id": conversation_id,
+                    "prompt_tokens": usage.prompt_tokens,
+                    "candidates_tokens": usage.candidates_tokens,
+                    "total_tokens": usage.total_tokens,
+                }
+            )
+        )
+        return False
+    return True
+
+
 @router.get("/webhook/whatsapp")
 async def verify_subscription(
     hub_mode: str = Query(alias="hub.mode"),
@@ -350,11 +407,26 @@ async def receive_message(request: Request) -> JSONResponse:
                 settings=llm_settings,
                 now=now,
             )
-        except (
-            TurnCapExceededError,
-            TokenSpendCapExceededError,
-            DailySpendCapExceededError,
-        ):
+        except TurnCapExceededError:
+            return JSONResponse({"status": "capped"})
+        except (TokenSpendCapExceededError, DailySpendCapExceededError) as cap_error:
+            # usage_so_far is nonzero exactly when one or more real model
+            # calls already happened this turn before a later one tripped
+            # the cap (conversation.py now re-checks before every call in
+            # its tool-calling loop, not only the first) — that spend must
+            # be recorded before the turn is discarded as capped, or it is
+            # lost the same way an unhandled UsageUnavailableError would
+            # lose it. Zero means the cap was already at its limit before
+            # this turn made any call at all, same as before that recheck
+            # existed — nothing to record then.
+            if cap_error.usage_so_far.total_tokens > 0:
+                _record_usage_or_log_failure(
+                    conn,
+                    conversation_id=conversation_id,
+                    customer_phone=inbound.customer_phone,
+                    usage=cap_error.usage_so_far,
+                    now=now,
+                )
             return JSONResponse({"status": "capped"})
         except UsageUnavailableError:
             logger.error(
@@ -367,33 +439,12 @@ async def receive_message(request: Request) -> JSONResponse:
             )
             return JSONResponse({"status": "usage_unavailable"})
 
-        try:
-            record_token_usage(
-                conn,
-                conversation_id=conversation_id,
-                customer_phone=inbound.customer_phone,
-                usage=reply.usage,
-                now=now,
-            )
-        except Exception:
-            # Deliberately not narrowed to psycopg.Error: whatever the
-            # failure mode — a database error, a bug in this module, an
-            # unexpected value — the retry-into-a-permanent-gap risk this
-            # except exists to prevent (see the module docstring) does not
-            # care why the INSERT didn't happen. A narrower catch would
-            # leave that same gap open for any failure mode it didn't
-            # anticipate.
-            logger.error(
-                json.dumps(
-                    {
-                        "event": "record_token_usage_failed",
-                        "conversation_id": conversation_id,
-                        "prompt_tokens": reply.usage.prompt_tokens,
-                        "candidates_tokens": reply.usage.candidates_tokens,
-                        "total_tokens": reply.usage.total_tokens,
-                    }
-                )
-            )
-            return JSONResponse({"status": "usage_not_recorded"})
-
-    return JSONResponse({"status": "processed"})
+        if _record_usage_or_log_failure(
+            conn,
+            conversation_id=conversation_id,
+            customer_phone=inbound.customer_phone,
+            usage=reply.usage,
+            now=now,
+        ):
+            return JSONResponse({"status": "processed"})
+        return JSONResponse({"status": "usage_not_recorded"})

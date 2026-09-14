@@ -21,7 +21,7 @@ from google.genai import types
 from services.agent.llm import conversation as conversation_module
 from services.agent.llm.config import MAX_TOOL_ITERATIONS, LlmSettings
 from services.agent.llm.context import ConversationState
-from services.agent.llm.conversation import generate_reply
+from services.agent.llm.conversation import UsageTotals, generate_reply
 from services.agent.llm.errors import (
     DailySpendCapExceededError,
     TokenSpendCapExceededError,
@@ -242,10 +242,12 @@ def test_generate_reply_refuses_when_the_conversation_token_cap_is_hit(
     _stub_conversation_state(monkeypatch, turn_count=0)
 
     def _raise_token_cap(
-        _conn: Any, *, conversation_id: int, now: Any, settings: Any
+        _conn: Any, *, conversation_id: int, now: Any, settings: Any, usage_so_far: Any
     ) -> None:
         del conversation_id, now, settings
-        raise TokenSpendCapExceededError("conversation 1 is at its token cap")
+        raise TokenSpendCapExceededError(
+            "conversation 1 is at its token cap", usage_so_far=usage_so_far
+        )
 
     monkeypatch.setattr(conversation_module, "check_token_spend_caps", _raise_token_cap)
     transport = FakeTransport([_text_response("should never be reached")])
@@ -270,10 +272,12 @@ def test_generate_reply_refuses_when_the_daily_spend_cap_is_hit(
     _stub_conversation_state(monkeypatch, turn_count=0)
 
     def _raise_daily_cap(
-        _conn: Any, *, conversation_id: int, now: Any, settings: Any
+        _conn: Any, *, conversation_id: int, now: Any, settings: Any, usage_so_far: Any
     ) -> None:
         del conversation_id, now, settings
-        raise DailySpendCapExceededError("today's spend is at the daily cap")
+        raise DailySpendCapExceededError(
+            "today's spend is at the daily cap", usage_so_far=usage_so_far
+        )
 
     monkeypatch.setattr(conversation_module, "check_token_spend_caps", _raise_daily_cap)
     transport = FakeTransport([_text_response("should never be reached")])
@@ -290,6 +294,71 @@ def test_generate_reply_refuses_when_the_daily_spend_cap_is_hit(
             )
         )
     assert transport.calls == []
+
+
+def test_generate_reply_rechecks_the_spend_cap_before_every_model_call(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The whole point of re-checking mid-loop is that the check must see
+    usage accumulated during the current turn -- not only what
+    check_token_spend_caps itself would read from token_usage, which
+    generate_reply never writes to (see the module docstring). This test
+    proves the wiring: generate_reply threads its running UsageTotals into
+    the check on every iteration, by recording exactly what usage_so_far
+    each call received. A fake stands in for check_token_spend_caps here
+    (real SUM-query/threshold arithmetic is covered by
+    tests/integration/test_llm_caps.py) so this stays a fast, no-database
+    test of generate_reply's own orchestration."""
+    _stub_conversation_state(monkeypatch, turn_count=0)
+    seen_usage_so_far: list[UsageTotals] = []
+
+    def _check(
+        _conn: Any,
+        *,
+        conversation_id: int,
+        now: Any,
+        settings: Any,
+        usage_so_far: UsageTotals,
+    ) -> None:
+        del conversation_id, now, settings
+        seen_usage_so_far.append(usage_so_far)
+        if usage_so_far.total_tokens >= 20:
+            raise TokenSpendCapExceededError(
+                "conversation 1 crossed its cap mid-turn", usage_so_far=usage_so_far
+            )
+
+    monkeypatch.setattr(conversation_module, "check_token_spend_caps", _check)
+    monkeypatch.setattr(
+        conversation_module,
+        "dispatch_tool",
+        lambda _conn, _name, _args, **_kwargs: {"available": False},
+    )
+    # Each call reports 12 tokens; the fake cap trips at 20, so it must
+    # cross between the second and third calls (0, then 12, then 24).
+    responses = [
+        _function_call_response("check_availability", {"hotel_id": 1}),
+        _function_call_response("check_availability", {"hotel_id": 1}),
+    ]
+    transport = FakeTransport(responses)
+
+    with pytest.raises(TokenSpendCapExceededError) as exc_info:
+        asyncio.run(
+            generate_reply(
+                _NOT_A_CONNECTION,
+                conversation_id=1,
+                customer_name=None,
+                transport=transport,
+                settings=_SETTINGS,
+                now=_NOW,
+            )
+        )
+
+    assert [usage.total_tokens for usage in seen_usage_so_far] == [0, 12, 24]
+    # Exactly 2 real model calls happened -- the loop stopped at the
+    # crossing point (the 3rd iteration's pre-check), not after exhausting
+    # MAX_TOOL_ITERATIONS and not after a 3rd call.
+    assert len(transport.calls) == 2
+    assert exc_info.value.usage_so_far.total_tokens == 24
 
 
 def test_generate_reply_raises_usage_unavailable_when_metadata_is_missing(

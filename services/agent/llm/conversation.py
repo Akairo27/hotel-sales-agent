@@ -8,12 +8,17 @@ through dispatch.py, and returns an AgentReply. It never writes to
 conversations or messages, and it never sends anything to a customer —
 both belong to the not-yet-built webhook.
 
-Spend caps are checked, not written. check_token_spend_caps runs right
-after the turn-cap check, before any model call, against the token_usage
-log (services.agent.llm.caps) — but generate_reply never inserts into
-that log itself. Recording a call's usage happens only once a reply has
-passed the output guard and been sent, which is the webhook's job
-(services.agent.llm.caps.record_token_usage), not this module's.
+Spend caps are checked, not written. check_token_spend_caps
+(services.agent.llm.caps) runs before every transport.generate() call
+inside the tool-calling loop below — not just once before the loop — so
+a conversation sitting just under its cap cannot ride out up to
+MAX_TOOL_ITERATIONS model calls in one turn before the cap is next
+consulted. Each check is passed `usage`, the running UsageTotals
+accumulated by this turn's own calls so far: generate_reply never inserts
+into token_usage itself (recording is the webhook's job, once the whole
+turn ends — services.agent.llm.caps.record_token_usage), so without
+threading `usage` in, a same-turn recheck would only ever see what was
+already committed before the turn started and would catch nothing new.
 """
 
 from __future__ import annotations
@@ -143,11 +148,17 @@ async def generate_reply(
             before any model call; the caller must escalate instead of
             calling this again for this conversation.
         TokenSpendCapExceededError: this conversation's logged token
-            usage has already reached settings.max_tokens_per_conversation
-            — raised before any model call, same as the turn cap.
+            usage, plus this turn's own usage so far, has reached
+            settings.max_tokens_per_conversation. Checked before every
+            model call in the tool-calling loop below, not only the
+            first — so this can follow one or more real model calls
+            already made in this same turn. Carries that turn's usage so
+            far; the caller must record it before discarding the turn.
         DailySpendCapExceededError: today's (Asia/Riyadh calendar day)
-            estimated spend across every conversation has already
-            reached settings.max_spend_per_day_usd.
+            estimated spend across every conversation, plus this turn's
+            own usage so far, has reached settings.max_spend_per_day_usd.
+            Same mid-turn timing and usage-carrying contract as
+            TokenSpendCapExceededError above.
         UsageUnavailableError: a model response carried no usable
             token-usage data — see _usage_from.
         ToolLoopLimitError: the model kept calling tools past
@@ -164,9 +175,6 @@ async def generate_reply(
             f"conversation {conversation_id} is at its turn cap "
             f"({settings.max_conversation_turns})"
         )
-    check_token_spend_caps(
-        conn, conversation_id=conversation_id, now=now, settings=settings
-    )
 
     messages = load_recent_messages(conn, conversation_id, limit=MESSAGE_WINDOW)
     contents = build_contents(messages)
@@ -177,6 +185,13 @@ async def generate_reply(
     usage = UsageTotals.zero()
 
     for _ in range(MAX_TOOL_ITERATIONS):
+        check_token_spend_caps(
+            conn,
+            conversation_id=conversation_id,
+            now=now,
+            settings=settings,
+            usage_so_far=usage,
+        )
         response = await transport.generate(
             contents=contents, system_instruction=system_instruction
         )
