@@ -115,9 +115,16 @@ def test_check_token_spend_caps_sums_usage_across_several_calls(
 def test_check_token_spend_caps_conversation_cap_is_isolated_per_conversation(
     db_conn: psycopg.Connection[Any],
 ) -> None:
+    """Migration 0026 gives conversations a unique customer_phone — one
+    phone number maps to exactly one conversation, reused indefinitely, so
+    "two conversations for the same number" is no longer a real scenario.
+    Isolation is proven across two different numbers instead: one
+    conversation's usage must never affect another's per-conversation
+    cap (the global daily cap's cross-number behavior is covered
+    separately below)."""
     settings = _settings(max_tokens_per_conversation=100)
     capped_conversation_id = seed_conversation(db_conn, customer_phone=_PHONE)
-    other_conversation_id = seed_conversation(db_conn, customer_phone=_PHONE)
+    other_conversation_id = seed_conversation(db_conn, customer_phone=_OTHER_PHONE)
     record_token_usage(
         db_conn,
         conversation_id=capped_conversation_id,
@@ -130,7 +137,7 @@ def test_check_token_spend_caps_conversation_cap_is_isolated_per_conversation(
         check_token_spend_caps(
             db_conn, conversation_id=capped_conversation_id, now=_NOW, settings=settings
         )
-    # Same phone number, a different conversation — must not be blocked by
+    # A different conversation (and phone number) — must not be blocked by
     # the other conversation's usage.
     check_token_spend_caps(
         db_conn, conversation_id=other_conversation_id, now=_NOW, settings=settings
