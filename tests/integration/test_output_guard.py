@@ -142,8 +142,8 @@ def test_load_allowed_amounts_ignores_quotes_from_another_conversation(
     db_conn: psycopg.Connection[Any],
 ) -> None:
     hotel_id, room_type_id = seed_hotel_and_room_type(db_conn)
-    this_conversation = seed_conversation(db_conn)
-    other_conversation = seed_conversation(db_conn)
+    this_conversation = seed_conversation(db_conn, customer_phone="+966500000001")
+    other_conversation = seed_conversation(db_conn, customer_phone="+966500000002")
     seed_quote(
         db_conn,
         hotel_id,

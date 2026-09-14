@@ -124,6 +124,9 @@ class UsageUnavailableError(LlmError):
 
     Raised instead of silently treating the call as free: a cap enforced
     against an undercounted total isn't a cap. Propagates uncaught through
-    generate_reply, same as a pricing misconfiguration — the caller must
-    escalate, not retry blindly.
+    generate_reply, same as a pricing misconfiguration. The webhook is the
+    catcher: the model call already happened (real spend) by the time this
+    is raised, so it logs at ERROR and returns 200 rather than retrying —
+    see services/agent/webhook.py's module docstring for why a 500 here
+    would be worse, not safer.
     """

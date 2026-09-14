@@ -513,6 +513,7 @@ dependencies = [
     { name = "fastapi" },
     { name = "google-genai" },
     { name = "hijridate" },
+    { name = "httpx" },
     { name = "psycopg", extra = ["binary"] },
     { name = "uvicorn" },
 ]
@@ -533,6 +534,7 @@ requires-dist = [
     { name = "fastapi", specifier = "==0.141.1" },
     { name = "google-genai", specifier = "==2.20.0" },
     { name = "hijridate", specifier = "==2.6.0" },
+    { name = "httpx", specifier = "==0.28.1" },
     { name = "psycopg", extras = ["binary"], specifier = "==3.3.4" },
     { name = "uvicorn", specifier = "==0.52.4" },
 ]

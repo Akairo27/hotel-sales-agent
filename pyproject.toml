@@ -10,6 +10,7 @@ dependencies = [
     "fastapi==0.141.1",
     "uvicorn==0.52.4",
     "google-genai==2.20.0",
+    "httpx==0.28.1",
 ]
 
 [dependency-groups]
@@ -58,7 +59,13 @@ select = [
 
 [tool.ruff.lint.per-file-ignores]
 # Tests assert; that is their job.
-"tests/**" = ["S101"]
+# S105/S106: bandit's hardcoded-password heuristic fires on the field/
+# parameter names this repo's own webhook-signature and secret-handling
+# code legitimately uses (verify_token, app_secret) whenever a test
+# asserts against them or builds a fake value for one -- real secret
+# detection is gitleaks' job (a separate, more precise pre-commit gate),
+# not this name-pattern heuristic.
+"tests/**" = ["S101", "S105", "S106"]
 
 # ---------------------------------------------------------------------------
 # mypy — strict everywhere, no exceptions

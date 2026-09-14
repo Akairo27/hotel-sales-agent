@@ -63,6 +63,21 @@ def test_conversations_turn_count_cannot_be_negative(
         )
 
 
+def test_conversations_customer_phone_must_be_unique(
+    db_conn: psycopg.Connection[Any],
+) -> None:
+    """Migration 0026: one phone number maps to exactly one conversation
+    row, reused indefinitely — the webhook's find-or-create (an
+    INSERT ... ON CONFLICT (customer_phone)) relies on this constraint to
+    stay race-safe under concurrent deliveries for the same number."""
+    seed_conversation(db_conn, customer_phone="+966500000001")
+
+    with pytest.raises(
+        psycopg.errors.UniqueViolation, match="conversations_customer_phone_unique"
+    ):
+        seed_conversation(db_conn, customer_phone="+966500000001")
+
+
 def test_messages_direction_must_be_valid(db_conn: psycopg.Connection[Any]) -> None:
     conversation_id = seed_conversation(db_conn)
 
