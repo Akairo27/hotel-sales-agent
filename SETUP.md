@@ -255,6 +255,24 @@ git push origin test/gates
 
 لاحقاً عند الإنتاج، تنشئ مشروعاً ثانياً منفصلاً.
 
+### قاعدة بيانات الاختبار المحلية (TEST_DATABASE_URL)
+
+لتشغيل حزمة الاختبارات الكاملة (`pytest`) ضد Postgres حقيقي محلياً،
+`TEST_DATABASE_URL` **لازم يتصل بدور `postgres`**، لا دورك الشخصي:
+
+```
+postgresql://postgres@localhost:5432/hotel_sales_test
+```
+
+**السبب:** قواعد `ALTER DEFAULT PRIVILEGES` في ميقريشن 0012 مقيّدة بـ
+`FOR ROLE postgres` تحديداً (راجع ARCHITECTURE.md §8). من يتصل بدوره
+الشخصي (مثلاً عبر مقبس يونكس بهوية نظام التشغيل) تفشل عنده ست اختبارات
+في `tests/integration/test_default_privileges_lockdown.py` و
+`tests/integration/test_customer_erasure.py` برسالة `DID NOT RAISE` —
+ويوهم هذا أن حماية تنفيذ الدوال مكسورة، وهي سليمة فعلاً. الـ CI يتصل
+بدور `postgres` دائماً، فهذا الفشل محلي بحت ولا يعني وجود مشكلة حقيقية
+في المستودع.
+
 ---
 
 # الجزء ٧ — دورة العمل اليومية
