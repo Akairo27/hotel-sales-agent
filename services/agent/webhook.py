@@ -1,28 +1,29 @@
 """The WhatsApp Cloud API webhook — ARCHITECTURE.md §2, §7, §8; PLAN.md
 phase 4.
 
-Deliberately incomplete: this module verifies the channel, stores the
-inbound message, enforces CLAUDE.md §9's two required caps (per-
-conversation token spend, per-number-per-day message rate), and calls the
-model if neither cap blocks it. It never runs the output guard and never
-sends anything back to the customer over the WhatsApp Cloud API — that is
-a separate, later PR's job. Splitting it this way lets signature
-verification, idempotent storage, and cap enforcement ship and be tested
-independently of the (much larger) reply-generation/guard/send pipeline.
+Verifies the channel, stores the inbound message, enforces CLAUDE.md §9's
+two required caps, calls the model, runs the output guard on whatever it
+produced, and sends the result over the WhatsApp Cloud API — the output
+guard and the send ship together in this module, deliberately: a guard
+with nothing downstream to protect is untested in the one way that
+matters (does a real send ever bypass it), and a send with no guard in
+front of it is exactly the "wrong price reaches a customer" failure mode
+CLAUDE.md rule 8 exists to prevent. Building either alone would mean
+shipping half of a safety property.
 
 Order matters and is deliberate:
 1. Verify X-Hub-Signature-256 against the raw body, before touching the
    database at all. An unsigned or forged request leaves no trace.
-2. Store the inbound message. A message that later gets capped is not a
-   lost message — it stays in the database so a "the bot never replied"
-   complaint can be investigated.
+2. Store the inbound message. A message that later gets capped or
+   blocked is not a lost message — it stays in the database so a "the
+   bot never replied" complaint can be investigated.
 3. Check the per-number-per-day message rate (services.agent.llm.caps),
    before generate_reply is even called.
 4. Call generate_reply. Its tool-calling loop can raise any of several
    exceptions (see conversation.py's own docstring) after one or more
    real, already-paid-for model calls happened in the same turn — not
    only before any of them, since the per-conversation and daily spend
-   caps are now re-checked before every model call, not just the first.
+   caps are re-checked before every model call, not just the first.
 5. Whatever generate_reply raises or returns, record any usage it
    reports before deciding how to respond. See _handle_generate_reply_
    failure below: recording happens exactly once, driven by whether the
@@ -30,21 +31,37 @@ Order matters and is deliberate:
    read_usage_so_far), not by a per-exception-type checklist — a new
    exception type added to generate_reply's loop in the future is
    covered automatically, without touching this module.
+6. Run services.agent.output_guard.enforcement.enforce_outbound_text on
+   the candidate reply. Allowed: send it. Blocked: never send it, never
+   ask the model to rephrase it (a second, unmanipulated attempt is not
+   guaranteed, and it would spend more tokens on a turn that already
+   failed) — send OUTPUT_GUARD_FALLBACK_MESSAGE instead, a fixed,
+   non-LLM-generated string, through the exact same enforce_outbound_text
+   call (its own module docstring already names this as a canned
+   template's intended path, not a bypass). enforce_outbound_text already
+   opens the escalation for the blocked reply on its own — this module
+   adds nothing to that, just acts on the verdict.
+7. Send via services.agent.whatsapp_send. A failure here — or the
+   fallback itself somehow being blocked, which test_output_guard_
+   fallback_message_is_always_allowed (tests/integration/
+   test_output_guard.py) exists specifically to make structurally
+   impossible, not just unlikely — is handled the same way as every
+   other failure in this module: logged loudly, never a 500.
 
-This module never lets a 500 escape from generate_reply or
-record_token_usage, for one reason that applies uniformly regardless of
-which exception fired or why: migration 0024's idempotent message insert
-makes any Meta retry resolve as a duplicate before ever reaching
-generate_reply or record_token_usage again (see _insert_inbound_message
-below) — so a 500 here can never be fixed by the retry it provokes, and
-can only turn an already-spent, unrecorded model call into a
-*permanently* unrecorded one. Turning every such failure into a 200
-instead is not the same as hiding it: everything that is not one of the
-two expected, named outcomes ("capped", "usage_unavailable") is logged at
-ERROR with the exception's own type name, message, and full traceback
-(see _handle_generate_reply_failure) — a real bug or a database outage
-stays exactly as visible in the logs as it would be behind a 500, it just
-stops provoking a retry that cannot help.
+This module never lets a 500 escape from generate_reply, the output
+guard, the send, or any of the three usage/message-recording writes, for
+one reason that applies uniformly regardless of which step failed or why:
+migration 0024's idempotent message insert makes any Meta retry resolve
+as a duplicate before ever reaching generate_reply or any of these writes
+again (see _insert_inbound_message below) — so a 500 here can never be
+fixed by the retry it provokes, and can only turn an already-spent,
+unrecorded, or undelivered turn into a *permanently* unrecorded or
+undelivered one. Turning every such failure into a 200 instead is not the
+same as hiding it: everything that is not one of the expected, named
+outcomes is logged at ERROR with the exception's own type name, message,
+and full traceback — a real bug or a database outage stays exactly as
+visible in the logs as it would be behind a 500, it just stops provoking
+a retry that cannot help.
 """
 
 from __future__ import annotations
@@ -78,6 +95,16 @@ from services.agent.llm.errors import (
     TurnCapExceededError,
     UsageUnavailableError,
     read_usage_so_far,
+)
+from services.agent.output_guard.enforcement import (
+    OUTPUT_GUARD_FALLBACK_MESSAGE,
+    enforce_outbound_text,
+)
+from services.agent.whatsapp_send import (
+    WhatsAppCloudApiSender,
+    WhatsAppSender,
+    WhatsAppSendSettings,
+    load_whatsapp_send_settings,
 )
 
 logger = logging.getLogger(__name__)
@@ -130,6 +157,14 @@ def get_llm_settings() -> LlmSettings:
 
 def get_model_transport(settings: LlmSettings) -> ModelTransport:
     return GeminiTransport(settings)
+
+
+def get_whatsapp_send_settings() -> WhatsAppSendSettings:
+    return load_whatsapp_send_settings()
+
+
+def get_whatsapp_sender(settings: WhatsAppSendSettings) -> WhatsAppSender:
+    return WhatsAppCloudApiSender(settings)
 
 
 @contextlib.contextmanager
@@ -257,6 +292,94 @@ def _insert_inbound_message(
         (conversation_id, customer_phone, whatsapp_message_id, body),
     ).fetchone()
     return int(row[0]) if row is not None else None
+
+
+def _insert_outbound_message(
+    conn: psycopg.Connection[Any],
+    *,
+    conversation_id: int,
+    customer_phone: str,
+    whatsapp_message_id: str,
+    body: str,
+) -> None:
+    """Records one outbound message. Called only after a real WhatsApp
+    Cloud API send actually succeeded (see _send_or_log_failure) — a row
+    here is always proof of an attempted delivery that got a message id
+    back, never merely an intention to send. No idempotency handling
+    needed, unlike _insert_inbound_message: each send produces a fresh
+    WhatsApp-assigned id, and this function is only ever reached once per
+    inbound delivery (a retried inbound delivery short-circuits on
+    _insert_inbound_message's own idempotent insert, long before this
+    point — see the module docstring).
+    """
+    conn.execute(
+        "INSERT INTO messages "
+        "(conversation_id, customer_phone, direction, whatsapp_message_id, body) "
+        "VALUES (%s, %s, 'outbound', %s, %s)",
+        (conversation_id, customer_phone, whatsapp_message_id, body),
+    )
+
+
+async def _send_or_log_failure(
+    sender: WhatsAppSender,
+    *,
+    conn: psycopg.Connection[Any],
+    conversation_id: int,
+    customer_phone: str,
+    text: str,
+) -> str | None:
+    """Attempts the real WhatsApp send; on any failure (deliberately not
+    narrowed to WhatsAppSendError — see _record_usage_or_log_failure's
+    own docstring for the identical reasoning), logs at ERROR with the
+    conversation id, exception type, message, and full traceback, and
+    returns None rather than propagating. On success, attempts to record
+    the outbound message (_insert_outbound_message) and always returns
+    the WhatsApp-assigned message id regardless of whether that recording
+    succeeded: the send itself already happened — the customer already
+    has the message — so a failure to log it afterward must not be
+    reported the same way as the send itself failing, and must not
+    propagate either, for the same reasons as every other write in this
+    module. This function therefore never raises.
+    """
+    to_phone = customer_phone.removeprefix("+")
+    try:
+        whatsapp_message_id = await sender.send_text(to_phone=to_phone, body=text)
+    except Exception as exc:
+        logger.error(
+            json.dumps(
+                {
+                    "event": "whatsapp_send_failed",
+                    "conversation_id": conversation_id,
+                    "exception_type": type(exc).__name__,
+                    "exception_message": str(exc),
+                }
+            ),
+            exc_info=exc,
+        )
+        return None
+
+    try:
+        _insert_outbound_message(
+            conn,
+            conversation_id=conversation_id,
+            customer_phone=customer_phone,
+            whatsapp_message_id=whatsapp_message_id,
+            body=text,
+        )
+    except Exception as exc:
+        logger.error(
+            json.dumps(
+                {
+                    "event": "outbound_message_not_recorded",
+                    "conversation_id": conversation_id,
+                    "whatsapp_message_id": whatsapp_message_id,
+                    "exception_type": type(exc).__name__,
+                    "exception_message": str(exc),
+                }
+            ),
+            exc_info=exc,
+        )
+    return whatsapp_message_id
 
 
 def _record_usage_or_log_failure(
@@ -506,12 +629,89 @@ async def receive_message(request: Request) -> JSONResponse:
                 now=now,
             )
 
-        if _record_usage_or_log_failure(
+        usage_recorded = _record_usage_or_log_failure(
             conn,
             conversation_id=conversation_id,
             customer_phone=inbound.customer_phone,
             usage=reply.usage,
             now=now,
-        ):
-            return JSONResponse({"status": "processed"})
-        return JSONResponse({"status": "usage_not_recorded"})
+        )
+
+        try:
+            verdict = enforce_outbound_text(
+                conn, conversation_id=conversation_id, text=reply.text
+            )
+            if verdict.allowed:
+                text_to_send = reply.text
+            else:
+                text_to_send = OUTPUT_GUARD_FALLBACK_MESSAGE
+                fallback_verdict = enforce_outbound_text(
+                    conn,
+                    conversation_id=conversation_id,
+                    text=OUTPUT_GUARD_FALLBACK_MESSAGE,
+                )
+                if not fallback_verdict.allowed:
+                    # Should be structurally impossible -- see the module
+                    # docstring and test_output_guard_fallback_message_
+                    # is_always_allowed (tests/integration/
+                    # test_output_guard.py). Not routed around with a
+                    # second fallback attempt: that is the exact
+                    # infinite-regress trap this design avoids. Both
+                    # escalations already exist (enforce_outbound_text
+                    # opened one for each call); this log is what makes
+                    # the second one impossible to miss immediately.
+                    logger.error(
+                        json.dumps(
+                            {
+                                "event": "fallback_message_blocked",
+                                "conversation_id": conversation_id,
+                                "original_escalation_id": verdict.escalation_id,
+                                "fallback_escalation_id": (
+                                    fallback_verdict.escalation_id
+                                ),
+                            }
+                        )
+                    )
+                    status = (
+                        "fallback_blocked" if usage_recorded else "usage_not_recorded"
+                    )
+                    return JSONResponse({"status": status})
+
+            whatsapp_settings = get_whatsapp_send_settings()
+            sender = get_whatsapp_sender(whatsapp_settings)
+            whatsapp_message_id = await _send_or_log_failure(
+                sender,
+                conn=conn,
+                conversation_id=conversation_id,
+                customer_phone=inbound.customer_phone,
+                text=text_to_send,
+            )
+        except Exception as exc:
+            # Everything above this point -- both enforce_outbound_text
+            # calls, loading WhatsApp send settings, constructing the
+            # sender -- can in principle fail (a DB blip, a missing env
+            # var). _send_or_log_failure itself never raises (see its own
+            # docstring), but is included here too as defense in depth,
+            # the same reasoning as everywhere else in this module: any
+            # exception after real spend must be loud, never a 500.
+            logger.error(
+                json.dumps(
+                    {
+                        "event": "reply_delivery_failed",
+                        "conversation_id": conversation_id,
+                        "exception_type": type(exc).__name__,
+                        "exception_message": str(exc),
+                    }
+                ),
+                exc_info=exc,
+            )
+            status = "delivery_failed" if usage_recorded else "usage_not_recorded"
+            return JSONResponse({"status": status})
+
+        if whatsapp_message_id is None:
+            status = "send_failed" if usage_recorded else "usage_not_recorded"
+            return JSONResponse({"status": status})
+
+        if not usage_recorded:
+            return JSONResponse({"status": "usage_not_recorded"})
+        return JSONResponse({"status": "processed" if verdict.allowed else "escalated"})

@@ -20,9 +20,11 @@ from lib.money import format_halalas_as_sar
 from services.agent.llm.dispatch import dispatch_get_quote
 from services.agent.llm.errors import ConversationNotFoundError
 from services.agent.output_guard.enforcement import (
+    OUTPUT_GUARD_FALLBACK_MESSAGE,
     REASON_FOREIGN_CURRENCY,
     REASON_MISMATCH,
     REASON_MISSING_CURRENCY,
+    REASON_PERCENTAGE_STATED,
     REASON_UNPARSEABLE,
     enforce_outbound_text,
 )
@@ -534,3 +536,67 @@ def test_a_reply_quoting_a_real_compute_quote_result_is_allowed(
         text=f"Your total for the stay is {wrong_display}.",
     )
     assert blocked_verdict.allowed is False
+
+
+def test_a_stated_margin_percentage_gets_the_percentage_reason(
+    db_conn: psycopg.Connection[Any],
+) -> None:
+    hotel_id, room_type_id = seed_hotel_and_room_type(db_conn)
+    conversation_id = seed_conversation(db_conn)
+    seed_quote(
+        db_conn,
+        hotel_id,
+        room_type_id,
+        conversation_id=conversation_id,
+        ask_price_total=135_000,
+        min_allowed_total=90_000,
+    )
+
+    verdict = enforce_outbound_text(
+        db_conn, conversation_id=conversation_id, text="Our margin is 20%"
+    )
+
+    assert verdict.allowed is False
+    reason = db_conn.execute(
+        "SELECT reason FROM escalations WHERE id = %s", (verdict.escalation_id,)
+    ).fetchone()
+    assert reason == (REASON_PERCENTAGE_STATED,)
+
+
+def test_output_guard_fallback_message_is_always_allowed(
+    db_conn: psycopg.Connection[Any],
+) -> None:
+    """The customer-facing fallback (webhook.py's job to send, not this
+    module's) must be provably safe to send through this exact function
+    — see enforcement.py's own comment on OUTPUT_GUARD_FALLBACK_MESSAGE.
+    Checked against both a conversation with no quotes at all and one
+    with a real quote and floor, since either shape could in principle
+    interact differently with a digit-bearing message — this one has no
+    digits, so neither should ever block it.
+    """
+    no_quotes_conversation = seed_conversation(db_conn, customer_phone="+966544444441")
+    no_quotes_verdict = enforce_outbound_text(
+        db_conn,
+        conversation_id=no_quotes_conversation,
+        text=OUTPUT_GUARD_FALLBACK_MESSAGE,
+    )
+    assert no_quotes_verdict.allowed is True
+    assert no_quotes_verdict.escalation_id is None
+
+    hotel_id, room_type_id = seed_hotel_and_room_type(db_conn)
+    with_quote_conversation = seed_conversation(db_conn, customer_phone="+966544444442")
+    seed_quote(
+        db_conn,
+        hotel_id,
+        room_type_id,
+        conversation_id=with_quote_conversation,
+        ask_price_total=135_000,
+        min_allowed_total=90_000,
+    )
+    with_quote_verdict = enforce_outbound_text(
+        db_conn,
+        conversation_id=with_quote_conversation,
+        text=OUTPUT_GUARD_FALLBACK_MESSAGE,
+    )
+    assert with_quote_verdict.allowed is True
+    assert with_quote_verdict.escalation_id is None

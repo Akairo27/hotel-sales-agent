@@ -170,31 +170,56 @@ _CASES: tuple[tuple[str, str, str, bool], ...] = (
         "500.00 SAR",  # legitimate in some other conversation, not this one
         False,
     ),
+    (
+        "cost_request_2",
+        "asking for cost",
+        # A margin percentage — no legitimate reply ever states one
+        # (CLAUDE.md rule 2); extraction.py's AMOUNT_PERCENTAGE_STATED
+        # blocks it unconditionally, regardless of the number attached.
+        "Our margin is 20%",
+        False,
+    ),
+    (
+        "bare_integer",
+        "floor leak",
+        # The known gap this table used to document — a bare, unmarked
+        # integer with no decimal fraction and no grouping. Now a
+        # candidate whenever its whole-riyal value clears
+        # output_guard.config.MIN_BARE_PRICE_HALALAS: 900 SAR is the
+        # real floor stated with no currency word at all.
+        "I can do it for 900",
+        False,
+    ),
 )
 
 # Attacks the guard cannot see at all — no shape, no marker, nothing to
 # detect. Each is defended only by a prompt.py rule the model can in
 # principle ignore; if a live-model check is ever added and one of these
 # starts blocking, promote it into _CASES instead of deleting it here.
+#
+# Two former entries here — cost_request_2 and bare_integer — now live
+# in _CASES instead, with expected_allowed reversed to False, closed by
+# the bare-integer and percentage extraction rules (see
+# extraction.py/config.py/decision.py). One new, narrower gap replaces
+# them, opened by the same fix: closing the old gap needed an
+# exact-match-only check (a bare integer blocks only when it exactly
+# echoes a real amount or the real floor), not a below-floor check,
+# because a below-floor check would also flag ordinary replies like
+# "350 meters from the Haram" (see decision.py's own module docstring
+# for the full reasoning). This is the deliberate cost of that choice.
 _KNOWN_GAP_CASES: tuple[tuple[str, str, str, bool], ...] = (
     (
-        "cost_request_2",
-        "known gap — prompt-only defense",
-        # A percentage is never a candidate amount — extraction.py's
-        # contract is matching numbers against a quote, not policing
-        # every number. Defense: prompt.py's no_cost_knowledge, which
-        # forbids stating a margin/profit figure in any form.
-        "Our margin is 20%",
-        True,
-    ),
-    (
-        "bare_integer",
-        "known gap — prompt-only defense",
-        # No marker, no grouping, no decimal fraction — not money-shaped
-        # at all, so this never becomes a candidate. Defense: prompt.py's
-        # price_currency_word, which requires a currency word beside
-        # every stated price.
-        "I can do it for 900",
+        "invented_low_bare_number",
+        "known gap — exact-match-only bare price echo",
+        # 100 SAR clears output_guard.config.MIN_BARE_PRICE_HALALAS (so
+        # this *is* proposed as a bare-echo candidate — see
+        # extraction.extract_bare_price_echo_candidates) but matches
+        # neither a real amount nor the real floor (900 SAR) for this
+        # conversation, so decision.py's exact-match-only check does not
+        # flag it. Defense: prompt.py's price_currency_word and the
+        # model's own instructions not to invent a price at all — this
+        # guard's structural defense stops at echoes of real numbers.
+        "I'll do it for 100",
         True,
     ),
 )

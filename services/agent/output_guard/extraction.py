@@ -48,15 +48,52 @@ Two currency-aware behaviors sit on top of the marker/shape split:
   currency word at all) — enumerating every world currency can never be
   complete, but requiring the one currency this system actually uses is.
 
-Known, documented gap: a bare, ungrouped integer with no decimal fraction
-and no marker ("I can do it for 900") is still not money-shaped and still
-never becomes a candidate at all — no shape-based or marker-based rule
-here can see it, since there is nothing to detect. Closing it needed the
-model to be required to state a currency word with every price it gives —
-a prompt.py change (price_currency_word), not an extraction heuristic.
+A bare, ungrouped integer with no decimal fraction and no marker ("I can
+do it for 900") is not money-shaped and carries no marker, so
+extract_candidate_amounts never treats it as a candidate at all — that
+function's contract is unchanged here, and stays proven by
+tests/unit/test_output_guard_extraction.py's "350 meters from the Haram"
+case: a bare integer's magnitude cannot tell a price apart from a
+distance in meters, a booking reference, or a phone number. Those are
+the same shape at this layer; nothing here can tell them apart.
 
-Also out of scope: a percentage, in any script or digit set, is never a
-candidate here — it is not an amount.
+What actually closes the gap lives one layer up, in decision.py, which
+has something this module deliberately does not: a conversation's real
+quoted amounts and floor. extract_bare_price_echo_candidates (below) is
+a second, separate function — not folded into extract_candidate_amounts
+— that proposes bare integers as *candidates for an exact-match check
+only*, never for the broader not-in-quotes/below-floor matching every
+other candidate goes through: a digit run at least
+output_guard.config.MIN_BARE_PRICE_HALALAS and not adjacent to a "-" or
+"/" joining it to another digit run (an ISO date the model is restating
+from a real get_quote result — "2026-09-10" tokenizes as three separate
+bare digit runs, and a 4-digit year is exactly the one bare shape large
+enough to otherwise clear the price floor).
+
+Exact-match-only, not below-floor, is a deliberate choice, not a
+simplification: the dangerous case is a number that looks legitimate
+because it mirrors a real quoted value — the model echoing a
+correct-shaped figure outside the negotiation context that made it
+legitimate. An invented low number unrelated to anything real ("I'll do
+it for 50" against a 900 floor) is not caught by this path — a
+documented residual gap, tests/adversarial/test_output_guard.py's
+_KNOWN_GAP_CASES, not a silent one — because a below-floor rule here
+would also catch "350 meters from the Haram" (a normal, expected thing
+for this system to say — hotels are described by their distance to the
+Haram), and a guard that escalates on ordinary replies gets switched off
+within a week. A guard nobody trusts protects nothing.
+
+A percentage, in any script or digit set, is never a value-matching
+candidate — there is no "real allowed percentage" to compare it against,
+unlike a price. Instead, a digit run immediately followed by a percent
+marker (%, ٪, "percent", "persen", "بالمئة", ...) is flagged
+unconditionally via CandidateAmount.is_percentage, regardless of its
+value: no legitimate reply ever states a percentage at all, given this
+system's current tool surface (check_availability and get_quote — see
+tools.py — neither returns a percentage of anything for the model to
+relay honestly, and no_cost_knowledge already forbids margin/profit in
+any form). A tool added later that legitimately returns a percentage
+would need this rule revisited, not just the tool declared.
 """
 
 from __future__ import annotations
@@ -64,6 +101,8 @@ from __future__ import annotations
 import re
 import unicodedata
 from dataclasses import dataclass
+
+from services.agent.output_guard.config import MIN_BARE_PRICE_HALALAS
 
 _HALALAS_PER_SAR = 100
 
@@ -179,6 +218,42 @@ _FOREIGN_BODY = (
 _FOREIGN_BEFORE_PATTERN = re.compile(rf"{_FOREIGN_BODY}{_GAP}\Z", re.IGNORECASE)
 _FOREIGN_AFTER_PATTERN = re.compile(rf"{_GAP}{_FOREIGN_BODY}", re.IGNORECASE)
 
+# --- Percent markers -----------------------------------------------------
+# A percentage always follows its number in English, Arabic, and
+# Indonesian ("20%", "20 percent", "20 بالمئة") — unlike currency words,
+# which can precede or follow the amount — so only an after-pattern is
+# needed here, mirroring _SAR_AFTER_PATTERN/_FOREIGN_AFTER_PATTERN.
+_PERCENT_SYMBOLS: tuple[str, ...] = ("%", chr(0x066A))  # ASCII "%", Arabic "٪"
+_PERCENT_SYMBOL_ALTS = "|".join(re.escape(symbol) for symbol in _PERCENT_SYMBOLS)
+
+_PERCENT_LATIN_ALTS = r"percent(?:age)?|persen(?:tase)?"
+
+# Two common spellings each (the ta marbuta and ha letter endings are
+# both seen in casual WhatsApp-style Arabic), plus "في المئة" ("in the
+# hundred", the more formal phrasing) — not exhaustive, the same
+# incompleteness every other marker list in this module already accepts.
+_PERCENT_ARABIC_MARKERS: tuple[str, ...] = (
+    "بالمئة",
+    "بالمائة",
+    "بالمئه",
+    "بالمائه",
+    "في المئة",
+)
+_PERCENT_ARABIC_ALTS = "|".join(re.escape(marker) for marker in _PERCENT_ARABIC_MARKERS)
+
+_PERCENT_BODY = (
+    rf"(?:{_PERCENT_SYMBOL_ALTS}|\b(?:{_PERCENT_LATIN_ALTS})\b|{_PERCENT_ARABIC_ALTS})"
+)
+_PERCENT_AFTER_PATTERN = re.compile(rf"{_GAP}{_PERCENT_BODY}", re.IGNORECASE)
+
+# "-" and "/" are not in _SEPARATOR_CHARS, so an ISO date ("2026-09-10")
+# already tokenizes into separate bare digit runs — this is what keeps a
+# restated get_quote check_in/check_out (a real, expected occurrence, not
+# a hypothetical) from being treated as a bare price: a 4-digit year is
+# exactly the one bare shape large enough to otherwise clear
+# MIN_BARE_PRICE_HALALAS. See the module docstring.
+_DATE_ADJACENT_CHARS = frozenset({"-", "/"})
+
 
 @dataclass(frozen=True)
 class CandidateAmount:
@@ -194,12 +269,20 @@ class CandidateAmount:
     marker sits adjacent (kept for the escalation record), and is None
     otherwise — including when a SAR marker is what qualified the
     candidate. The two are mutually exclusive: see _classify_marker.
+
+    is_percentage is True when a percent marker sits adjacent to this
+    digit run — see the module docstring for why that is checked before,
+    and independently of, everything else here. halalas is always None
+    on a percentage candidate: a percentage is not a halalas value, and
+    treating "20%" as 2000 halalas would be a fabricated, misleading
+    number decision.py must never be asked to reason about.
     """
 
     raw: str
     halalas: int | None
     has_currency_marker: bool
     foreign_currency_marker: str | None
+    is_percentage: bool = False
 
 
 def normalize_for_scanning(text: str) -> str:
@@ -247,6 +330,16 @@ def _classify_marker(text: str, start: int, end: int) -> tuple[bool, str | None]
         _SAR_BEFORE_PATTERN.search(before) or _SAR_AFTER_PATTERN.match(after)
     )
     return has_sar_marker, None
+
+
+def _has_percent_marker(text: str, end: int) -> bool:
+    """Whether a percent marker sits immediately after the digit run
+    ending at `end` in text. Only the after side is checked: unlike a
+    currency word, a percent marker is never written before its number
+    in any of this system's supported languages — see the percent-
+    markers section above."""
+    after = text[end : end + _MAX_MARKER_SPAN]
+    return bool(_PERCENT_AFTER_PATTERN.match(after))
 
 
 def _is_grouped(groups: list[str]) -> bool:
@@ -322,6 +415,38 @@ def _is_money_shaped(raw: str) -> bool:
     return len(fraction) == 2 and len(riyal_groups[0]) >= 3
 
 
+def _is_bare_price_candidate(raw: str, text: str, start: int, end: int) -> bool:
+    """Whether a bare digit run — not money-shaped, not adjacent to any
+    currency or percent marker — is large enough and not date-adjacent to
+    propose as an exact-match echo candidate (see
+    extract_bare_price_echo_candidates and the module docstring). A
+    magnitude-and-adjacency check standing in for a semantic
+    classification of what kind of number this is, not an attempt at
+    that classification itself — the actual "is this really a price"
+    decision happens one layer up, in decision.py, via an exact match
+    against a real conversation's amounts.
+
+    Re-derives the bare shape from raw rather than trusting the caller,
+    so this function alone stays correct if extract_bare_price_echo_
+    candidates' own exclusions are ever reordered.
+    """
+    split = _split_riyals_and_fraction(raw)
+    if split is None:
+        return False
+    riyal_groups, fraction = split
+    if fraction or len(riyal_groups) != 1:
+        return False
+    halalas = int(riyal_groups[0]) * _HALALAS_PER_SAR
+    if halalas < MIN_BARE_PRICE_HALALAS:
+        return False
+    before_char = text[start - 1] if start > 0 else ""
+    after_char = text[end] if end < len(text) else ""
+    return (
+        before_char not in _DATE_ADJACENT_CHARS
+        and after_char not in _DATE_ADJACENT_CHARS
+    )
+
+
 def extract_candidate_amounts(text: str) -> tuple[CandidateAmount, ...]:
     """Finds every plausible stated price in text and normalizes each to
     halalas. See the module docstring for what qualifies as a candidate.
@@ -340,9 +465,25 @@ def extract_candidate_amounts(text: str) -> tuple[CandidateAmount, ...]:
     candidates: list[CandidateAmount] = []
     for match in _DIGIT_RUN.finditer(normalized):
         raw = match.group()
-        has_sar_marker, foreign_marker = _classify_marker(
-            normalized, match.start(), match.end()
-        )
+        start, end = match.start(), match.end()
+
+        # Checked first and independently of everything below: a
+        # percentage is never a value-matching candidate, so it must
+        # never fall through to (and be excluded by) the price-shape
+        # checks below — see the module docstring.
+        if _has_percent_marker(normalized, end):
+            candidates.append(
+                CandidateAmount(
+                    raw=raw,
+                    halalas=None,
+                    has_currency_marker=False,
+                    foreign_currency_marker=None,
+                    is_percentage=True,
+                )
+            )
+            continue
+
+        has_sar_marker, foreign_marker = _classify_marker(normalized, start, end)
         is_marked = has_sar_marker or foreign_marker is not None
         if not is_marked and not _is_money_shaped(raw):
             continue
@@ -352,6 +493,56 @@ def extract_candidate_amounts(text: str) -> tuple[CandidateAmount, ...]:
                 halalas=parse_amount_to_halalas(raw),
                 has_currency_marker=has_sar_marker,
                 foreign_currency_marker=foreign_marker,
+            )
+        )
+    return tuple(candidates)
+
+
+def extract_bare_price_echo_candidates(text: str) -> tuple[CandidateAmount, ...]:
+    """Finds every bare, unmarked, ungrouped integer in text that is
+    large enough (MIN_BARE_PRICE_HALALAS) and not date-adjacent to be
+    worth checking against a conversation's real amounts — the digit
+    runs decision.py's evaluate_amounts runs its exact-match echo check
+    against, never the broader not-in-quotes/below-floor check every
+    other candidate goes through.
+
+    Deliberately a separate function, not folded into
+    extract_candidate_amounts: that function's own contract — never a
+    candidate for a bare, unmarked, non-money-shaped integer — must not
+    change; tests/unit/test_output_guard_extraction.py's "350 meters
+    from the Haram" case exists specifically to catch a bare integer's
+    magnitude ever being treated as sufficient on its own, and it is
+    not — a distance in meters, a booking reference, and a real
+    below-floor price echo are all the same shape at this layer.
+    Telling them apart needs this conversation's real amounts, which
+    only decision.py has, which is exactly why the exact-match
+    restriction has to live there, on a candidate set this function
+    only proposes, not on the shape-detection this function performs.
+
+    Every digit run returned here would otherwise be silently invisible
+    to the guard entirely — no shape, no marker — so this function
+    re-runs the same marker/shape exclusions extract_candidate_amounts
+    already applies, to guarantee the two functions never both propose
+    the same digit run as a candidate.
+    """
+    normalized = normalize_for_scanning(text)
+    candidates: list[CandidateAmount] = []
+    for match in _DIGIT_RUN.finditer(normalized):
+        raw = match.group()
+        start, end = match.start(), match.end()
+        if _has_percent_marker(normalized, end):
+            continue
+        has_sar_marker, foreign_marker = _classify_marker(normalized, start, end)
+        if has_sar_marker or foreign_marker is not None or _is_money_shaped(raw):
+            continue
+        if not _is_bare_price_candidate(raw, normalized, start, end):
+            continue
+        candidates.append(
+            CandidateAmount(
+                raw=raw,
+                halalas=parse_amount_to_halalas(raw),
+                has_currency_marker=False,
+                foreign_currency_marker=None,
             )
         )
     return tuple(candidates)
