@@ -79,12 +79,18 @@ def check_token_spend_caps(
     change nothing. Every caller must state explicitly what this turn has
     already spent; pass UsageTotals.zero() for a turn-start check.
 
+    Neither exception below carries usage_so_far itself — that happens one
+    level up, in generate_reply's own wrapping try/except
+    (conversation.py), via errors.attach_usage_so_far. This function's
+    only job with usage_so_far is the arithmetic above; carrying it on
+    whatever gets raised is a concern shared by every exception the
+    tool-calling loop can produce, not just these two, so it lives in one
+    place there rather than being duplicated here.
+
     Raises:
         TokenSpendCapExceededError: conversation_id's token_usage total,
             plus usage_so_far, has already reached
-            settings.max_tokens_per_conversation. Carries usage_so_far so
-            the caller can record it before discarding the turn — see
-            that error's own docstring.
+            settings.max_tokens_per_conversation.
         DailySpendCapExceededError: today's (Asia/Riyadh calendar day)
             estimated spend across every conversation, plus usage_so_far,
             has already reached settings.max_spend_per_day_usd. A soft cap
@@ -92,8 +98,7 @@ def check_token_spend_caps(
             overshoot under concurrent load right at the boundary is
             possible and accepted. Logs one structured ERROR event every
             time this is raised, with no deduplication: each blocked
-            customer is a real customer who got no help. Also carries
-            usage_so_far.
+            customer is a real customer who got no help.
     """
     conversation_row = conn.execute(
         "SELECT COALESCE(SUM(total_tokens), 0) FROM token_usage "
@@ -107,8 +112,7 @@ def check_token_spend_caps(
         raise TokenSpendCapExceededError(
             f"conversation {conversation_id} has used "
             f"{conversation_total_tokens} tokens, at or above its cap "
-            f"({settings.max_tokens_per_conversation})",
-            usage_so_far=usage_so_far,
+            f"({settings.max_tokens_per_conversation})"
         )
 
     day = riyadh_calendar_day(now)
@@ -141,8 +145,7 @@ def check_token_spend_caps(
         raise DailySpendCapExceededError(
             f"today's ({day.isoformat()}) estimated spend "
             f"({daily_spend_usd} USD) is at or above the daily cap "
-            f"({settings.max_spend_per_day_usd} USD)",
-            usage_so_far=usage_so_far,
+            f"({settings.max_spend_per_day_usd} USD)"
         )
 
 

@@ -28,6 +28,7 @@ from services.agent.llm.errors import (
     ToolLoopLimitError,
     TurnCapExceededError,
     UsageUnavailableError,
+    read_usage_so_far,
 )
 
 _NOW = datetime(2026, 9, 1, tzinfo=UTC)
@@ -244,10 +245,8 @@ def test_generate_reply_refuses_when_the_conversation_token_cap_is_hit(
     def _raise_token_cap(
         _conn: Any, *, conversation_id: int, now: Any, settings: Any, usage_so_far: Any
     ) -> None:
-        del conversation_id, now, settings
-        raise TokenSpendCapExceededError(
-            "conversation 1 is at its token cap", usage_so_far=usage_so_far
-        )
+        del conversation_id, now, settings, usage_so_far
+        raise TokenSpendCapExceededError("conversation 1 is at its token cap")
 
     monkeypatch.setattr(conversation_module, "check_token_spend_caps", _raise_token_cap)
     transport = FakeTransport([_text_response("should never be reached")])
@@ -274,10 +273,8 @@ def test_generate_reply_refuses_when_the_daily_spend_cap_is_hit(
     def _raise_daily_cap(
         _conn: Any, *, conversation_id: int, now: Any, settings: Any, usage_so_far: Any
     ) -> None:
-        del conversation_id, now, settings
-        raise DailySpendCapExceededError(
-            "today's spend is at the daily cap", usage_so_far=usage_so_far
-        )
+        del conversation_id, now, settings, usage_so_far
+        raise DailySpendCapExceededError("today's spend is at the daily cap")
 
     monkeypatch.setattr(conversation_module, "check_token_spend_caps", _raise_daily_cap)
     transport = FakeTransport([_text_response("should never be reached")])
@@ -323,9 +320,7 @@ def test_generate_reply_rechecks_the_spend_cap_before_every_model_call(
         del conversation_id, now, settings
         seen_usage_so_far.append(usage_so_far)
         if usage_so_far.total_tokens >= 20:
-            raise TokenSpendCapExceededError(
-                "conversation 1 crossed its cap mid-turn", usage_so_far=usage_so_far
-            )
+            raise TokenSpendCapExceededError("conversation 1 crossed its cap mid-turn")
 
     monkeypatch.setattr(conversation_module, "check_token_spend_caps", _check)
     monkeypatch.setattr(
@@ -358,7 +353,12 @@ def test_generate_reply_rechecks_the_spend_cap_before_every_model_call(
     # crossing point (the 3rd iteration's pre-check), not after exhausting
     # MAX_TOOL_ITERATIONS and not after a 3rd call.
     assert len(transport.calls) == 2
-    assert exc_info.value.usage_so_far.total_tokens == 24
+    # generate_reply's own wrapping try/except attaches usage_so_far to
+    # whatever the loop raised -- the fake above no longer needs to (and
+    # does not) set it itself.
+    attached = read_usage_so_far(exc_info.value)
+    assert attached is not None
+    assert attached.total_tokens == 24
 
 
 def test_generate_reply_raises_usage_unavailable_when_metadata_is_missing(

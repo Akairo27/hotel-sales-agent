@@ -18,45 +18,33 @@ Order matters and is deliberate:
    complaint can be investigated.
 3. Check the per-number-per-day message rate (services.agent.llm.caps),
    before generate_reply is even called.
-4. Call generate_reply, which re-checks the per-conversation token cap
-   (and the global daily spend cap) before every model call it makes
-   internally, not only before the first — so it can now raise a cap
-   error after one or more real model calls already happened in this
-   same turn, not only before any of them.
-5. Record the usage generate_reply actually reports. This runs whether or
-   not the reply ever reaches a customer: real money was already spent
-   the moment the model was called, and a spend cap that only sees usage
-   from calls that got all the way to a successful send would not be
-   capping anything for as long as the send/guard PR is not yet merged.
+4. Call generate_reply. Its tool-calling loop can raise any of several
+   exceptions (see conversation.py's own docstring) after one or more
+   real, already-paid-for model calls happened in the same turn — not
+   only before any of them, since the per-conversation and daily spend
+   caps are now re-checked before every model call, not just the first.
+5. Whatever generate_reply raises or returns, record any usage it
+   reports before deciding how to respond. See _handle_generate_reply_
+   failure below: recording happens exactly once, driven by whether the
+   exception is carrying usage (services.agent.llm.errors.
+   read_usage_so_far), not by a per-exception-type checklist — a new
+   exception type added to generate_reply's loop in the future is
+   covered automatically, without touching this module.
 
-Three failure modes below are deliberately non-propagating, all logged at
-ERROR (or, for the cap case, already logged by check_token_spend_caps
-itself for the daily cap) and answered with 200 rather than left to
-bubble into an unhandled 500:
-
-- generate_reply raising TokenSpendCapExceededError or
-  DailySpendCapExceededError with a nonzero usage_so_far: one or more
-  real model calls already happened this turn before the cap tripped on
-  a later one. That usage is recorded (via the same
-  _record_usage_or_log_failure helper as the normal path) before the
-  turn is treated as capped — dropping it would silently reopen the
-  exact gap the two failure modes below exist to close, just via a third
-  door. (usage_so_far is zero when the cap was already at or over its
-  limit before this turn's first model call — same as before this
-  module re-checked mid-turn — so there is nothing to record then.)
-- generate_reply raising UsageUnavailableError: the model call already
-  happened (real spend), but the response carried no usable usage data.
-- record_token_usage itself raising, for any reason: the model call
-  already succeeded and its usage figures are known, but the INSERT
-  failed.
-
-In all three cases, a 500 would make Meta retry the delivery — and the
-retry cannot help, because migration 0024's idempotent message insert
-makes any retry resolve as a duplicate before ever reaching generate_reply
-or record_token_usage again (see _insert_inbound_message below). That
-would turn one already-spent, unrecorded model call into a *permanently*
-unrecorded one instead of a merely late one. Returning 200 stops the
-retry; the ERROR log is what makes the gap visible instead.
+This module never lets a 500 escape from generate_reply or
+record_token_usage, for one reason that applies uniformly regardless of
+which exception fired or why: migration 0024's idempotent message insert
+makes any Meta retry resolve as a duplicate before ever reaching
+generate_reply or record_token_usage again (see _insert_inbound_message
+below) — so a 500 here can never be fixed by the retry it provokes, and
+can only turn an already-spent, unrecorded model call into a
+*permanently* unrecorded one. Turning every such failure into a 200
+instead is not the same as hiding it: everything that is not one of the
+two expected, named outcomes ("capped", "usage_unavailable") is logged at
+ERROR with the exception's own type name, message, and full traceback
+(see _handle_generate_reply_failure) — a real bug or a database outage
+stays exactly as visible in the logs as it would be behind a 500, it just
+stops provoking a retry that cannot help.
 """
 
 from __future__ import annotations
@@ -89,6 +77,7 @@ from services.agent.llm.errors import (
     TokenSpendCapExceededError,
     TurnCapExceededError,
     UsageUnavailableError,
+    read_usage_so_far,
 )
 
 logger = logging.getLogger(__name__)
@@ -280,15 +269,19 @@ def _record_usage_or_log_failure(
 ) -> bool:
     """Attempts record_token_usage; on any failure (deliberately not
     narrowed to psycopg.Error — see the call site this was extracted
-    from), logs at ERROR with the conversation id and usage figures
-    instead of propagating, and returns False rather than raising.
-    Returns True on success.
+    from), logs at ERROR with the conversation id, the usage figures,
+    the exception's type and message, and a full traceback, instead of
+    propagating — then returns False rather than raising. Returns True
+    on success.
 
     Shared by every call site in this module that must not lose usage to
-    an unhandled 500 — the module docstring explains why: this module's
-    two other call sites are the normal post-reply write, and the write
-    for usage a mid-turn spend cap already collected via
-    TokenSpendCapExceededError/DailySpendCapExceededError's usage_so_far.
+    an unhandled 500 — the module docstring explains why: the normal
+    post-reply write, and _handle_generate_reply_failure's write for
+    whatever usage a generate_reply exception is carrying. A database
+    outage or a genuine bug hitting this specific write must be exactly
+    as loud as one hitting the generic exception funnel below — CLAUDE.md
+    forbids folding a real fault quietly into a structured-but-empty log
+    line.
     """
     try:
         record_token_usage(
@@ -298,7 +291,7 @@ def _record_usage_or_log_failure(
             usage=usage,
             now=now,
         )
-    except Exception:
+    except Exception as exc:
         logger.error(
             json.dumps(
                 {
@@ -307,11 +300,108 @@ def _record_usage_or_log_failure(
                     "prompt_tokens": usage.prompt_tokens,
                     "candidates_tokens": usage.candidates_tokens,
                     "total_tokens": usage.total_tokens,
+                    "exception_type": type(exc).__name__,
+                    "exception_message": str(exc),
                 }
-            )
+            ),
+            exc_info=exc,
         )
         return False
     return True
+
+
+_STATUS_CAPPED = "capped"
+_STATUS_USAGE_UNAVAILABLE = "usage_unavailable"
+_STATUS_TURN_FAILED = "turn_failed"
+
+
+def _status_for_generate_reply_error(exc: Exception) -> str:
+    """Maps a generate_reply exception to this endpoint's response
+    status. Purely a label for the response body and for which extra log
+    event (if any) to emit — never a factor in whether usage gets
+    recorded, which is unconditional in _handle_generate_reply_failure
+    below, driven by whether the exception is carrying usage at all, not
+    by its type.
+
+    An exception type not named here still gets its usage recorded and
+    still never produces a 500; it only falls into the generic
+    _STATUS_TURN_FAILED bucket instead of a specific one — logged loudly
+    enough (event, exception type, message, full traceback) to be found
+    the moment it happens. The point of always returning 200 is to stop
+    Meta's retry-into-a-permanent-gap trap, not to make a real bug quiet.
+    """
+    if isinstance(
+        exc,
+        (TurnCapExceededError, TokenSpendCapExceededError, DailySpendCapExceededError),
+    ):
+        return _STATUS_CAPPED
+    if isinstance(exc, UsageUnavailableError):
+        return _STATUS_USAGE_UNAVAILABLE
+    return _STATUS_TURN_FAILED
+
+
+def _handle_generate_reply_failure(
+    conn: psycopg.Connection[Any],
+    exc: Exception,
+    *,
+    conversation_id: int,
+    customer_phone: str,
+    now: datetime,
+) -> JSONResponse:
+    """The single funnel for everything generate_reply can raise.
+
+    Records whatever usage the exception is carrying — present only when
+    one or more real model calls already happened this turn before it
+    was raised, per errors.read_usage_so_far and conversation.py's own
+    docstring — then logs and always returns 200. Adding a new exception
+    type to generate_reply's tool-calling loop in the future needs no
+    change here: read_usage_so_far works on any exception, and an
+    unnamed type simply falls into the loudly-logged _STATUS_TURN_FAILED
+    bucket in _status_for_generate_reply_error above.
+    """
+    usage_so_far = read_usage_so_far(exc)
+    if usage_so_far is not None and usage_so_far.total_tokens > 0:
+        _record_usage_or_log_failure(
+            conn,
+            conversation_id=conversation_id,
+            customer_phone=customer_phone,
+            usage=usage_so_far,
+            now=now,
+        )
+
+    status = _status_for_generate_reply_error(exc)
+    if status == _STATUS_USAGE_UNAVAILABLE:
+        logger.error(
+            json.dumps(
+                {"event": "usage_unavailable", "conversation_id": conversation_id}
+            )
+        )
+    elif status == _STATUS_TURN_FAILED:
+        # Deliberately loud: CLAUDE.md forbids folding a real bug or a
+        # database outage quietly into a generic bucket. exc_info=exc
+        # attaches the full traceback to the log record — the type name
+        # and message are also in the JSON body so they are greppable
+        # without needing the traceback rendered alongside them.
+        logger.error(
+            json.dumps(
+                {
+                    "event": "turn_failed",
+                    "conversation_id": conversation_id,
+                    "exception_type": type(exc).__name__,
+                    "exception_message": str(exc),
+                }
+            ),
+            exc_info=exc,
+        )
+    # _STATUS_CAPPED needs no additional log here: TurnCapExceededError
+    # and TokenSpendCapExceededError are expected, common outcomes with
+    # nothing to add beyond the status itself, and DailySpendCapExceeded-
+    # Error already logs its own structured ERROR event inside
+    # check_token_spend_caps every time it is raised (services/agent/
+    # llm/caps.py) — logging it again here would just duplicate that
+    # event under a different name.
+
+    return JSONResponse({"status": status})
 
 
 @router.get("/webhook/whatsapp")
@@ -407,37 +497,14 @@ async def receive_message(request: Request) -> JSONResponse:
                 settings=llm_settings,
                 now=now,
             )
-        except TurnCapExceededError:
-            return JSONResponse({"status": "capped"})
-        except (TokenSpendCapExceededError, DailySpendCapExceededError) as cap_error:
-            # usage_so_far is nonzero exactly when one or more real model
-            # calls already happened this turn before a later one tripped
-            # the cap (conversation.py now re-checks before every call in
-            # its tool-calling loop, not only the first) — that spend must
-            # be recorded before the turn is discarded as capped, or it is
-            # lost the same way an unhandled UsageUnavailableError would
-            # lose it. Zero means the cap was already at its limit before
-            # this turn made any call at all, same as before that recheck
-            # existed — nothing to record then.
-            if cap_error.usage_so_far.total_tokens > 0:
-                _record_usage_or_log_failure(
-                    conn,
-                    conversation_id=conversation_id,
-                    customer_phone=inbound.customer_phone,
-                    usage=cap_error.usage_so_far,
-                    now=now,
-                )
-            return JSONResponse({"status": "capped"})
-        except UsageUnavailableError:
-            logger.error(
-                json.dumps(
-                    {
-                        "event": "usage_unavailable",
-                        "conversation_id": conversation_id,
-                    }
-                )
+        except Exception as exc:
+            return _handle_generate_reply_failure(
+                conn,
+                exc,
+                conversation_id=conversation_id,
+                customer_phone=inbound.customer_phone,
+                now=now,
             )
-            return JSONResponse({"status": "usage_unavailable"})
 
         if _record_usage_or_log_failure(
             conn,
