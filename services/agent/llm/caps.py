@@ -1,8 +1,8 @@
-"""The cap-checking library behind CLAUDE.md §9's spend/rate caps.
+"""The cap-checking library behind CLAUDE.md §9's spend/rate/turn caps.
 
 Pure-ish functions (conn + explicit `now` in, following
 services/worker/hold_expiry.py's pattern of never reading the clock
-itself). Three checks, one write:
+itself). Three checks, two writes:
 
 - check_token_spend_caps: called from generate_reply, before every
   transport.generate() call inside its tool-calling loop (not just once
@@ -10,8 +10,11 @@ itself). Three checks, one write:
   required argument, not a default.
 - record_token_usage: NOT called by generate_reply — see
   conversation.py's module docstring, generate_reply never writes to the
-  database. The webhook calls this once a reply has passed the output
-  guard and been sent.
+  database. The webhook calls this immediately after generate_reply
+  returns or raises with usage attached — see its own docstring for why
+  this is never gated on the output guard or the send.
+- increment_turn_count: called by the webhook at the same two points as
+  record_token_usage above, for the same reason — see its own docstring.
 - check_message_rate_cap: called by the webhook, before conversation
   state is even loaded — gates an inbound message before a conversation
   turn even starts, so it lives here rather than as a
@@ -160,10 +163,23 @@ def record_token_usage(
     """Inserts one token_usage row for one completed model call.
 
     NOT called by generate_reply — see conversation.py's module
-    docstring: generate_reply never writes to the database. The caller
-    (the webhook) calls this, in the same transaction as incrementing
-    turn_count and touching last_message_at, only after a reply has
-    passed the output guard and been sent.
+    docstring: generate_reply never writes to the database. The webhook
+    calls this immediately after generate_reply returns a reply, or
+    raises an exception carrying usage_so_far > 0 — never gated on the
+    output guard or the WhatsApp send. Real cost is incurred the moment
+    the model is actually called, not when (or whether) a reply is ever
+    delivered to the customer, so this write cannot wait for either:
+    gating it on delivery would leave every call this webhook makes
+    unrecorded against CLAUDE.md §9's spend caps for as long as a later
+    step in the same turn keeps failing.
+
+    Each call is its own independent, immediately committed write (the
+    webhook's connection is autocommit — see webhook.py's
+    get_db_connection docstring) rather than one transaction bundled with
+    increment_turn_count below: an earlier write that already happened
+    (this one) must survive even if a later one in the same request
+    fails, the same reasoning that docstring already gives for every
+    other write in that module.
     """
     conn.execute(
         "INSERT INTO token_usage "
@@ -177,6 +193,32 @@ def record_token_usage(
             usage.total_tokens,
             now,
         ),
+    )
+
+
+def increment_turn_count(
+    conn: psycopg.Connection[Any], *, conversation_id: int
+) -> None:
+    """Increments conversations.turn_count by one — without this,
+    generate_reply's own turn-cap check (conversation.py:
+    `state.turn_count >= settings.max_conversation_turns`) compares
+    against a column that never moves, and CLAUDE.md §9's turn cap has
+    no effect.
+
+    Called by the webhook at the same two points as record_token_usage
+    above, under the same condition: a real model call already happened
+    this turn (usage_so_far.total_tokens > 0, or generate_reply returned
+    normally) is what counts as "one turn used," not whether the guard
+    allowed the reply or the send succeeded — the identical reasoning
+    record_token_usage's own docstring gives, applied to the turn cap
+    instead of the spend caps. TurnCapExceededError itself never reaches
+    here: it is raised before any model call in the turn
+    (errors.read_usage_so_far's own docstring), so there is nothing new
+    to count.
+    """
+    conn.execute(
+        "UPDATE conversations SET turn_count = turn_count + 1 WHERE id = %s",
+        (conversation_id,),
     )
 
 

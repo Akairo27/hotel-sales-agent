@@ -20,6 +20,7 @@ from services.agent.llm.caps import (
     MessageRateCapExceededError,
     check_message_rate_cap,
     check_token_spend_caps,
+    increment_turn_count,
     record_token_usage,
 )
 from services.agent.llm.config import LlmSettings
@@ -372,6 +373,45 @@ def test_record_token_usage_and_check_token_spend_caps_round_trip(
         (conversation_id,),
     ).fetchone()
     assert row == (conversation_id, _PHONE, 7, 3, 10)
+
+
+def test_increment_turn_count_from_zero(db_conn: psycopg.Connection[Any]) -> None:
+    conversation_id = seed_conversation(db_conn, customer_phone=_PHONE)
+
+    increment_turn_count(db_conn, conversation_id=conversation_id)
+
+    row = db_conn.execute(
+        "SELECT turn_count FROM conversations WHERE id = %s", (conversation_id,)
+    ).fetchone()
+    assert row == (1,)
+
+
+def test_increment_turn_count_from_an_existing_value(
+    db_conn: psycopg.Connection[Any],
+) -> None:
+    conversation_id = seed_conversation(db_conn, customer_phone=_PHONE, turn_count=5)
+
+    increment_turn_count(db_conn, conversation_id=conversation_id)
+
+    row = db_conn.execute(
+        "SELECT turn_count FROM conversations WHERE id = %s", (conversation_id,)
+    ).fetchone()
+    assert row == (6,)
+
+
+def test_increment_turn_count_only_touches_its_own_conversation(
+    db_conn: psycopg.Connection[Any],
+) -> None:
+    conversation_id = seed_conversation(db_conn, customer_phone=_PHONE)
+    other_conversation_id = seed_conversation(db_conn, customer_phone=_OTHER_PHONE)
+
+    increment_turn_count(db_conn, conversation_id=conversation_id)
+
+    rows = db_conn.execute(
+        "SELECT id, turn_count FROM conversations WHERE id IN (%s, %s) ORDER BY id",
+        (conversation_id, other_conversation_id),
+    ).fetchall()
+    assert rows == [(conversation_id, 1), (other_conversation_id, 0)]
 
 
 def test_check_message_rate_cap_allows_one_message_under_the_cap(
