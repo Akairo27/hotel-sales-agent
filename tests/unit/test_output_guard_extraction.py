@@ -11,7 +11,9 @@ import time
 import pytest
 
 from lib.money import format_halalas_as_sar
+from services.agent.output_guard.config import MIN_BARE_PRICE_HALALAS
 from services.agent.output_guard.extraction import (
+    extract_bare_price_echo_candidates,
     extract_candidate_amounts,
     normalize_for_scanning,
     parse_amount_to_halalas,
@@ -284,11 +286,33 @@ def test_multiple_amounts_in_one_reply_are_all_extracted() -> None:
     assert [c.halalas for c in candidates] == [45_000, 135_000]
 
 
-def test_a_percentage_is_not_a_candidate() -> None:
-    """Documented limitation, not a passing behavior worth celebrating:
-    a percentage is not an amount, and this module's contract is
-    matching numbers against a quote, not policing every number."""
-    assert extract_candidate_amounts("our margin is 20%") == ()
+def test_a_percentage_is_flagged_but_never_as_a_value_match() -> None:
+    """A percentage is a candidate now (unconditionally, per marker
+    adjacency) but never carries a halalas value or a currency marker —
+    decision.py checks is_percentage before anything value-shaped, so
+    this module only needs to prove the flag and the absent value, not
+    any matching behavior (that is decision.py's job)."""
+    (candidate,) = extract_candidate_amounts("our margin is 20%")
+    assert candidate.is_percentage is True
+    assert candidate.halalas is None
+    assert candidate.has_currency_marker is False
+    assert candidate.foreign_currency_marker is None
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "our margin is 20%",
+        "هامشنا 20٪",
+        "margin: 20 percent",
+        "markup is 15 persen",
+        "هامشنا 20 بالمئة",
+        "هامشنا 20 بالمائة",
+    ],
+)
+def test_a_percentage_is_recognized_across_scripts_and_phrasings(text: str) -> None:
+    (candidate,) = extract_candidate_amounts(text)
+    assert candidate.is_percentage is True
 
 
 def test_extraction_is_linear_on_a_pathological_input() -> None:
@@ -308,3 +332,50 @@ def test_extraction_is_linear_on_a_pathological_input() -> None:
 def test_normalize_for_scanning_strips_format_characters_but_keeps_letters() -> None:
     assert normalize_for_scanning("A​B") == "AB"
     assert normalize_for_scanning("مرحبا") == "مرحبا"
+
+
+def test_bare_price_echo_boundary_at_min_bare_price_halalas() -> None:
+    """The exact boundary output_guard.config.MIN_BARE_PRICE_HALALAS
+    draws: one riyal under it is never proposed as an echo candidate at
+    all (a room count, a night count, a day of month are always far
+    below it — see config.py's own docstring for why); one riyal at or
+    over it is. This is a market-assumption floor, not a heuristic, so
+    the boundary itself — not just "some values work" — is what this
+    test pins."""
+    below = (MIN_BARE_PRICE_HALALAS // 100) - 1
+    at = MIN_BARE_PRICE_HALALAS // 100
+    assert extract_bare_price_echo_candidates(f"I can do it for {below}") == ()
+    (candidate,) = extract_bare_price_echo_candidates(f"I can do it for {at}")
+    assert candidate.halalas == MIN_BARE_PRICE_HALALAS
+
+
+def test_bare_price_echo_excludes_iso_date_fragments() -> None:
+    """A restated get_quote check_in/check_out ("2026-09-10") tokenizes
+    into three separate bare digit runs (see the module docstring — "-"
+    is not a recognized separator). The year alone clears
+    MIN_BARE_PRICE_HALALAS, so without this exclusion a real, expected
+    reply would propose a false echo candidate."""
+    assert extract_bare_price_echo_candidates("your stay is 2026-09-10") == ()
+    assert extract_bare_price_echo_candidates("dari 2026/09/10 sampai 2026/09/12") == ()
+
+
+def test_bare_price_echo_candidates_still_proposes_non_price_numbers() -> None:
+    """extract_bare_price_echo_candidates' own job stops at shape and
+    magnitude — it is not where "350 meters" gets protected (that is
+    decision.py's exact-match check, tested at that layer). This test
+    exists so a future reader does not mistake this function's silence
+    on "350 meters" for a bug: it is proposing a candidate for
+    evaluate_amounts to check, on purpose, same as it does for a real
+    bare price."""
+    (candidate,) = extract_bare_price_echo_candidates("350 meters from the Haram")
+    assert candidate.halalas == 35_000
+
+
+def test_bare_price_echo_excludes_marked_or_money_shaped_or_percentage_runs() -> None:
+    """extract_candidate_amounts and extract_bare_price_echo_candidates
+    must never both propose the same digit run — see the module
+    docstring's partition claim. Checked directly here rather than only
+    implied by the other tests."""
+    assert extract_bare_price_echo_candidates("1,350.00 SAR total") == ()
+    assert extract_bare_price_echo_candidates("450.00 per night") == ()
+    assert extract_bare_price_echo_candidates("our margin is 900%") == ()

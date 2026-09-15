@@ -36,6 +36,33 @@ guard exists to hold even if the model ignores them:
   be complete ("1,350.00 złoty"), and a bare "1,350.00" with no currency
   word is the same hole spelled differently; requiring the one currency
   this system actually uses closes both without an enumeration.
+
+A third, unrelated reason sits above the value check entirely:
+AMOUNT_PERCENTAGE_STATED blocks any candidate extraction.py flagged as a
+percentage, checked first in evaluate_amounts and never reaching the
+value-matching logic at all — there is no such thing as a legitimate
+percentage in an outbound reply to compare it against (see
+extraction.py's module docstring), so unlike every other reason here it
+is not about whether a number is *wrong*, it is about a category of
+statement (margin, markup, commission — CLAUDE.md rule 2) that must never
+be made regardless of the number attached to it.
+
+A bare, unmarked integer (extraction.extract_bare_price_echo_candidates)
+gets a narrower check than everything above, not the same
+not-in-quotes/below-floor matching: it blocks only when it exactly
+echoes a real amount or the real floor for this conversation, checked in
+evaluate_amounts' own separate loop below. Not folded into the main loop
+above: extraction.py cannot tell a bare integer that is a price apart
+from a distance in meters or a booking reference by shape alone (see its
+own module docstring), so a below-floor rule here would also flag
+those — a guard that escalates on ordinary replies gets switched off
+within a week. Exact match is the one signal narrow enough to be safe: a
+real quoted amount or floor coinciding with an unrelated number in the
+same reply is not a realistic accident. This intentionally leaves a
+narrower residual gap than before — an invented bare number that does
+not happen to echo anything real is still not caught — documented in
+tests/adversarial/test_output_guard.py's _KNOWN_GAP_CASES, not closed
+silently.
 """
 
 from __future__ import annotations
@@ -44,6 +71,7 @@ from dataclasses import dataclass
 
 from services.agent.output_guard.extraction import (
     CandidateAmount,
+    extract_bare_price_echo_candidates,
     extract_candidate_amounts,
 )
 
@@ -53,6 +81,7 @@ AMOUNT_BELOW_FLOOR = "below_floor"
 AMOUNT_UNPARSEABLE = "unparseable"
 AMOUNT_FOREIGN_CURRENCY = "foreign_currency"
 AMOUNT_NO_CURRENCY_MARKER = "no_currency_marker"
+AMOUNT_PERCENTAGE_STATED = "percentage_stated"
 
 BLOCKING_AMOUNT_REASONS = frozenset(
     {
@@ -61,6 +90,7 @@ BLOCKING_AMOUNT_REASONS = frozenset(
         AMOUNT_UNPARSEABLE,
         AMOUNT_FOREIGN_CURRENCY,
         AMOUNT_NO_CURRENCY_MARKER,
+        AMOUNT_PERCENTAGE_STATED,
     }
 )
 
@@ -117,6 +147,11 @@ def evaluate_amounts(text: str, allowed: AllowedAmounts) -> tuple[AmountFinding,
     """
     findings: list[AmountFinding] = []
     for candidate in extract_candidate_amounts(text):
+        if candidate.is_percentage:
+            findings.append(
+                AmountFinding(candidate.raw, None, AMOUNT_PERCENTAGE_STATED)
+            )
+            continue
         if candidate.halalas is None:
             findings.append(AmountFinding(candidate.raw, None, AMOUNT_UNPARSEABLE))
             continue
@@ -145,6 +180,23 @@ def evaluate_amounts(text: str, allowed: AllowedAmounts) -> tuple[AmountFinding,
         findings.append(
             AmountFinding(candidate.raw, candidate.halalas, AMOUNT_NOT_IN_QUOTES)
         )
+
+    for echo in extract_bare_price_echo_candidates(text):
+        # Exact match only — see the module docstring for why this is a
+        # deliberately narrower check than the loop above, not an
+        # oversight. echo.halalas is never None here: every bare
+        # integer extract_bare_price_echo_candidates proposes parses
+        # cleanly (no separators to be ambiguous about).
+        if echo.halalas in allowed.amounts_halalas:
+            findings.append(
+                AmountFinding(
+                    echo.raw, echo.halalas, _reason_for_matched_candidate(echo)
+                )
+            )
+        elif (
+            allowed.floor_halalas is not None and echo.halalas == allowed.floor_halalas
+        ):
+            findings.append(AmountFinding(echo.raw, echo.halalas, AMOUNT_NOT_IN_QUOTES))
     return tuple(findings)
 
 

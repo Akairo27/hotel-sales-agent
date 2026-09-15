@@ -11,6 +11,7 @@ from services.agent.output_guard.decision import (
     AMOUNT_MATCHED,
     AMOUNT_NO_CURRENCY_MARKER,
     AMOUNT_NOT_IN_QUOTES,
+    AMOUNT_PERCENTAGE_STATED,
     AMOUNT_UNPARSEABLE,
     AllowedAmounts,
     amounts_are_allowed,
@@ -212,4 +213,64 @@ def test_the_indonesian_rendering_of_a_valid_price_is_allowed() -> None:
 
 def test_the_arabic_indic_rendering_of_a_valid_price_is_allowed() -> None:
     findings = evaluate_amounts(f"{to_arabic_indic('1,350.00')} ريال", _ALLOWED)
+    assert amounts_are_allowed(findings) is True
+
+
+def test_a_stated_margin_percentage_is_blocked_regardless_of_value() -> None:
+    """AMOUNT_PERCENTAGE_STATED fires even when the number attached
+    happens to also be a real allowed amount — this is about the
+    category of statement (CLAUDE.md rule 2), not the number."""
+    findings = evaluate_amounts("Our margin is 20%", _ALLOWED)
+    assert [f.reason for f in findings] == [AMOUNT_PERCENTAGE_STATED]
+    assert amounts_are_allowed(findings) is False
+
+
+def test_a_percentage_alongside_a_real_total_still_blocks_on_the_percentage() -> None:
+    findings = evaluate_amounts(
+        "Our margin is 20%, and your total is 1,350.00 SAR", _ALLOWED
+    )
+    assert [f.reason for f in findings] == [AMOUNT_PERCENTAGE_STATED, AMOUNT_MATCHED]
+    assert amounts_are_allowed(findings) is False
+
+
+_ALLOWED_WITH_900_FLOOR = AllowedAmounts(
+    quote_ids=(1,),
+    amounts_halalas=frozenset({45_000, 135_000}),
+    floor_halalas=90_000,
+)
+
+
+def test_a_bare_integer_echoing_the_real_floor_is_blocked() -> None:
+    """The originally-documented gap: "900" bare, with no currency word
+    at all, where 900.00 SAR is the real floor for this conversation."""
+    findings = evaluate_amounts("I can do it for 900", _ALLOWED_WITH_900_FLOOR)
+    assert [f.reason for f in findings] == [AMOUNT_NOT_IN_QUOTES]
+    assert amounts_are_allowed(findings) is False
+
+
+def test_a_bare_integer_echoing_a_real_allowed_amount_is_blocked() -> None:
+    findings = evaluate_amounts("I can do it for 1350", _ALLOWED_WITH_900_FLOOR)
+    assert [f.reason for f in findings] == [AMOUNT_NO_CURRENCY_MARKER]
+    assert amounts_are_allowed(findings) is False
+
+
+def test_a_bare_integer_matching_nothing_real_is_not_a_finding_at_all() -> None:
+    """The deliberate residual gap (see extraction.py/decision.py's own
+    module docstrings and tests/adversarial/test_output_guard.py's
+    _KNOWN_GAP_CASES): an invented bare number that does not echo
+    anything real for this conversation produces no finding, not a
+    below-floor block -- exact-match-only, not magnitude-only."""
+    findings = evaluate_amounts("I can do it for 100", _ALLOWED_WITH_900_FLOOR)
+    assert findings == ()
+    assert amounts_are_allowed(findings) is True
+
+
+def test_an_ordinary_reply_mentioning_a_distance_is_never_blocked() -> None:
+    """The exact case that forced exact-match-only over a below-floor
+    rule: a hotel's distance to the Haram is an ordinary thing for a
+    reply to state, and it is not a price."""
+    findings = evaluate_amounts(
+        "This hotel is 350 meters from the Haram", _ALLOWED_WITH_900_FLOOR
+    )
+    assert findings == ()
     assert amounts_are_allowed(findings) is True

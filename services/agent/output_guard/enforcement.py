@@ -30,6 +30,7 @@ from services.agent.output_guard.decision import (
     AMOUNT_MATCHED,
     AMOUNT_NO_CURRENCY_MARKER,
     AMOUNT_NOT_IN_QUOTES,
+    AMOUNT_PERCENTAGE_STATED,
     AmountFinding,
     amounts_are_allowed,
     evaluate_amounts,
@@ -42,18 +43,21 @@ logger = logging.getLogger(__name__)
 # "an output-guard violation" as one of exactly two anticipated values,
 # since the agent's full tool surface — and therefore the full set of
 # escalation reasons — did not exist yet when that migration was
-# written) — these four distinguish the cases a human must act on
+# written) — these five distinguish the cases a human must act on
 # differently: a malformed amount is likely the model mangling a real
 # number; a well-formed but wrong one is a concrete wrong price; a
 # foreign-labelled one may carry the *correct* price under the wrong
 # name, so staff re-send in riyals rather than investigate a wrong
 # amount; a missing-currency one means the model stated the right number
 # but dropped the required currency word — a prompt-compliance problem,
-# not a pricing one.
+# not a pricing one; a percentage means the model stated a margin/markup
+# figure at all — a cost-knowledge leak (CLAUDE.md rule 2), a different
+# and more systemic failure than any single wrong price.
 REASON_UNPARSEABLE = "output_guard_violation_unparseable"
 REASON_MISMATCH = "output_guard_violation_mismatch"
 REASON_FOREIGN_CURRENCY = "output_guard_violation_foreign_currency"
 REASON_MISSING_CURRENCY = "output_guard_violation_missing_currency"
+REASON_PERCENTAGE_STATED = "output_guard_violation_percentage_stated"
 
 _MISMATCH_REASONS = frozenset({AMOUNT_NOT_IN_QUOTES, AMOUNT_BELOW_FLOOR})
 
@@ -68,6 +72,36 @@ _RETENTION_NOTE = (
     "services/worker/hold_expiry.py should strip blocked_reply_text (or "
     "this whole notes value) from any escalations row whose opened_at "
     "predates it — opened_at already exists and needs no schema change."
+)
+
+# What the customer sees instead of a blocked reply — the webhook's job,
+# not this module's, but defined here because this is the module whose
+# job it is to keep this text safe to send. Fixed and non-LLM-generated
+# by design: the model is never asked to rephrase a blocked reply (an
+# unmanipulated second attempt is not guaranteed, and it would spend more
+# tokens on a turn that already failed), and the "colleague will follow
+# up" framing matches prompt.py's existing no_booking_actions rule rather
+# than inventing new customer-facing language for this one case.
+#
+# Bilingual, not language-detected: detecting the customer's language
+# outside the model is one more thing that can be wrong at exactly the
+# moment something already went wrong; sending both costs a slightly
+# longer message, nothing more.
+#
+# Deliberately contains no digit of any kind — not ASCII 0-9, not
+# Arabic-Indic (U+0660-U+0669) — so it can never itself become a candidate amount
+# (extraction.py finds nothing to extract from text with no digits at
+# all) and is therefore provably, not just presumably, always allowed by
+# this module's own check. test_output_guard_fallback_message_is_always_
+# allowed (tests/integration/test_output_guard.py) asserts this directly
+# against evaluate_amounts, and test_output_guard_fallback_message_has_
+# no_digits (tests/unit/test_output_guard_enforcement.py) asserts it
+# character-by-character in both digit sets — so an edit that
+# accidentally introduces a number is caught in CI, not at runtime.
+OUTPUT_GUARD_FALLBACK_MESSAGE = (
+    "One moment — I need to double-check this with a colleague, and "
+    "they'll follow up with you shortly.\n"
+    "لحظة من فضلك — أحتاج أتأكد من هذا مع أحد الزملاء، وسيتواصل معك قريباً."
 )
 
 
@@ -96,14 +130,20 @@ def _escalation_reason(findings: tuple[AmountFinding, ...]) -> str:
     1. REASON_MISMATCH (not_in_quotes / below_floor): a concrete wrong
        amount is the most urgent read regardless of what else is wrong
        with the same reply.
-    2. REASON_FOREIGN_CURRENCY: more specific than "no currency at all" —
+    2. REASON_PERCENTAGE_STATED: a cost-knowledge leak is a systemic
+       prompt-compliance failure independent of whether any price in the
+       same reply happens to be right — ranked above the currency-shaped
+       reasons below because it is not about a wrong number at all.
+    3. REASON_FOREIGN_CURRENCY: more specific than "no currency at all" —
        the model actively named a currency, just the wrong one.
-    3. REASON_MISSING_CURRENCY: a right number, but a prompt-compliance
+    4. REASON_MISSING_CURRENCY: a right number, but a prompt-compliance
        gap rather than a pricing one.
-    4. REASON_UNPARSEABLE: the fallback when nothing more specific fired.
+    5. REASON_UNPARSEABLE: the fallback when nothing more specific fired.
     """
     if any(finding.reason in _MISMATCH_REASONS for finding in findings):
         return REASON_MISMATCH
+    if any(finding.reason == AMOUNT_PERCENTAGE_STATED for finding in findings):
+        return REASON_PERCENTAGE_STATED
     if any(finding.reason == AMOUNT_FOREIGN_CURRENCY for finding in findings):
         return REASON_FOREIGN_CURRENCY
     if any(finding.reason == AMOUNT_NO_CURRENCY_MARKER for finding in findings):

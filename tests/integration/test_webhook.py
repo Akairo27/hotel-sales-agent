@@ -1,8 +1,9 @@
 """Integration tests for services/agent/webhook.py against a real Postgres
-instance — signature verification, idempotent inbound logging, and the two
-CLAUDE.md §9 caps (per-conversation token spend, per-number-per-day message
-rate). No output guard and no outbound WhatsApp send here: this webhook
-deliberately stops before either (see webhook.py's own module docstring).
+instance — signature verification, idempotent inbound logging, the two
+CLAUDE.md §9 caps (per-conversation token spend, per-number-per-day
+message rate), the output guard, and the outbound WhatsApp send (a fake
+sender — see _FakeWhatsAppSender — stands in for the real network call,
+the same way _FakeTransport already stands in for the real model).
 
 TestClient drives the real ASGI app end to end rather than calling route
 functions directly, so the ordering guarantee under test (signature checked
@@ -35,6 +36,16 @@ from services.agent.llm.config import MAX_TOOL_ITERATIONS, LlmSettings
 from services.agent.llm.conversation import UsageTotals
 from services.agent.llm.errors import ModelUnavailableError
 from services.agent.main import app
+from services.agent.output_guard.enforcement import (
+    OUTPUT_GUARD_FALLBACK_MESSAGE,
+    REASON_MISMATCH,
+    GuardVerdict,
+)
+from services.agent.whatsapp_send import (
+    WhatsAppSender,
+    WhatsAppSendError,
+    WhatsAppSendSettings,
+)
 from tests.integration._seed import (
     flat_demand_curve,
     flat_min_profit,
@@ -310,6 +321,47 @@ def _nullcontext(
     yield conn
 
 
+_TEST_WHATSAPP_SETTINGS = WhatsAppSendSettings(
+    phone_number_id="test-phone-number-id",
+    access_token="test-access-token",
+    timeout_ms=10_000,
+)
+
+
+@dataclass
+class _FakeWhatsAppSender:
+    """Always succeeds with a fixed message id and no network access —
+    the default webhook_client wires in, so the many tests that don't
+    care about the send step itself (most of them) need no per-test
+    setup for it, the same reasoning _FakeTransport's default existence
+    covers for the model. Tests that do care use _set_whatsapp_sender to
+    swap in their own instance (or a failing one) and inspect .calls
+    afterward."""
+
+    message_id: str = "wamid.OUTBOUND-DEFAULT"
+    calls: list[tuple[str, str]] = field(default_factory=list)
+
+    async def send_text(self, *, to_phone: str, body: str) -> str:
+        self.calls.append((to_phone, body))
+        return self.message_id
+
+
+@dataclass
+class _FailingWhatsAppSender:
+    """Always raises -- for tests exercising webhook.py's send-failure
+    handling. WhatsAppSendError is deliberately not the only exception
+    type this needs to prove is caught (see webhook.py's own
+    _send_or_log_failure docstring for why its catch is broad), so
+    individual tests construct this with whatever exception they want to
+    prove gets caught."""
+
+    exc: BaseException
+
+    async def send_text(self, *, to_phone: str, body: str) -> str:
+        del to_phone, body
+        raise self.exc
+
+
 @pytest.fixture
 def webhook_client(
     db_conn: psycopg.Connection[Any], monkeypatch: pytest.MonkeyPatch
@@ -317,7 +369,15 @@ def webhook_client(
     """Wires the real app to the test's own Postgres connection and a
     fixed webhook secret, via plain monkeypatch — this module never uses
     FastAPI's dependency_overrides, so this is the same mechanism the
-    module itself is tested with everywhere else in this repo."""
+    module itself is tested with everywhere else in this repo.
+
+    Also wires a default, always-succeeding, no-network WhatsApp sender
+    (_FakeWhatsAppSender) — unlike get_llm_settings/get_model_transport
+    below, which stay opt-in per test (different tests need different
+    cap values), every test in this file either doesn't reach the send
+    step at all or wants it to just work, so defaulting it here avoids
+    repeating the same setup in every one of them.
+    """
     monkeypatch.setattr(
         webhook_module,
         "get_webhook_settings",
@@ -327,6 +387,12 @@ def webhook_client(
     )
     monkeypatch.setattr(
         webhook_module, "get_db_connection", lambda: _nullcontext(db_conn)
+    )
+    monkeypatch.setattr(
+        webhook_module, "get_whatsapp_send_settings", lambda: _TEST_WHATSAPP_SETTINGS
+    )
+    monkeypatch.setattr(
+        webhook_module, "get_whatsapp_sender", lambda _settings: _FakeWhatsAppSender()
     )
     yield TestClient(app)
 
@@ -339,6 +405,12 @@ def _set_transport(monkeypatch: pytest.MonkeyPatch, transport: ModelTransport) -
     monkeypatch.setattr(
         webhook_module, "get_model_transport", lambda _settings: transport
     )
+
+
+def _set_whatsapp_sender(
+    monkeypatch: pytest.MonkeyPatch, sender: WhatsAppSender
+) -> None:
+    monkeypatch.setattr(webhook_module, "get_whatsapp_sender", lambda _settings: sender)
 
 
 def _message_count(db_conn: psycopg.Connection[Any]) -> int:
@@ -401,18 +473,225 @@ def test_receive_message_with_valid_signature_processes_and_records_usage(
     assert response.status_code == 200
     assert response.json() == {"status": "processed"}
     assert len(transport.calls) == 1
-    row = db_conn.execute(
+    rows = db_conn.execute(
         "SELECT direction, body, whatsapp_message_id FROM messages "
-        "WHERE customer_phone = %s",
+        "WHERE customer_phone = %s ORDER BY direction",
         (_PHONE,),
-    ).fetchone()
-    assert row == ("inbound", "hello", "wamid.1")
+    ).fetchall()
+    assert rows == [
+        ("inbound", "hello", "wamid.1"),
+        ("outbound", "hello from the model", "wamid.OUTBOUND-DEFAULT"),
+    ]
     usage_row = db_conn.execute(
         "SELECT prompt_tokens, candidates_tokens, total_tokens FROM token_usage "
         "WHERE customer_phone = %s",
         (_PHONE,),
     ).fetchone()
     assert usage_row == (50, 10, 60)
+
+
+def _text_response(
+    text: str, *, prompt_tokens: int = 50, candidates_tokens: int = 10
+) -> types.GenerateContentResponse:
+    content = types.Content(role="model", parts=[types.Part.from_text(text=text)])
+    return types.GenerateContentResponse(
+        candidates=[types.Candidate(content=content)],
+        usage_metadata=types.GenerateContentResponseUsageMetadata(
+            prompt_token_count=prompt_tokens,
+            candidates_token_count=candidates_tokens,
+            total_token_count=prompt_tokens + candidates_tokens,
+        ),
+    )
+
+
+def test_receive_message_blocks_a_guard_violating_reply_and_sends_the_fallback(
+    webhook_client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+    db_conn: psycopg.Connection[Any],
+) -> None:
+    """A candidate reply stating a price with no matching quote (nothing
+    was seeded for this conversation, so any stated amount is
+    not_in_quotes) must never reach the customer -- the fallback is sent
+    instead, through the real output guard end to end, not a stand-in for
+    it."""
+    _set_llm_settings(monkeypatch, _settings())
+    transport = _ScriptedTransport([_text_response("I can do 900.00 SAR for you")])
+    _set_transport(monkeypatch, transport)
+    sender = _FakeWhatsAppSender()
+    _set_whatsapp_sender(monkeypatch, sender)
+    payload = _whatsapp_payload(wa_id=_WA_ID, message_id="wamid.guard-block", body="hi")
+
+    response = _post(
+        webhook_client, payload, signature=_sign(json.dumps(payload).encode())
+    )
+
+    assert response.status_code == 200
+    assert response.json() == {"status": "escalated"}
+    assert len(transport.calls) == 1
+    # The fallback was sent, not the guard-violating text.
+    assert len(sender.calls) == 1
+    assert sender.calls[0][1] == OUTPUT_GUARD_FALLBACK_MESSAGE
+    outbound_row = db_conn.execute(
+        "SELECT direction, body FROM messages "
+        "WHERE customer_phone = %s AND direction = 'outbound'",
+        (_PHONE,),
+    ).fetchone()
+    assert outbound_row == ("outbound", OUTPUT_GUARD_FALLBACK_MESSAGE)
+    escalation_row = db_conn.execute(
+        "SELECT reason FROM escalations WHERE customer_phone = %s", (_PHONE,)
+    ).fetchone()
+    assert escalation_row == (REASON_MISMATCH,)
+    # The model call already happened -- its usage must still be
+    # recorded even though the reply itself was never sent.
+    usage_row = db_conn.execute(
+        "SELECT total_tokens FROM token_usage WHERE customer_phone = %s", (_PHONE,)
+    ).fetchone()
+    assert usage_row == (60,)
+
+
+def test_receive_message_returns_send_failed_when_the_whatsapp_send_fails(
+    webhook_client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+    db_conn: psycopg.Connection[Any],
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The guard allows this reply (no stated price at all); the send
+    itself is what fails here. Usage from the already-successful model
+    call must still be recorded, and no outbound message row should
+    exist for a delivery that never actually happened."""
+    _set_llm_settings(monkeypatch, _settings())
+    transport = _FakeTransport(prompt_tokens=50, candidates_tokens=10)
+    _set_transport(monkeypatch, transport)
+    _set_whatsapp_sender(
+        monkeypatch, _FailingWhatsAppSender(WhatsAppSendError("simulated API error"))
+    )
+    caplog.set_level(logging.ERROR, logger="services.agent.webhook")
+    payload = _whatsapp_payload(wa_id=_WA_ID, message_id="wamid.send-fails", body="hi")
+
+    response = _post(
+        webhook_client, payload, signature=_sign(json.dumps(payload).encode())
+    )
+
+    assert response.status_code == 200
+    assert response.json() == {"status": "send_failed"}
+    outbound_row = db_conn.execute(
+        "SELECT count(*) FROM messages "
+        "WHERE customer_phone = %s AND direction = 'outbound'",
+        (_PHONE,),
+    ).fetchone()
+    assert outbound_row == (0,)
+    usage_row = db_conn.execute(
+        "SELECT total_tokens FROM token_usage WHERE customer_phone = %s", (_PHONE,)
+    ).fetchone()
+    assert usage_row == (60,)
+    error_records = [r for r in caplog.records if r.levelno == logging.ERROR]
+    assert len(error_records) == 1
+    logged = json.loads(error_records[0].getMessage())
+    assert logged["event"] == "whatsapp_send_failed"
+    assert logged["exception_type"] == "WhatsAppSendError"
+    assert error_records[0].exc_info is not None
+
+
+def test_receive_message_logs_and_returns_fallback_blocked_if_it_ever_happens(
+    webhook_client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Structurally impossible for the real OUTPUT_GUARD_FALLBACK_MESSAGE
+    -- test_output_guard_fallback_message_is_always_allowed
+    (tests/integration/test_output_guard.py) proves that end to end
+    against the real guard -- so this test forces the scenario directly
+    by faking enforce_outbound_text's verdict, to prove webhook.py's own
+    handling of the branch rather than re-proving the guard's own
+    invariant."""
+    _set_llm_settings(monkeypatch, _settings())
+    transport = _FakeTransport(prompt_tokens=50, candidates_tokens=10)
+    _set_transport(monkeypatch, transport)
+
+    call_count = {"n": 0}
+
+    def _fake_enforce(
+        _conn: psycopg.Connection[Any], *, conversation_id: int, text: str
+    ) -> GuardVerdict:
+        del conversation_id, text
+        call_count["n"] += 1
+        escalation_id = 111 if call_count["n"] == 1 else 222
+        return GuardVerdict(
+            allowed=False, findings=(), quote_ids=(), escalation_id=escalation_id
+        )
+
+    monkeypatch.setattr(webhook_module, "enforce_outbound_text", _fake_enforce)
+    caplog.set_level(logging.ERROR, logger="services.agent.webhook")
+    payload = _whatsapp_payload(
+        wa_id=_WA_ID, message_id="wamid.fallback-blocked", body="hi"
+    )
+
+    response = _post(
+        webhook_client, payload, signature=_sign(json.dumps(payload).encode())
+    )
+
+    assert response.status_code == 200
+    assert response.json() == {"status": "fallback_blocked"}
+    assert call_count["n"] == 2
+    error_records = [r for r in caplog.records if r.levelno == logging.ERROR]
+    assert len(error_records) == 1
+    logged = json.loads(error_records[0].getMessage())
+    assert logged["event"] == "fallback_message_blocked"
+    assert logged["original_escalation_id"] == 111
+    assert logged["fallback_escalation_id"] == 222
+
+
+def test_receive_message_returns_delivery_failed_when_the_guard_check_itself_errors(
+    webhook_client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+    db_conn: psycopg.Connection[Any],
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """enforce_outbound_text, get_whatsapp_send_settings, and
+    get_whatsapp_sender all sit inside the try/except that produces
+    "delivery_failed" -- this test forces the first of those to raise,
+    proving the whole section is covered, not just the send call itself
+    (already covered by test_receive_message_returns_send_failed_when_
+    the_whatsapp_send_fails). Usage from the already-successful model
+    call must still be recorded regardless."""
+    _set_llm_settings(monkeypatch, _settings())
+    transport = _FakeTransport(prompt_tokens=50, candidates_tokens=10)
+    _set_transport(monkeypatch, transport)
+
+    def _fake_enforce(
+        _conn: psycopg.Connection[Any], *, conversation_id: int, text: str
+    ) -> None:
+        del conversation_id, text
+        raise RuntimeError("simulated guard-check database error")
+
+    monkeypatch.setattr(webhook_module, "enforce_outbound_text", _fake_enforce)
+    caplog.set_level(logging.ERROR, logger="services.agent.webhook")
+    payload = _whatsapp_payload(
+        wa_id=_WA_ID, message_id="wamid.delivery-fails", body="hi"
+    )
+
+    response = _post(
+        webhook_client, payload, signature=_sign(json.dumps(payload).encode())
+    )
+
+    assert response.status_code == 200
+    assert response.json() == {"status": "delivery_failed"}
+    usage_row = db_conn.execute(
+        "SELECT total_tokens FROM token_usage WHERE customer_phone = %s", (_PHONE,)
+    ).fetchone()
+    assert usage_row == (60,)
+    outbound_row = db_conn.execute(
+        "SELECT count(*) FROM messages "
+        "WHERE customer_phone = %s AND direction = 'outbound'",
+        (_PHONE,),
+    ).fetchone()
+    assert outbound_row == (0,)
+    error_records = [r for r in caplog.records if r.levelno == logging.ERROR]
+    assert len(error_records) == 1
+    logged = json.loads(error_records[0].getMessage())
+    assert logged["event"] == "reply_delivery_failed"
+    assert logged["exception_type"] == "RuntimeError"
+    assert error_records[0].exc_info is not None
 
 
 def test_receive_message_returns_200_and_logs_when_usage_is_unavailable(
@@ -1399,7 +1678,12 @@ def test_receive_message_second_message_hits_the_cap_from_the_first_recording(
     # exceed the 50-token cap before the second message's own model call
     # would have happened.
     assert len(transport.calls) == 1
-    assert _message_count(db_conn) == 2
+    # 3, not 4: the first turn stores its inbound message and (having
+    # passed the guard and sent successfully) its outbound reply too; the
+    # second turn is capped before generate_reply ever returns, so it
+    # never reaches the guard/send step and stores only its inbound
+    # message.
+    assert _message_count(db_conn) == 3
 
 
 def test_receive_message_with_invalid_json_body_is_rejected(
@@ -1475,10 +1759,12 @@ def test_receive_message_duplicate_delivery_is_a_no_op(
 
     assert second_response.status_code == 200
     assert second_response.json() == {"status": "duplicate"}
-    # No second model call, and no second messages row for the same
-    # WhatsApp message id — migration 0024's partial unique index caught it.
+    # No second model call, and no second inbound messages row for the
+    # same WhatsApp message id — migration 0024's partial unique index
+    # caught it. 2, not 1: the first (successful) turn stores both its
+    # inbound message and its outbound reply.
     assert len(transport.calls) == 1
-    assert _message_count(db_conn) == 1
+    assert _message_count(db_conn) == 2
 
 
 def test_get_db_connection_opens_a_working_connection_and_closes_it(
