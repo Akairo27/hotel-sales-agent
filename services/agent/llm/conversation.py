@@ -19,6 +19,18 @@ into token_usage itself (recording is the webhook's job, once the whole
 turn ends — services.agent.llm.caps.record_token_usage), so without
 threading `usage` in, a same-turn recheck would only ever see what was
 already committed before the turn started and would catch nothing new.
+
+The loop (and its own MAX_TOOL_ITERATIONS-exhausted ToolLoopLimitError) is
+wrapped in exactly one try/except, which attaches the loop's current
+`usage` to whatever exception it raised via errors.attach_usage_so_far,
+then re-raises it unchanged. This is deliberately the only place that
+attachment happens: every exception the loop can produce -- the two cap
+errors above, UsageUnavailableError, ModelUnavailableError,
+UnknownToolError, InvalidToolArgumentsError, ToolLoopLimitError, and any
+pricing exception dispatch.py lets propagate -- can follow real,
+already-paid-for model calls, and the caller (webhook.py) needs a single,
+type-agnostic way to ask "was there usage to record before this turn
+died," not a growing list of exception-specific cases to remember.
 """
 
 from __future__ import annotations
@@ -43,6 +55,7 @@ from services.agent.llm.errors import (
     ToolLoopLimitError,
     TurnCapExceededError,
     UsageUnavailableError,
+    attach_usage_so_far,
 )
 from services.agent.llm.prompt import render_system_instruction
 
@@ -142,23 +155,24 @@ async def generate_reply(
     """Generates the candidate reply for a conversation's next turn.
 
     Raises:
-        ConversationNotFoundError: conversation_id does not exist.
+        ConversationNotFoundError: conversation_id does not exist. Raised
+            before the tool-calling loop, before any model call — never
+            carries usage_so_far (see errors.read_usage_so_far).
         TurnCapExceededError: the conversation has already reached
             settings.max_conversation_turns (CLAUDE.md §9) — raised
-            before any model call; the caller must escalate instead of
-            calling this again for this conversation.
+            before any model call, same as ConversationNotFoundError
+            above; the caller must escalate instead of calling this again
+            for this conversation.
         TokenSpendCapExceededError: this conversation's logged token
             usage, plus this turn's own usage so far, has reached
             settings.max_tokens_per_conversation. Checked before every
             model call in the tool-calling loop below, not only the
             first — so this can follow one or more real model calls
-            already made in this same turn. Carries that turn's usage so
-            far; the caller must record it before discarding the turn.
+            already made in this same turn.
         DailySpendCapExceededError: today's (Asia/Riyadh calendar day)
             estimated spend across every conversation, plus this turn's
             own usage so far, has reached settings.max_spend_per_day_usd.
-            Same mid-turn timing and usage-carrying contract as
-            TokenSpendCapExceededError above.
+            Same mid-turn timing as TokenSpendCapExceededError above.
         UsageUnavailableError: a model response carried no usable
             token-usage data — see _usage_from.
         ToolLoopLimitError: the model kept calling tools past
@@ -168,6 +182,15 @@ async def generate_reply(
         Any exception services.pricing.compute_quote raises for a genuine
             pricing misconfiguration (see dispatch.py's module docstring)
             — deliberately left to propagate, not caught here.
+
+        Every exception above except the first two (ConversationNotFound-
+        Error, TurnCapExceededError) can be raised after one or more real
+        model calls already happened in this same turn, and carries that
+        turn's usage-so-far — retrievable via errors.read_usage_so_far,
+        regardless of the exception's specific type — so the caller can
+        record it before treating the turn as failed. See this module's
+        own docstring for the single wrapping mechanism that makes this
+        uniform across every exception the loop below can produce.
     """
     state = load_conversation_state(conn, conversation_id)
     if state.turn_count >= settings.max_conversation_turns:
@@ -184,55 +207,63 @@ async def generate_reply(
     quote_ids: list[int] = []
     usage = UsageTotals.zero()
 
-    for _ in range(MAX_TOOL_ITERATIONS):
-        check_token_spend_caps(
-            conn,
-            conversation_id=conversation_id,
-            now=now,
-            settings=settings,
-            usage_so_far=usage,
-        )
-        response = await transport.generate(
-            contents=contents, system_instruction=system_instruction
-        )
-        usage = usage + _usage_from(response)
-
-        calls = response.function_calls
-        if not calls:
-            return AgentReply(
-                text=response.text or "",
-                tool_calls=tuple(tool_calls),
-                quote_ids=tuple(quote_ids),
-                usage=usage,
-            )
-
-        candidates = response.candidates
-        if candidates:
-            model_content = candidates[0].content
-            if model_content is not None:
-                contents.append(model_content)
-
-        response_parts: list[types.Part] = []
-        for call in calls:
-            name = call.name or ""
-            args = call.args or {}
-            result = dispatch_tool(
+    try:
+        for _ in range(MAX_TOOL_ITERATIONS):
+            check_token_spend_caps(
                 conn,
-                name,
-                args,
+                conversation_id=conversation_id,
                 now=now,
-                customer_phone=state.customer_phone,
-                conversation_id=state.id,
+                settings=settings,
+                usage_so_far=usage,
             )
-            tool_calls.append(ToolCallRecord(name=name, args=args, result=result))
-            if result.get("priced") is True:
-                quote_ids.append(int(result["quote_id"]))
-            response_parts.append(
-                types.Part.from_function_response(name=name, response=result)
+            response = await transport.generate(
+                contents=contents, system_instruction=system_instruction
             )
-        contents.append(types.Content(role="user", parts=response_parts))
+            usage = usage + _usage_from(response)
 
-    raise ToolLoopLimitError(
-        f"conversation {conversation_id} exceeded {MAX_TOOL_ITERATIONS} tool "
-        "iterations in one turn without a final reply"
-    )
+            calls = response.function_calls
+            if not calls:
+                return AgentReply(
+                    text=response.text or "",
+                    tool_calls=tuple(tool_calls),
+                    quote_ids=tuple(quote_ids),
+                    usage=usage,
+                )
+
+            candidates = response.candidates
+            if candidates:
+                model_content = candidates[0].content
+                if model_content is not None:
+                    contents.append(model_content)
+
+            response_parts: list[types.Part] = []
+            for call in calls:
+                name = call.name or ""
+                args = call.args or {}
+                result = dispatch_tool(
+                    conn,
+                    name,
+                    args,
+                    now=now,
+                    customer_phone=state.customer_phone,
+                    conversation_id=state.id,
+                )
+                tool_calls.append(ToolCallRecord(name=name, args=args, result=result))
+                if result.get("priced") is True:
+                    quote_ids.append(int(result["quote_id"]))
+                response_parts.append(
+                    types.Part.from_function_response(name=name, response=result)
+                )
+            contents.append(types.Content(role="user", parts=response_parts))
+
+        raise ToolLoopLimitError(
+            f"conversation {conversation_id} exceeded {MAX_TOOL_ITERATIONS} tool "
+            "iterations in one turn without a final reply"
+        )
+    except Exception as exc:
+        # The one place any exception from the loop above is tagged with
+        # this turn's usage-so-far -- see this module's own docstring and
+        # errors.attach_usage_so_far for why this is deliberately generic
+        # rather than a per-exception-type concern.
+        attach_usage_so_far(exc, usage)
+        raise

@@ -354,48 +354,6 @@ def test_check_token_spend_caps_includes_usage_so_far_in_the_daily_total(
     )
 
 
-def test_check_token_spend_caps_conversation_cap_error_carries_usage_so_far(
-    db_conn: psycopg.Connection[Any],
-) -> None:
-    """TokenSpendCapExceededError must carry the exact usage_so_far it was
-    raised with: the caller (webhook.py) records it before discarding the
-    turn, so a wrong or missing value here means recorded spend would not
-    match what actually happened."""
-    settings = _settings(max_tokens_per_conversation=10)
-    conversation_id = seed_conversation(db_conn, customer_phone=_PHONE)
-    usage_so_far = UsageTotals(7, 4, 11)
-
-    with pytest.raises(TokenSpendCapExceededError) as exc_info:
-        check_token_spend_caps(
-            db_conn,
-            conversation_id=conversation_id,
-            now=_NOW,
-            settings=settings,
-            usage_so_far=usage_so_far,
-        )
-
-    assert exc_info.value.usage_so_far == usage_so_far
-
-
-def test_check_token_spend_caps_daily_cap_error_carries_usage_so_far(
-    db_conn: psycopg.Connection[Any],
-) -> None:
-    settings = _settings(max_spend_per_day_usd=Decimal("0.00001"))
-    conversation_id = seed_conversation(db_conn, customer_phone=_PHONE)
-    usage_so_far = UsageTotals(1000, 200, 1200)
-
-    with pytest.raises(DailySpendCapExceededError) as exc_info:
-        check_token_spend_caps(
-            db_conn,
-            conversation_id=conversation_id,
-            now=_NOW,
-            settings=settings,
-            usage_so_far=usage_so_far,
-        )
-
-    assert exc_info.value.usage_so_far == usage_so_far
-
-
 def test_record_token_usage_and_check_token_spend_caps_round_trip(
     db_conn: psycopg.Connection[Any],
 ) -> None:

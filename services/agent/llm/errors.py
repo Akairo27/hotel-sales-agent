@@ -3,14 +3,29 @@
 Mirrors services/pricing/errors.py and services/inventory/errors.py's
 pattern — every exception maps to a specific, expected failure mode, never
 a bare Exception, per CLAUDE.md §2.
+
+attach_usage_so_far / read_usage_so_far (below the exception classes) are
+the one write site and one read site for a different concern: carrying a
+turn's already-spent-but-not-yet-committed usage across whatever exception
+generate_reply's tool-calling loop happens to raise. Deliberately generic
+rather than a constructor parameter on each affected exception class: the
+loop can raise exceptions this module doesn't even define (pricing
+misconfigurations live in services.pricing.errors, a different hierarchy
+entirely), so the only mechanism that reaches all of them is attaching the
+value to whatever instance was actually raised, regardless of its type.
+Giving every "this can happen mid-turn, after real spend" exception its
+own __init__ override would recreate exactly the per-exception-type
+bookkeeping this design exists to avoid.
 """
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Final
 
 if TYPE_CHECKING:
     from services.agent.llm.conversation import UsageTotals
+
+USAGE_SO_FAR_ATTR: Final[str] = "usage_so_far"
 
 
 class LlmError(Exception):
@@ -107,19 +122,15 @@ class TokenSpendCapExceededError(LlmError):
     re-checks this cap before every transport.generate() call inside its
     tool-calling loop (not just once before the loop), so this can now be
     raised after one or more real, already-paid-for model calls happened
-    earlier in the same turn. usage_so_far carries exactly that
-    already-spent usage so the caller (webhook.py) can record it before
-    discarding the turn as capped — dropping it here would silently lose
-    real spend the same way an unhandled UsageUnavailableError would (see
-    webhook.py's module docstring).
+    earlier in the same turn. Instances raised from within that loop carry
+    the turn's usage-so-far via attach_usage_so_far/read_usage_so_far
+    (below) — not a constructor parameter on this class, since the same
+    carrying mechanism must work uniformly for every exception the loop
+    can raise, including ones this module doesn't define.
 
     The caller is expected to open a human escalation instead of calling
     generate_reply again for this conversation.
     """
-
-    def __init__(self, message: str, *, usage_so_far: UsageTotals) -> None:
-        super().__init__(message)
-        self.usage_so_far = usage_so_far
 
 
 class DailySpendCapExceededError(LlmError):
@@ -129,9 +140,8 @@ class DailySpendCapExceededError(LlmError):
     settings.max_spend_per_day_usd or more. A global backstop, not scoped
     to one conversation.
 
-    Carries usage_so_far for the same reason and under the same
-    now-possible-mid-turn timing as TokenSpendCapExceededError — see that
-    class's docstring.
+    Carries the turn's usage-so-far for the same reason and via the same
+    mechanism as TokenSpendCapExceededError — see that class's docstring.
 
     This is a soft cap: the check is a SUM query against token_usage, not
     a lock, so a small overshoot under concurrent load right at the
@@ -140,10 +150,6 @@ class DailySpendCapExceededError(LlmError):
     financial-loss-grade constraint like inventory overselling).
     """
 
-    def __init__(self, message: str, *, usage_so_far: UsageTotals) -> None:
-        super().__init__(message)
-        self.usage_so_far = usage_so_far
-
 
 class UsageUnavailableError(LlmError):
     """Raised when a model response carried no usable token-usage data —
@@ -151,9 +157,36 @@ class UsageUnavailableError(LlmError):
 
     Raised instead of silently treating the call as free: a cap enforced
     against an undercounted total isn't a cap. Propagates uncaught through
-    generate_reply, same as a pricing misconfiguration. The webhook is the
-    catcher: the model call already happened (real spend) by the time this
-    is raised, so it logs at ERROR and returns 200 rather than retrying —
-    see services/agent/webhook.py's module docstring for why a 500 here
-    would be worse, not safer.
+    generate_reply, same as a pricing misconfiguration — and, like every
+    other exception generate_reply's tool-calling loop can raise, carries
+    the turn's usage-so-far via attach_usage_so_far/read_usage_so_far
+    (below). The webhook is the catcher: the model call already happened
+    (real spend) by the time this is raised, so it logs at ERROR and
+    returns 200 rather than retrying — see services/agent/webhook.py's
+    module docstring for why a 500 here would be worse, not safer.
     """
+
+
+def attach_usage_so_far(exc: BaseException, usage: UsageTotals) -> None:
+    """The single write site for cross-exception usage-carrying — pairs
+    with read_usage_so_far below. Both live here, next to
+    USAGE_SO_FAR_ATTR, so the attribute name is never duplicated as a
+    literal at either call site: generate_reply's tool-calling loop
+    (services/agent/llm/conversation.py) calls this from one wrapping
+    try/except around the whole loop, on whatever exception it just
+    caught, regardless of that exception's type or which module defined
+    it.
+    """
+    setattr(exc, USAGE_SO_FAR_ATTR, usage)
+
+
+def read_usage_so_far(exc: BaseException) -> UsageTotals | None:
+    """The single read site pairing with attach_usage_so_far above.
+    Returns None for an exception attach_usage_so_far never touched
+    (raised outside generate_reply's tool-calling loop, before any model
+    call in the turn could have happened — TurnCapExceededError and
+    ConversationNotFoundError are the two examples in this codebase today)
+    rather than raising, since "no usage was ever attached" is an expected
+    outcome for those, not a bug.
+    """
+    return getattr(exc, USAGE_SO_FAR_ATTR, None)

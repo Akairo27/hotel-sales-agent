@@ -19,7 +19,7 @@ import json
 import logging
 from collections.abc import Iterator
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from decimal import Decimal
 from typing import Any
 
@@ -31,10 +31,21 @@ from google.genai import types
 from services.agent import webhook as webhook_module
 from services.agent.llm.caps import record_token_usage
 from services.agent.llm.client import ModelTransport
-from services.agent.llm.config import LlmSettings
+from services.agent.llm.config import MAX_TOOL_ITERATIONS, LlmSettings
 from services.agent.llm.conversation import UsageTotals
+from services.agent.llm.errors import ModelUnavailableError
 from services.agent.main import app
-from tests.integration._seed import seed_conversation, seed_message
+from tests.integration._seed import (
+    flat_demand_curve,
+    flat_min_profit,
+    seed_allotment_night,
+    seed_allotment_nights,
+    seed_conversation,
+    seed_hotel_and_room_type,
+    seed_message,
+    seed_price_rule,
+    seed_season,
+)
 
 pytestmark = pytest.mark.usefixtures("db_conn")
 
@@ -43,6 +54,19 @@ _VERIFY_TOKEN = "test-verify-token"
 _PHONE = "+966500000001"
 _WA_ID = "966500000001"
 _OTHER_WA_ID = "966500000002"
+
+# A check_availability call that always resolves (to {"available": False},
+# since no matching inventory row exists in this module's fresh test
+# schema) without raising -- used wherever a test needs a real, harmless
+# tool call purely to keep generate_reply's loop going for another
+# iteration.
+_HARMLESS_AVAILABILITY_ARGS = {
+    "hotel_id": 1,
+    "room_type_id": 1,
+    "check_in": "2026-01-01",
+    "check_out": "2026-01-02",
+    "rooms": 1,
+}
 
 
 def _settings(
@@ -159,6 +183,60 @@ class _ToolCallingTransport:
                 total_token_count=self.prompt_tokens + self.candidates_tokens,
             ),
         )
+
+
+def _function_call_response(
+    name: str,
+    args: dict[str, Any],
+    *,
+    prompt_tokens: int,
+    candidates_tokens: int,
+) -> types.GenerateContentResponse:
+    """One real, billed model call whose response is a tool call —
+    dispatch_tool runs it for real against this module's fresh test
+    schema (no monkeypatching), so a call to a bad tool name or with bad
+    arguments raises the real UnknownToolError/InvalidToolArgumentsError,
+    and a valid check_availability call against nonexistent inventory
+    keeps generate_reply's loop going without raising anything."""
+    content = types.Content(
+        role="model", parts=[types.Part.from_function_call(name=name, args=args)]
+    )
+    return types.GenerateContentResponse(
+        candidates=[types.Candidate(content=content)],
+        usage_metadata=types.GenerateContentResponseUsageMetadata(
+            prompt_token_count=prompt_tokens,
+            candidates_token_count=candidates_tokens,
+            total_token_count=prompt_tokens + candidates_tokens,
+        ),
+    )
+
+
+@dataclass
+class _ScriptedTransport:
+    """Returns (or raises) each scripted item in order, one per call to
+    generate() -- one reusable fake standing in for a bespoke dataclass
+    per exception type under test. Each script item is either a real,
+    billed response (a types.GenerateContentResponse, whose usage is
+    always counted by conversation.py before anything else happens with
+    it) or an exception the transport layer itself raises directly
+    (ModelUnavailableError, or a stand-in for a completely unanticipated
+    failure) -- exceptions dispatch_tool raises instead (UnknownToolError,
+    InvalidToolArgumentsError, pricing misconfigurations) are triggered by
+    scripting a function-call response naming a bad tool or bad
+    arguments, not by raising from here."""
+
+    script: list[types.GenerateContentResponse | BaseException]
+    calls: list[str] = field(default_factory=list)
+
+    async def generate(
+        self, *, contents: list[types.Content], system_instruction: str
+    ) -> types.GenerateContentResponse:
+        del contents, system_instruction
+        item = self.script[len(self.calls)]
+        self.calls.append("call")
+        if isinstance(item, BaseException):
+            raise item
+        return item
 
 
 def _whatsapp_payload(
@@ -433,6 +511,11 @@ def test_receive_message_returns_200_and_logs_when_record_token_usage_fails(
     assert logged["prompt_tokens"] == 50
     assert logged["candidates_tokens"] == 10
     assert logged["total_tokens"] == 60
+    assert logged["exception_type"] == "OperationalError"
+    assert "simulated connection failure" in logged["exception_message"]
+    assert error_records[0].exc_info is not None
+    assert error_records[0].exc_text is not None
+    assert "OperationalError" in error_records[0].exc_text
 
 
 def test_receive_message_returns_200_when_record_token_usage_raises_a_non_db_error(
@@ -477,6 +560,11 @@ def test_receive_message_returns_200_when_record_token_usage_raises_a_non_db_err
     assert len(error_records) == 1
     logged = json.loads(error_records[0].getMessage())
     assert logged["event"] == "record_token_usage_failed"
+    assert logged["exception_type"] == "RuntimeError"
+    assert logged["exception_message"] == "simulated bug, not a database failure"
+    assert error_records[0].exc_info is not None
+    assert error_records[0].exc_text is not None
+    assert "simulated bug, not a database failure" in error_records[0].exc_text
 
 
 def test_receive_message_with_invalid_signature_is_rejected_with_no_trace(
@@ -602,6 +690,635 @@ def test_receive_message_records_partial_usage_when_the_cap_crosses_mid_turn(
         (_PHONE,),
     ).fetchone()
     assert usage_row == (50, 10, 60)
+
+
+def test_receive_message_records_partial_usage_when_the_daily_cap_crosses_mid_turn(
+    webhook_client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+    db_conn: psycopg.Connection[Any],
+) -> None:
+    """Same shape of gap as the per-conversation cap above, for the
+    global daily cap: DailySpendCapExceededError can also now fire after
+    real model calls already happened this turn, and must carry (and the
+    webhook must record) that usage before returning "capped"."""
+    # 1000 prompt tokens costs 1000 * $0.75 / 1_000_000 = $0.00075 -- two
+    # calls of 500 prompt tokens each cross that cap exactly on the
+    # pre-check before a 3rd call would happen.
+    settings = _settings(max_spend_per_day_usd=Decimal("0.00075"))
+    _set_llm_settings(monkeypatch, settings)
+    transport = _ToolCallingTransport(prompt_tokens=500, candidates_tokens=0)
+    _set_transport(monkeypatch, transport)
+    payload = _whatsapp_payload(
+        wa_id=_WA_ID, message_id="wamid.daily-crosses-mid-turn", body="hello"
+    )
+
+    response = _post(
+        webhook_client, payload, signature=_sign(json.dumps(payload).encode())
+    )
+
+    assert response.status_code == 200
+    assert response.json() == {"status": "capped"}
+    assert len(transport.calls) == 2
+    usage_row = db_conn.execute(
+        "SELECT prompt_tokens, candidates_tokens, total_tokens FROM token_usage "
+        "WHERE customer_phone = %s",
+        (_PHONE,),
+    ).fetchone()
+    assert usage_row == (1000, 0, 1000)
+
+
+def test_receive_message_records_partial_usage_when_usage_is_unavailable_mid_turn(
+    webhook_client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+    db_conn: psycopg.Connection[Any],
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """UsageUnavailableError raised on the *second* real model call in a
+    turn is the gap the structural fix closes: the first call's usage was
+    already known, sitting in generate_reply's own accumulator, before
+    the second call's response came back unusable. Unlike the
+    single-call case (test_receive_message_returns_200_and_logs_when_
+    usage_is_unavailable above), that first call's usage must now be
+    recorded, not silently discarded."""
+    _set_llm_settings(monkeypatch, _settings())
+    unusable_response = types.GenerateContentResponse(
+        candidates=[
+            types.Candidate(
+                content=types.Content(
+                    role="model", parts=[types.Part.from_text(text="irrelevant")]
+                )
+            )
+        ],
+        usage_metadata=None,
+    )
+    transport = _ScriptedTransport(
+        [
+            _function_call_response(
+                "check_availability",
+                _HARMLESS_AVAILABILITY_ARGS,
+                prompt_tokens=25,
+                candidates_tokens=5,
+            ),
+            unusable_response,
+        ]
+    )
+    _set_transport(monkeypatch, transport)
+    caplog.set_level(logging.ERROR, logger="services.agent.webhook")
+    payload = _whatsapp_payload(
+        wa_id=_WA_ID, message_id="wamid.usage-unavailable-mid-turn", body="hello"
+    )
+
+    response = _post(
+        webhook_client, payload, signature=_sign(json.dumps(payload).encode())
+    )
+
+    assert response.status_code == 200
+    assert response.json() == {"status": "usage_unavailable"}
+    assert len(transport.calls) == 2
+    conversation_row = db_conn.execute(
+        "SELECT id FROM conversations WHERE customer_phone = %s", (_PHONE,)
+    ).fetchone()
+    assert conversation_row is not None
+    usage_row = db_conn.execute(
+        "SELECT prompt_tokens, candidates_tokens, total_tokens FROM token_usage "
+        "WHERE customer_phone = %s",
+        (_PHONE,),
+    ).fetchone()
+    assert usage_row == (25, 5, 30)
+    error_records = [r for r in caplog.records if r.levelno == logging.ERROR]
+    assert len(error_records) == 1
+    logged = json.loads(error_records[0].getMessage())
+    assert logged["event"] == "usage_unavailable"
+    assert logged["conversation_id"] == conversation_row[0]
+
+
+def test_receive_message_records_partial_usage_when_the_transport_fails_mid_turn(
+    webhook_client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+    db_conn: psycopg.Connection[Any],
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """ModelUnavailableError (the transport layer's own failure mode --
+    services/agent/llm/client.py) is not named in webhook.py's status
+    mapping, so this exercises the generic "turn_failed" bucket: the
+    first call's real usage must still be recorded, and the failure
+    itself must be loud (ERROR, exception type, traceback) rather than
+    silently folded away."""
+    _set_llm_settings(monkeypatch, _settings())
+    transport = _ScriptedTransport(
+        [
+            _function_call_response(
+                "check_availability",
+                _HARMLESS_AVAILABILITY_ARGS,
+                prompt_tokens=25,
+                candidates_tokens=5,
+            ),
+            ModelUnavailableError("simulated transport failure"),
+        ]
+    )
+    _set_transport(monkeypatch, transport)
+    caplog.set_level(logging.ERROR, logger="services.agent.webhook")
+    payload = _whatsapp_payload(
+        wa_id=_WA_ID, message_id="wamid.transport-fails-mid-turn", body="hello"
+    )
+
+    response = _post(
+        webhook_client, payload, signature=_sign(json.dumps(payload).encode())
+    )
+
+    assert response.status_code == 200
+    assert response.json() == {"status": "turn_failed"}
+    assert len(transport.calls) == 2
+    conversation_row = db_conn.execute(
+        "SELECT id FROM conversations WHERE customer_phone = %s", (_PHONE,)
+    ).fetchone()
+    assert conversation_row is not None
+    usage_row = db_conn.execute(
+        "SELECT prompt_tokens, candidates_tokens, total_tokens FROM token_usage "
+        "WHERE customer_phone = %s",
+        (_PHONE,),
+    ).fetchone()
+    assert usage_row == (25, 5, 30)
+    error_records = [r for r in caplog.records if r.levelno == logging.ERROR]
+    assert len(error_records) == 1
+    logged = json.loads(error_records[0].getMessage())
+    assert logged["event"] == "turn_failed"
+    assert logged["conversation_id"] == conversation_row[0]
+    assert logged["exception_type"] == "ModelUnavailableError"
+    assert "simulated transport failure" in logged["exception_message"]
+    assert error_records[0].exc_info is not None
+    assert error_records[0].exc_text is not None
+    assert "ModelUnavailableError" in error_records[0].exc_text
+
+
+def test_receive_message_records_partial_usage_for_an_unknown_tool_call(
+    webhook_client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+    db_conn: psycopg.Connection[Any],
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """UnknownToolError -- dispatch.py's own docstring calls this "an
+    expected failure mode of a function-calling model, not a bug" -- can
+    fire on the *first* iteration, since dispatch_tool runs after that
+    call's own usage was already counted (conversation.py adds usage
+    before checking function_calls). One iteration is enough to prove
+    the gap; no second call is needed."""
+    _set_llm_settings(monkeypatch, _settings())
+    transport = _ScriptedTransport(
+        [
+            _function_call_response(
+                "not_a_real_tool", {}, prompt_tokens=25, candidates_tokens=5
+            )
+        ]
+    )
+    _set_transport(monkeypatch, transport)
+    caplog.set_level(logging.ERROR, logger="services.agent.webhook")
+    payload = _whatsapp_payload(
+        wa_id=_WA_ID, message_id="wamid.unknown-tool", body="hello"
+    )
+
+    response = _post(
+        webhook_client, payload, signature=_sign(json.dumps(payload).encode())
+    )
+
+    assert response.status_code == 200
+    assert response.json() == {"status": "turn_failed"}
+    assert len(transport.calls) == 1
+    conversation_row = db_conn.execute(
+        "SELECT id FROM conversations WHERE customer_phone = %s", (_PHONE,)
+    ).fetchone()
+    assert conversation_row is not None
+    usage_row = db_conn.execute(
+        "SELECT prompt_tokens, candidates_tokens, total_tokens FROM token_usage "
+        "WHERE customer_phone = %s",
+        (_PHONE,),
+    ).fetchone()
+    assert usage_row == (25, 5, 30)
+    error_records = [r for r in caplog.records if r.levelno == logging.ERROR]
+    assert len(error_records) == 1
+    logged = json.loads(error_records[0].getMessage())
+    assert logged["event"] == "turn_failed"
+    assert logged["exception_type"] == "UnknownToolError"
+    assert error_records[0].exc_info is not None
+    assert error_records[0].exc_text is not None
+    assert "UnknownToolError" in error_records[0].exc_text
+
+
+def test_receive_message_records_partial_usage_for_invalid_tool_arguments(
+    webhook_client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+    db_conn: psycopg.Connection[Any],
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """InvalidToolArgumentsError -- same "expected model failure mode,
+    not a bug" category as UnknownToolError above, triggered here by a
+    non-integer hotel_id a real function-calling model can plausibly
+    hallucinate."""
+    _set_llm_settings(monkeypatch, _settings())
+    bad_args = dict(_HARMLESS_AVAILABILITY_ARGS, hotel_id="not-an-int")
+    transport = _ScriptedTransport(
+        [
+            _function_call_response(
+                "check_availability", bad_args, prompt_tokens=25, candidates_tokens=5
+            )
+        ]
+    )
+    _set_transport(monkeypatch, transport)
+    caplog.set_level(logging.ERROR, logger="services.agent.webhook")
+    payload = _whatsapp_payload(
+        wa_id=_WA_ID, message_id="wamid.invalid-tool-args", body="hello"
+    )
+
+    response = _post(
+        webhook_client, payload, signature=_sign(json.dumps(payload).encode())
+    )
+
+    assert response.status_code == 200
+    assert response.json() == {"status": "turn_failed"}
+    assert len(transport.calls) == 1
+    conversation_row = db_conn.execute(
+        "SELECT id FROM conversations WHERE customer_phone = %s", (_PHONE,)
+    ).fetchone()
+    assert conversation_row is not None
+    usage_row = db_conn.execute(
+        "SELECT prompt_tokens, candidates_tokens, total_tokens FROM token_usage "
+        "WHERE customer_phone = %s",
+        (_PHONE,),
+    ).fetchone()
+    assert usage_row == (25, 5, 30)
+    error_records = [r for r in caplog.records if r.levelno == logging.ERROR]
+    assert len(error_records) == 1
+    logged = json.loads(error_records[0].getMessage())
+    assert logged["event"] == "turn_failed"
+    assert logged["exception_type"] == "InvalidToolArgumentsError"
+    assert error_records[0].exc_info is not None
+    assert error_records[0].exc_text is not None
+    assert "InvalidToolArgumentsError" in error_records[0].exc_text
+
+
+def test_receive_message_records_full_usage_when_the_tool_loop_limit_is_exceeded(
+    webhook_client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+    db_conn: psycopg.Connection[Any],
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """ToolLoopLimitError fires after all MAX_TOOL_ITERATIONS real model
+    calls succeeded -- none of them ever discarded, unlike before this
+    fix, where the loop's exhaustion raise carried no usage at all."""
+    _set_llm_settings(monkeypatch, _settings())
+    transport = _ScriptedTransport(
+        [
+            _function_call_response(
+                "check_availability",
+                _HARMLESS_AVAILABILITY_ARGS,
+                prompt_tokens=10,
+                candidates_tokens=2,
+            )
+            for _ in range(MAX_TOOL_ITERATIONS)
+        ]
+    )
+    _set_transport(monkeypatch, transport)
+    caplog.set_level(logging.ERROR, logger="services.agent.webhook")
+    payload = _whatsapp_payload(
+        wa_id=_WA_ID, message_id="wamid.tool-loop-limit", body="hello"
+    )
+
+    response = _post(
+        webhook_client, payload, signature=_sign(json.dumps(payload).encode())
+    )
+
+    assert response.status_code == 200
+    assert response.json() == {"status": "turn_failed"}
+    assert len(transport.calls) == MAX_TOOL_ITERATIONS
+    usage_row = db_conn.execute(
+        "SELECT prompt_tokens, candidates_tokens, total_tokens FROM token_usage "
+        "WHERE customer_phone = %s",
+        (_PHONE,),
+    ).fetchone()
+    assert usage_row == (
+        10 * MAX_TOOL_ITERATIONS,
+        2 * MAX_TOOL_ITERATIONS,
+        12 * MAX_TOOL_ITERATIONS,
+    )
+    error_records = [r for r in caplog.records if r.levelno == logging.ERROR]
+    assert len(error_records) == 1
+    logged = json.loads(error_records[0].getMessage())
+    assert logged["event"] == "turn_failed"
+    assert logged["exception_type"] == "ToolLoopLimitError"
+    assert error_records[0].exc_info is not None
+    assert error_records[0].exc_text is not None
+    assert "ToolLoopLimitError" in error_records[0].exc_text
+
+
+def test_receive_message_records_partial_usage_for_a_missing_price_rule_chain(
+    webhook_client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+    db_conn: psycopg.Connection[Any],
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The first of three pricing exceptions dispatch.py deliberately
+    lets propagate -- IncompletePriceRuleChainError, here, from no
+    price_rule being configured at all. Tested separately from
+    NoMatchingBandError and InconsistentPriceConfigurationError below
+    even though dispatch.py's own docstring treats all three as one
+    undifferentiated "business-data problem" category with no distinct
+    handling anywhere in this codebase today: that shared-code-path
+    reasoning is exactly the kind of thing a future change could
+    invalidate for one of the three without anyone noticing, if only one
+    of them had a test."""
+    hotel_id, room_type_id = seed_hotel_and_room_type(db_conn)
+    seed_season(
+        db_conn,
+        season_name="Default",
+        calendar_type="gregorian",
+        start_month=1,
+        start_day=1,
+        end_month=1,
+        end_day=1,
+        priority=0,
+        is_default=True,
+    )
+    # Far enough in the future that compute_quote's "check_in must not be
+    # in the past" validation never trips no matter when this test runs.
+    stay_check_in = date(2030, 1, 10)
+    seed_allotment_nights(
+        db_conn, hotel_id, room_type_id, stay_check_in, nights=1, total_rooms=5
+    )
+    # Deliberately no price_rule seeded.
+    _set_llm_settings(monkeypatch, _settings())
+    transport = _ScriptedTransport(
+        [
+            _function_call_response(
+                "get_quote",
+                {
+                    "hotel_id": hotel_id,
+                    "room_type_id": room_type_id,
+                    "check_in": "2030-01-10",
+                    "check_out": "2030-01-11",
+                    "rooms": 1,
+                },
+                prompt_tokens=25,
+                candidates_tokens=5,
+            )
+        ]
+    )
+    _set_transport(monkeypatch, transport)
+    caplog.set_level(logging.ERROR, logger="services.agent.webhook")
+    payload = _whatsapp_payload(
+        wa_id=_WA_ID, message_id="wamid.pricing-misconfig", body="hello"
+    )
+
+    response = _post(
+        webhook_client, payload, signature=_sign(json.dumps(payload).encode())
+    )
+
+    assert response.status_code == 200
+    assert response.json() == {"status": "turn_failed"}
+    assert len(transport.calls) == 1
+    usage_row = db_conn.execute(
+        "SELECT prompt_tokens, candidates_tokens, total_tokens FROM token_usage "
+        "WHERE customer_phone = %s",
+        (_PHONE,),
+    ).fetchone()
+    assert usage_row == (25, 5, 30)
+    error_records = [r for r in caplog.records if r.levelno == logging.ERROR]
+    assert len(error_records) == 1
+    logged = json.loads(error_records[0].getMessage())
+    assert logged["event"] == "turn_failed"
+    assert logged["exception_type"] == "IncompletePriceRuleChainError"
+    assert error_records[0].exc_info is not None
+    assert error_records[0].exc_text is not None
+    assert "IncompletePriceRuleChainError" in error_records[0].exc_text
+
+
+def test_receive_message_records_partial_usage_for_a_fully_booked_night(
+    webhook_client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+    db_conn: psycopg.Connection[Any],
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The second pricing exception: NoMatchingBandError. A demand_curve's
+    occupancy_bands top band is conventionally {"min": 0, "max": 1} --
+    but lookup_band_value's range check is [min, max), so occupancy
+    exactly 1.0 (a night reserved to full capacity) falls outside every
+    band despite the config satisfying migration 0006's "full coverage"
+    CHECK constraint. dispatch_get_quote only checks that an allotment
+    row exists for the requested dates (services/agent/llm/dispatch.py's
+    _allotment_covers_every_night), not whether the night still has room
+    left -- a real customer can ask for a quote on a night that just
+    became fully booked, so this is a genuine, reachable path, not a
+    contrived one."""
+    hotel_id, room_type_id = seed_hotel_and_room_type(db_conn)
+    seed_season(
+        db_conn,
+        season_name="Default",
+        calendar_type="gregorian",
+        start_month=1,
+        start_day=1,
+        end_month=1,
+        end_day=1,
+        priority=0,
+        is_default=True,
+    )
+    stay_date = date(2030, 1, 10)
+    # reserved == total: occupancy resolves to exactly 1.0, one past the
+    # flat_demand_curve() occupancy band's exclusive upper bound of 1.
+    seed_allotment_night(
+        db_conn, hotel_id, room_type_id, stay_date, total_rooms=5, reserved=5
+    )
+    seed_price_rule(
+        db_conn,
+        scope="global",
+        target_margin_bps=2_000,
+        min_profit_by_lead_time=flat_min_profit(1_000),
+        demand_curve=flat_demand_curve(),
+    )
+    _set_llm_settings(monkeypatch, _settings())
+    transport = _ScriptedTransport(
+        [
+            _function_call_response(
+                "get_quote",
+                {
+                    "hotel_id": hotel_id,
+                    "room_type_id": room_type_id,
+                    "check_in": "2030-01-10",
+                    "check_out": "2030-01-11",
+                    "rooms": 1,
+                },
+                prompt_tokens=25,
+                candidates_tokens=5,
+            )
+        ]
+    )
+    _set_transport(monkeypatch, transport)
+    caplog.set_level(logging.ERROR, logger="services.agent.webhook")
+    payload = _whatsapp_payload(
+        wa_id=_WA_ID, message_id="wamid.fully-booked-night", body="hello"
+    )
+
+    response = _post(
+        webhook_client, payload, signature=_sign(json.dumps(payload).encode())
+    )
+
+    assert response.status_code == 200
+    assert response.json() == {"status": "turn_failed"}
+    assert len(transport.calls) == 1
+    usage_row = db_conn.execute(
+        "SELECT prompt_tokens, candidates_tokens, total_tokens FROM token_usage "
+        "WHERE customer_phone = %s",
+        (_PHONE,),
+    ).fetchone()
+    assert usage_row == (25, 5, 30)
+    error_records = [r for r in caplog.records if r.levelno == logging.ERROR]
+    assert len(error_records) == 1
+    logged = json.loads(error_records[0].getMessage())
+    assert logged["event"] == "turn_failed"
+    assert logged["exception_type"] == "NoMatchingBandError"
+    assert error_records[0].exc_info is not None
+    assert error_records[0].exc_text is not None
+    assert "NoMatchingBandError" in error_records[0].exc_text
+
+
+def test_receive_message_records_partial_usage_when_the_price_floor_exceeds_the_ask(
+    webhook_client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+    db_conn: psycopg.Connection[Any],
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The third pricing exception: InconsistentPriceConfigurationError,
+    from a price_rule whose margin is too thin to clear its own minimum
+    profit floor -- a tiny target_margin_bps against a much larger flat
+    min_profit_by_lead_time, so min_allowed (cost + min_profit) ends up
+    above ask (cost marked up by the margin)."""
+    hotel_id, room_type_id = seed_hotel_and_room_type(db_conn)
+    seed_season(
+        db_conn,
+        season_name="Default",
+        calendar_type="gregorian",
+        start_month=1,
+        start_day=1,
+        end_month=1,
+        end_day=1,
+        priority=0,
+        is_default=True,
+    )
+    stay_date = date(2030, 1, 10)
+    # cost 10_000 halalas, unoccupied (occupancy 0, safely inside the
+    # flat_demand_curve()'s [0, 1) band -- this test is not about
+    # NoMatchingBandError).
+    seed_allotment_nights(
+        db_conn, hotel_id, room_type_id, stay_date, nights=1, total_rooms=5
+    )
+    seed_price_rule(
+        db_conn,
+        scope="global",
+        # 1% margin: ask = 10_000 * 1.01 = 10_100 (demand_curve is a flat
+        # 1.0x multiplier, so it does not change this).
+        target_margin_bps=100,
+        # min_allowed = 10_000 + 5_000 = 15_000, well above the 10_100 ask.
+        min_profit_by_lead_time=flat_min_profit(5_000),
+        demand_curve=flat_demand_curve(),
+    )
+    _set_llm_settings(monkeypatch, _settings())
+    transport = _ScriptedTransport(
+        [
+            _function_call_response(
+                "get_quote",
+                {
+                    "hotel_id": hotel_id,
+                    "room_type_id": room_type_id,
+                    "check_in": "2030-01-10",
+                    "check_out": "2030-01-11",
+                    "rooms": 1,
+                },
+                prompt_tokens=25,
+                candidates_tokens=5,
+            )
+        ]
+    )
+    _set_transport(monkeypatch, transport)
+    caplog.set_level(logging.ERROR, logger="services.agent.webhook")
+    payload = _whatsapp_payload(
+        wa_id=_WA_ID, message_id="wamid.price-floor-exceeds-ask", body="hello"
+    )
+
+    response = _post(
+        webhook_client, payload, signature=_sign(json.dumps(payload).encode())
+    )
+
+    assert response.status_code == 200
+    assert response.json() == {"status": "turn_failed"}
+    assert len(transport.calls) == 1
+    usage_row = db_conn.execute(
+        "SELECT prompt_tokens, candidates_tokens, total_tokens FROM token_usage "
+        "WHERE customer_phone = %s",
+        (_PHONE,),
+    ).fetchone()
+    assert usage_row == (25, 5, 30)
+    error_records = [r for r in caplog.records if r.levelno == logging.ERROR]
+    assert len(error_records) == 1
+    logged = json.loads(error_records[0].getMessage())
+    assert logged["event"] == "turn_failed"
+    assert logged["exception_type"] == "InconsistentPriceConfigurationError"
+    assert error_records[0].exc_info is not None
+    assert error_records[0].exc_text is not None
+    assert "InconsistentPriceConfigurationError" in error_records[0].exc_text
+
+
+def test_receive_message_records_partial_usage_and_logs_a_never_seen_error(
+    webhook_client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+    db_conn: psycopg.Connection[Any],
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Not one of generate_reply's own documented exception types at all
+    -- a plain RuntimeError standing in for a genuine bug or a database
+    outage inside the loop, the exact scenario the "always return 200"
+    design must not quietly swallow. Proves the structural guarantee: the
+    funnel does not need to know about this exception type in advance to
+    record its prior usage and log it loudly."""
+    _set_llm_settings(monkeypatch, _settings())
+    transport = _ScriptedTransport(
+        [
+            _function_call_response(
+                "check_availability",
+                _HARMLESS_AVAILABILITY_ARGS,
+                prompt_tokens=25,
+                candidates_tokens=5,
+            ),
+            RuntimeError("simulated bug or database outage"),
+        ]
+    )
+    _set_transport(monkeypatch, transport)
+    caplog.set_level(logging.ERROR, logger="services.agent.webhook")
+    payload = _whatsapp_payload(
+        wa_id=_WA_ID, message_id="wamid.never-seen-error", body="hello"
+    )
+
+    response = _post(
+        webhook_client, payload, signature=_sign(json.dumps(payload).encode())
+    )
+
+    assert response.status_code == 200
+    assert response.json() == {"status": "turn_failed"}
+    assert len(transport.calls) == 2
+    usage_row = db_conn.execute(
+        "SELECT prompt_tokens, candidates_tokens, total_tokens FROM token_usage "
+        "WHERE customer_phone = %s",
+        (_PHONE,),
+    ).fetchone()
+    assert usage_row == (25, 5, 30)
+    error_records = [r for r in caplog.records if r.levelno == logging.ERROR]
+    assert len(error_records) == 1
+    logged = json.loads(error_records[0].getMessage())
+    assert logged["event"] == "turn_failed"
+    assert logged["exception_type"] == "RuntimeError"
+    assert logged["exception_message"] == "simulated bug or database outage"
+    assert error_records[0].exc_info is not None
+    assert error_records[0].exc_info[0] is RuntimeError
+    assert error_records[0].exc_info[2] is not None
+    assert error_records[0].exc_text is not None
+    assert "simulated bug or database outage" in error_records[0].exc_text
 
 
 def test_receive_message_stores_message_but_skips_model_when_daily_rate_cap_exceeded(
