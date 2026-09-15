@@ -151,6 +151,43 @@ def _escalation_reason(findings: tuple[AmountFinding, ...]) -> str:
     return REASON_UNPARSEABLE
 
 
+def open_escalation(
+    conn: psycopg.Connection[Any],
+    *,
+    conversation_id: int,
+    reason: str,
+    notes: dict[str, Any],
+) -> int:
+    """Inserts one escalations row for conversation_id, for any reason —
+    an output-guard block, a turn-cap trip (services/agent/webhook.py),
+    or any future trigger. Migration 0024's own comment on
+    escalations.reason deliberately leaves the full set of reasons open
+    rather than guessing at it ahead of the code that raises each one,
+    so this is the one INSERT every caller shares rather than each
+    reinventing the same statement (CLAUDE.md §2's "one way to do each
+    thing").
+
+    customer_phone is copied from conversations inside this single
+    INSERT ... SELECT, so it never passes through this function's own
+    memory (or a caller's) and cannot end up inside notes by mistake.
+
+    Raises:
+        ConversationNotFoundError: conversation_id does not exist (the
+            SELECT matches zero rows).
+    """
+    row = conn.execute(
+        "INSERT INTO escalations (conversation_id, customer_phone, reason, notes) "
+        "SELECT id, customer_phone, %s, %s FROM conversations WHERE id = %s "
+        "RETURNING id",
+        (reason, json.dumps(notes), conversation_id),
+    ).fetchone()
+    if row is None:
+        raise ConversationNotFoundError(
+            f"conversation {conversation_id} does not exist"
+        )
+    return int(row[0])
+
+
 def _open_escalation(
     conn: psycopg.Connection[Any],
     *,
@@ -160,38 +197,25 @@ def _open_escalation(
     findings: tuple[AmountFinding, ...],
     reply_text: str,
 ) -> int:
-    """Inserts one escalations row for a blocked reply.
-
-    customer_phone is copied from conversations inside this single
-    INSERT ... SELECT, so it never passes through this function's own
-    memory and cannot end up inside notes by mistake.
+    """Inserts one escalations row for a blocked reply — the output-guard-
+    specific notes shape, built here and handed to open_escalation above
+    for the actual write.
 
     Raises:
-        ConversationNotFoundError: conversation_id does not exist (the
-            SELECT matches zero rows).
+        ConversationNotFoundError: see open_escalation.
     """
-    notes = json.dumps(
-        {
-            "quote_ids": list(quote_ids),
-            "blocked_amounts_halalas": [
-                finding.halalas for finding in findings if finding.halalas is not None
-            ],
-            "reasons": [finding.reason for finding in findings],
-            "blocked_reply_text": reply_text,
-            "retention": _RETENTION_NOTE,
-        }
+    notes = {
+        "quote_ids": list(quote_ids),
+        "blocked_amounts_halalas": [
+            finding.halalas for finding in findings if finding.halalas is not None
+        ],
+        "reasons": [finding.reason for finding in findings],
+        "blocked_reply_text": reply_text,
+        "retention": _RETENTION_NOTE,
+    }
+    return open_escalation(
+        conn, conversation_id=conversation_id, reason=reason, notes=notes
     )
-    row = conn.execute(
-        "INSERT INTO escalations (conversation_id, customer_phone, reason, notes) "
-        "SELECT id, customer_phone, %s, %s FROM conversations WHERE id = %s "
-        "RETURNING id",
-        (reason, notes, conversation_id),
-    ).fetchone()
-    if row is None:
-        raise ConversationNotFoundError(
-            f"conversation {conversation_id} does not exist"
-        )
-    return int(row[0])
 
 
 def enforce_outbound_text(

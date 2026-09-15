@@ -330,12 +330,16 @@ def seed_hold(
 
 
 def seed_conversation(
-    conn: psycopg.Connection[Any], *, customer_phone: str = "+966500000001"
+    conn: psycopg.Connection[Any],
+    *,
+    customer_phone: str = "+966500000001",
+    turn_count: int = 0,
 ) -> int:
     return returning_id(
         conn,
-        "INSERT INTO conversations (customer_phone) VALUES (%s) RETURNING id",
-        (customer_phone,),
+        "INSERT INTO conversations (customer_phone, turn_count) "
+        "VALUES (%s, %s) RETURNING id",
+        (customer_phone, turn_count),
     )
 
 

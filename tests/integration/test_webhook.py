@@ -846,6 +846,60 @@ def test_receive_message_returns_200_when_record_token_usage_raises_a_non_db_err
     assert "simulated bug, not a database failure" in error_records[0].exc_text
 
 
+def test_receive_message_still_processes_when_increment_turn_count_fails(
+    webhook_client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+    db_conn: psycopg.Connection[Any],
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Mirrors test_receive_message_returns_200_and_logs_when_record_
+    token_usage_fails for the sibling write: increment_turn_count failing
+    must not turn a successfully delivered reply into a 500, and must not
+    stop the reply from being recorded and sent -- only turn_count itself
+    is missing, logged loudly rather than silently."""
+    _set_llm_settings(monkeypatch, _settings())
+    transport = _FakeTransport(prompt_tokens=50, candidates_tokens=10)
+    _set_transport(monkeypatch, transport)
+
+    def _raise_db_error(
+        _conn: psycopg.Connection[Any], *, conversation_id: int
+    ) -> None:
+        del conversation_id
+        raise psycopg.OperationalError("simulated connection failure")
+
+    monkeypatch.setattr(webhook_module, "increment_turn_count", _raise_db_error)
+    caplog.set_level(logging.ERROR, logger="services.agent.webhook")
+    payload = _whatsapp_payload(
+        wa_id=_WA_ID, message_id="wamid.turn-count-write-fails", body="hello"
+    )
+
+    response = _post(
+        webhook_client, payload, signature=_sign(json.dumps(payload).encode())
+    )
+
+    assert response.status_code == 200
+    assert response.json() == {"status": "processed"}
+    conversation_row = db_conn.execute(
+        "SELECT id, turn_count FROM conversations WHERE customer_phone = %s",
+        (_PHONE,),
+    ).fetchone()
+    assert conversation_row is not None
+    assert conversation_row[1] == 0
+    usage_row = db_conn.execute(
+        "SELECT count(*) FROM token_usage WHERE customer_phone = %s", (_PHONE,)
+    ).fetchone()
+    assert usage_row == (1,)
+
+    error_records = [r for r in caplog.records if r.levelno == logging.ERROR]
+    assert len(error_records) == 1
+    logged = json.loads(error_records[0].getMessage())
+    assert logged["event"] == "increment_turn_count_failed"
+    assert logged["conversation_id"] == conversation_row[0]
+    assert logged["exception_type"] == "OperationalError"
+    assert "simulated connection failure" in logged["exception_message"]
+    assert error_records[0].exc_info is not None
+
+
 def test_receive_message_with_invalid_signature_is_rejected_with_no_trace(
     webhook_client: TestClient,
     monkeypatch: pytest.MonkeyPatch,
@@ -882,15 +936,22 @@ def test_receive_message_with_missing_signature_is_rejected_with_no_trace(
     assert transport.calls == []
 
 
-def test_receive_message_stores_message_but_skips_model_when_conversation_cap_exceeded(
+def test_receive_message_escalates_and_sends_fallback_when_the_spend_cap_is_exceeded(
     webhook_client: TestClient,
     monkeypatch: pytest.MonkeyPatch,
     db_conn: psycopg.Connection[Any],
 ) -> None:
+    """Same "beyond the cap, escalate to a human" property as the turn
+    cap (test_receive_message_escalates_and_sends_fallback_when_the_
+    turn_cap_is_exceeded above), for TokenSpendCapExceededError: this cap
+    has been live since before turn_count existed, so the silent-cap gap
+    it shared with the turn cap was not hypothetical."""
     settings = _settings(max_tokens_per_conversation=50)
     _set_llm_settings(monkeypatch, settings)
     transport = _FakeTransport()
     _set_transport(monkeypatch, transport)
+    sender = _FakeWhatsAppSender()
+    _set_whatsapp_sender(monkeypatch, sender)
     # Pre-existing usage already at the cap, recorded directly (not via the
     # webhook) — the point of this test is what happens on the *next*
     # inbound message against an already-capped conversation.
@@ -911,13 +972,27 @@ def test_receive_message_stores_message_but_skips_model_when_conversation_cap_ex
     )
 
     assert response.status_code == 200
-    assert response.json() == {"status": "capped"}
+    assert response.json() == {"status": "escalated"}
     assert transport.calls == []
-    row = db_conn.execute(
-        "SELECT whatsapp_message_id FROM messages WHERE conversation_id = %s",
+    assert len(sender.calls) == 1
+    assert sender.calls[0][1] == OUTPUT_GUARD_FALLBACK_MESSAGE
+    inbound_row = db_conn.execute(
+        "SELECT whatsapp_message_id FROM messages "
+        "WHERE conversation_id = %s AND direction = 'inbound'",
         (conversation_id,),
     ).fetchone()
-    assert row == ("wamid.capped",)
+    assert inbound_row == ("wamid.capped",)
+    outbound_row = db_conn.execute(
+        "SELECT direction, body FROM messages "
+        "WHERE conversation_id = %s AND direction = 'outbound'",
+        (conversation_id,),
+    ).fetchone()
+    assert outbound_row == ("outbound", OUTPUT_GUARD_FALLBACK_MESSAGE)
+    escalation_row = db_conn.execute(
+        "SELECT reason FROM escalations WHERE conversation_id = %s",
+        (conversation_id,),
+    ).fetchone()
+    assert escalation_row == ("token_spend_cap_exceeded",)
     # The cap was already at its limit before this turn made any model
     # call at all (usage_so_far is zero) — nothing new to record, so the
     # only token_usage row is the one seeded directly above, not a second
@@ -927,6 +1002,182 @@ def test_receive_message_stores_message_but_skips_model_when_conversation_cap_ex
         (conversation_id,),
     ).fetchone()
     assert usage_row_count == (1,)
+
+
+def test_receive_message_escalates_and_sends_fallback_when_the_turn_cap_is_exceeded(
+    webhook_client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+    db_conn: psycopg.Connection[Any],
+) -> None:
+    """CLAUDE.md §9's "beyond the cap, escalate to a human" -- a
+    conversation already at its turn cap must not just get a logged
+    "capped" status: a human escalation opens, and the customer gets the
+    same bilingual fallback message a blocked reply gets, not silence.
+    Mirrors test_receive_message_blocks_a_guard_violating_reply_and_
+    sends_the_fallback's shape exactly, since this is the same
+    "never leave the customer with nothing" property applied to a
+    different trigger."""
+    settings = _settings(max_conversation_turns=3)
+    _set_llm_settings(monkeypatch, settings)
+    transport = _FakeTransport()
+    _set_transport(monkeypatch, transport)
+    sender = _FakeWhatsAppSender()
+    _set_whatsapp_sender(monkeypatch, sender)
+    # Already at the cap before this turn -- the point of this test is
+    # what happens on the *next* inbound message against it.
+    conversation_id = seed_conversation(db_conn, customer_phone=_PHONE, turn_count=3)
+    payload = _whatsapp_payload(
+        wa_id=_WA_ID, message_id="wamid.turn-capped", body="one more thing"
+    )
+
+    response = _post(
+        webhook_client, payload, signature=_sign(json.dumps(payload).encode())
+    )
+
+    assert response.status_code == 200
+    assert response.json() == {"status": "escalated"}
+    assert transport.calls == []
+    assert len(sender.calls) == 1
+    assert sender.calls[0][1] == OUTPUT_GUARD_FALLBACK_MESSAGE
+    outbound_row = db_conn.execute(
+        "SELECT direction, body FROM messages "
+        "WHERE conversation_id = %s AND direction = 'outbound'",
+        (conversation_id,),
+    ).fetchone()
+    assert outbound_row == ("outbound", OUTPUT_GUARD_FALLBACK_MESSAGE)
+    escalation_row = db_conn.execute(
+        "SELECT reason FROM escalations WHERE conversation_id = %s",
+        (conversation_id,),
+    ).fetchone()
+    assert escalation_row == ("turn_cap_exceeded",)
+    # No model call happened this turn -- the cap was already at its
+    # limit before generate_reply ever loaded the message window, so
+    # turn_count must not have been bumped past what was seeded.
+    turn_count_row = db_conn.execute(
+        "SELECT turn_count FROM conversations WHERE id = %s", (conversation_id,)
+    ).fetchone()
+    assert turn_count_row == (3,)
+
+
+def test_receive_message_returns_capped_if_the_turn_cap_fallback_is_ever_blocked(
+    webhook_client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+    db_conn: psycopg.Connection[Any],
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Structurally impossible for the real OUTPUT_GUARD_FALLBACK_MESSAGE
+    -- test_output_guard_fallback_message_is_always_allowed
+    (tests/integration/test_output_guard.py) proves that end to end --
+    so this test forces the scenario directly by faking
+    enforce_outbound_text's verdict, mirroring test_receive_message_
+    logs_and_returns_fallback_blocked_if_it_ever_happens for the guard
+    path, to prove _escalate_cap_exceeded's own handling of the
+    branch."""
+    settings = _settings(max_conversation_turns=1)
+    _set_llm_settings(monkeypatch, settings)
+    seed_conversation(db_conn, customer_phone=_PHONE, turn_count=1)
+
+    def _fake_enforce(
+        _conn: psycopg.Connection[Any], *, conversation_id: int, text: str
+    ) -> GuardVerdict:
+        del conversation_id, text
+        return GuardVerdict(allowed=False, findings=(), quote_ids=(), escalation_id=999)
+
+    monkeypatch.setattr(webhook_module, "enforce_outbound_text", _fake_enforce)
+    caplog.set_level(logging.ERROR, logger="services.agent.webhook")
+    payload = _whatsapp_payload(
+        wa_id=_WA_ID, message_id="wamid.turn-cap-fallback-blocked", body="hi"
+    )
+
+    response = _post(
+        webhook_client, payload, signature=_sign(json.dumps(payload).encode())
+    )
+
+    assert response.status_code == 200
+    assert response.json() == {"status": "capped"}
+    error_records = [r for r in caplog.records if r.levelno == logging.ERROR]
+    logged = [json.loads(r.getMessage()) for r in error_records]
+    events = [entry["event"] for entry in logged]
+    assert "cap_exceeded_escalated" in events
+    assert "cap_exceeded_fallback_blocked" in events
+    assert all(entry["reason"] == "turn_cap_exceeded" for entry in logged)
+
+
+def test_receive_message_returns_capped_when_turn_cap_escalation_itself_errors(
+    webhook_client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+    db_conn: psycopg.Connection[Any],
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """open_escalation, enforce_outbound_text, and the WhatsApp send all
+    sit inside _escalate_cap_exceeded's own try/except -- this test
+    forces the first of those to raise, mirroring test_receive_message_
+    returns_delivery_failed_when_the_guard_check_itself_errors for the
+    normal reply path, to prove this new branch never lets a 500 escape
+    either."""
+    settings = _settings(max_conversation_turns=1)
+    _set_llm_settings(monkeypatch, settings)
+    seed_conversation(db_conn, customer_phone=_PHONE, turn_count=1)
+
+    def _fake_open_escalation(
+        _conn: psycopg.Connection[Any], *, conversation_id: int, reason: str, notes: Any
+    ) -> int:
+        del conversation_id, reason, notes
+        raise RuntimeError("simulated escalation-insert database error")
+
+    monkeypatch.setattr(webhook_module, "open_escalation", _fake_open_escalation)
+    caplog.set_level(logging.ERROR, logger="services.agent.webhook")
+    payload = _whatsapp_payload(
+        wa_id=_WA_ID, message_id="wamid.turn-cap-escalation-fails", body="hi"
+    )
+
+    response = _post(
+        webhook_client, payload, signature=_sign(json.dumps(payload).encode())
+    )
+
+    assert response.status_code == 200
+    assert response.json() == {"status": "capped"}
+    escalation_count = db_conn.execute(
+        "SELECT count(*) FROM escalations WHERE customer_phone = %s", (_PHONE,)
+    ).fetchone()
+    assert escalation_count == (0,)
+    error_records = [r for r in caplog.records if r.levelno == logging.ERROR]
+    assert len(error_records) == 1
+    logged = json.loads(error_records[0].getMessage())
+    assert logged["event"] == "cap_exceeded_escalation_failed"
+    assert logged["reason"] == "turn_cap_exceeded"
+    assert logged["exception_type"] == "RuntimeError"
+    assert error_records[0].exc_info is not None
+
+
+def test_receive_message_increments_turn_count_after_a_normal_turn(
+    webhook_client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+    db_conn: psycopg.Connection[Any],
+) -> None:
+    """The turn cap has no effect unless a real, successful turn actually
+    advances turn_count -- this is the direct proof for the success
+    path; test_receive_message_records_full_usage_when_the_tool_loop_
+    limit_is_exceeded covers the same write for a turn that made real
+    model calls but never produced a sendable reply."""
+    _set_llm_settings(monkeypatch, _settings())
+    transport = _FakeTransport(prompt_tokens=50, candidates_tokens=10)
+    _set_transport(monkeypatch, transport)
+    conversation_id = seed_conversation(db_conn, customer_phone=_PHONE)
+    payload = _whatsapp_payload(
+        wa_id=_WA_ID, message_id="wamid.turn-increments", body="hello"
+    )
+
+    response = _post(
+        webhook_client, payload, signature=_sign(json.dumps(payload).encode())
+    )
+
+    assert response.status_code == 200
+    assert response.json() == {"status": "processed"}
+    turn_count_row = db_conn.execute(
+        "SELECT turn_count FROM conversations WHERE id = %s", (conversation_id,)
+    ).fetchone()
+    assert turn_count_row == (1,)
 
 
 def test_receive_message_records_partial_usage_when_the_cap_crosses_mid_turn(
@@ -940,10 +1191,11 @@ def test_receive_message_records_partial_usage_when_the_cap_crosses_mid_turn(
     real (already-paid-for) model calls happened earlier in the same
     turn. That usage must not be discarded: TokenSpendCapExceededError
     carries it as usage_so_far, and the webhook records it before
-    returning "capped" — proven here end to end, through the real
-    endpoint and a real, non-mocked check_token_spend_caps, not just at
-    the wiring level (tests/unit/test_llm_conversation.py) or the
-    caps.py-arithmetic level (tests/integration/test_llm_caps.py)."""
+    escalating and sending the fallback — proven here end to end,
+    through the real endpoint and a real, non-mocked
+    check_token_spend_caps, not just at the wiring level
+    (tests/unit/test_llm_conversation.py) or the caps.py-arithmetic
+    level (tests/integration/test_llm_caps.py)."""
     # Each real model call reports 30 tokens. The 50-token cap is still
     # under after 1 call (30) but crossed by the pre-check before a 3rd
     # call would happen (60 >= 50) — so exactly 2 model calls should
@@ -952,6 +1204,8 @@ def test_receive_message_records_partial_usage_when_the_cap_crosses_mid_turn(
     _set_llm_settings(monkeypatch, settings)
     transport = _ToolCallingTransport(prompt_tokens=25, candidates_tokens=5)
     _set_transport(monkeypatch, transport)
+    sender = _FakeWhatsAppSender()
+    _set_whatsapp_sender(monkeypatch, sender)
     payload = _whatsapp_payload(
         wa_id=_WA_ID, message_id="wamid.crosses-mid-turn", body="hello"
     )
@@ -961,7 +1215,7 @@ def test_receive_message_records_partial_usage_when_the_cap_crosses_mid_turn(
     )
 
     assert response.status_code == 200
-    assert response.json() == {"status": "capped"}
+    assert response.json() == {"status": "escalated"}
     assert len(transport.calls) == 2
     usage_row = db_conn.execute(
         "SELECT prompt_tokens, candidates_tokens, total_tokens FROM token_usage "
@@ -969,6 +1223,12 @@ def test_receive_message_records_partial_usage_when_the_cap_crosses_mid_turn(
         (_PHONE,),
     ).fetchone()
     assert usage_row == (50, 10, 60)
+    assert len(sender.calls) == 1
+    assert sender.calls[0][1] == OUTPUT_GUARD_FALLBACK_MESSAGE
+    escalation_row = db_conn.execute(
+        "SELECT reason FROM escalations WHERE customer_phone = %s", (_PHONE,)
+    ).fetchone()
+    assert escalation_row == ("token_spend_cap_exceeded",)
 
 
 def test_receive_message_records_partial_usage_when_the_daily_cap_crosses_mid_turn(
@@ -979,7 +1239,8 @@ def test_receive_message_records_partial_usage_when_the_daily_cap_crosses_mid_tu
     """Same shape of gap as the per-conversation cap above, for the
     global daily cap: DailySpendCapExceededError can also now fire after
     real model calls already happened this turn, and must carry (and the
-    webhook must record) that usage before returning "capped"."""
+    webhook must record) that usage before escalating and sending the
+    fallback."""
     # 1000 prompt tokens costs 1000 * $0.75 / 1_000_000 = $0.00075 -- two
     # calls of 500 prompt tokens each cross that cap exactly on the
     # pre-check before a 3rd call would happen.
@@ -987,6 +1248,8 @@ def test_receive_message_records_partial_usage_when_the_daily_cap_crosses_mid_tu
     _set_llm_settings(monkeypatch, settings)
     transport = _ToolCallingTransport(prompt_tokens=500, candidates_tokens=0)
     _set_transport(monkeypatch, transport)
+    sender = _FakeWhatsAppSender()
+    _set_whatsapp_sender(monkeypatch, sender)
     payload = _whatsapp_payload(
         wa_id=_WA_ID, message_id="wamid.daily-crosses-mid-turn", body="hello"
     )
@@ -996,7 +1259,7 @@ def test_receive_message_records_partial_usage_when_the_daily_cap_crosses_mid_tu
     )
 
     assert response.status_code == 200
-    assert response.json() == {"status": "capped"}
+    assert response.json() == {"status": "escalated"}
     assert len(transport.calls) == 2
     usage_row = db_conn.execute(
         "SELECT prompt_tokens, candidates_tokens, total_tokens FROM token_usage "
@@ -1004,6 +1267,12 @@ def test_receive_message_records_partial_usage_when_the_daily_cap_crosses_mid_tu
         (_PHONE,),
     ).fetchone()
     assert usage_row == (1000, 0, 1000)
+    assert len(sender.calls) == 1
+    assert sender.calls[0][1] == OUTPUT_GUARD_FALLBACK_MESSAGE
+    escalation_row = db_conn.execute(
+        "SELECT reason FROM escalations WHERE customer_phone = %s", (_PHONE,)
+    ).fetchone()
+    assert escalation_row == ("daily_spend_cap_exceeded",)
 
 
 def test_receive_message_records_partial_usage_when_usage_is_unavailable_mid_turn(
@@ -1243,7 +1512,12 @@ def test_receive_message_records_full_usage_when_the_tool_loop_limit_is_exceeded
 ) -> None:
     """ToolLoopLimitError fires after all MAX_TOOL_ITERATIONS real model
     calls succeeded -- none of them ever discarded, unlike before this
-    fix, where the loop's exhaustion raise carried no usage at all."""
+    fix, where the loop's exhaustion raise carried no usage at all.
+    turn_count must still increment too: a turn that burned real,
+    already-paid-for model calls counts against CLAUDE.md §9's turn cap
+    even though it never produced a sendable reply -- see
+    caps.increment_turn_count's own docstring for why delivery is not
+    the event that matters."""
     _set_llm_settings(monkeypatch, _settings())
     transport = _ScriptedTransport(
         [
@@ -1287,6 +1561,10 @@ def test_receive_message_records_full_usage_when_the_tool_loop_limit_is_exceeded
     assert error_records[0].exc_info is not None
     assert error_records[0].exc_text is not None
     assert "ToolLoopLimitError" in error_records[0].exc_text
+    turn_count_row = db_conn.execute(
+        "SELECT turn_count FROM conversations WHERE customer_phone = %s", (_PHONE,)
+    ).fetchone()
+    assert turn_count_row == (1,)
 
 
 def test_receive_message_records_partial_usage_for_a_missing_price_rule_chain(
@@ -1647,11 +1925,19 @@ def test_receive_message_second_message_hits_the_cap_from_the_first_recording(
     """Proves the counter is live, not just written: the first message's
     usage (60 tokens) is recorded by the webhook itself, and the second
     message's own pre-flight check sees that recorded total and blocks —
-    without this second message ever calling the model."""
+    without this second message ever calling the model. Also proves the
+    second, capped message still gets escalated and answered with the
+    fallback, not left silent."""
     settings = _settings(max_tokens_per_conversation=50)
     _set_llm_settings(monkeypatch, settings)
     transport = _FakeTransport(prompt_tokens=50, candidates_tokens=10)
     _set_transport(monkeypatch, transport)
+    # Two distinct outbound sends happen across this test (the first
+    # turn's real reply, the second turn's fallback) -- messages.
+    # whatsapp_message_id is UNIQUE, so each needs its own fake sender
+    # with a distinct message_id rather than reusing one instance.
+    first_sender = _FakeWhatsAppSender(message_id="wamid.OUTBOUND-FIRST")
+    _set_whatsapp_sender(monkeypatch, first_sender)
 
     first_payload = _whatsapp_payload(wa_id=_WA_ID, message_id="wamid.first", body="hi")
     first_response = _post(
@@ -1663,6 +1949,8 @@ def test_receive_message_second_message_hits_the_cap_from_the_first_recording(
     assert first_response.json() == {"status": "processed"}
     assert len(transport.calls) == 1
 
+    second_sender = _FakeWhatsAppSender(message_id="wamid.OUTBOUND-SECOND")
+    _set_whatsapp_sender(monkeypatch, second_sender)
     second_payload = _whatsapp_payload(
         wa_id=_WA_ID, message_id="wamid.second", body="are you there?"
     )
@@ -1673,17 +1961,22 @@ def test_receive_message_second_message_hits_the_cap_from_the_first_recording(
     )
 
     assert second_response.status_code == 200
-    assert second_response.json() == {"status": "capped"}
+    assert second_response.json() == {"status": "escalated"}
     # No second call: the first message's 60 recorded tokens already
     # exceed the 50-token cap before the second message's own model call
     # would have happened.
     assert len(transport.calls) == 1
-    # 3, not 4: the first turn stores its inbound message and (having
-    # passed the guard and sent successfully) its outbound reply too; the
-    # second turn is capped before generate_reply ever returns, so it
-    # never reaches the guard/send step and stores only its inbound
-    # message.
-    assert _message_count(db_conn) == 3
+    # 4: the first turn stores its inbound message and its outbound
+    # reply; the second turn is capped before generate_reply ever
+    # returns, but still stores its own inbound message plus the
+    # fallback outbound reply sent by _escalate_cap_exceeded.
+    assert _message_count(db_conn) == 4
+    assert len(second_sender.calls) == 1
+    assert second_sender.calls[0][1] == OUTPUT_GUARD_FALLBACK_MESSAGE
+    escalation_row = db_conn.execute(
+        "SELECT reason FROM escalations WHERE customer_phone = %s", (_PHONE,)
+    ).fetchone()
+    assert escalation_row == ("token_spend_cap_exceeded",)
 
 
 def test_receive_message_with_invalid_json_body_is_rejected(

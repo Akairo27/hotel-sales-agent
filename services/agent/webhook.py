@@ -2,14 +2,14 @@
 phase 4.
 
 Verifies the channel, stores the inbound message, enforces CLAUDE.md §9's
-two required caps, calls the model, runs the output guard on whatever it
-produced, and sends the result over the WhatsApp Cloud API — the output
-guard and the send ship together in this module, deliberately: a guard
-with nothing downstream to protect is untested in the one way that
-matters (does a real send ever bypass it), and a send with no guard in
-front of it is exactly the "wrong price reaches a customer" failure mode
-CLAUDE.md rule 8 exists to prevent. Building either alone would mean
-shipping half of a safety property.
+message-rate, spend, and turn caps, calls the model, runs the output
+guard on whatever it produced, and sends the result over the WhatsApp
+Cloud API — the output guard and the send ship together in this module,
+deliberately: a guard with nothing downstream to protect is untested in
+the one way that matters (does a real send ever bypass it), and a send
+with no guard in front of it is exactly the "wrong price reaches a
+customer" failure mode CLAUDE.md rule 8 exists to prevent. Building
+either alone would mean shipping half of a safety property.
 
 Order matters and is deliberate:
 1. Verify X-Hub-Signature-256 against the raw body, before touching the
@@ -24,13 +24,27 @@ Order matters and is deliberate:
    real, already-paid-for model calls happened in the same turn — not
    only before any of them, since the per-conversation and daily spend
    caps are re-checked before every model call, not just the first.
+   TurnCapExceededError is the one exception that never follows a model
+   call in the same turn — it is raised before generate_reply loads
+   even the message window.
 5. Whatever generate_reply raises or returns, record any usage it
-   reports before deciding how to respond. See _handle_generate_reply_
-   failure below: recording happens exactly once, driven by whether the
-   exception is carrying usage (services.agent.llm.errors.
-   read_usage_so_far), not by a per-exception-type checklist — a new
-   exception type added to generate_reply's loop in the future is
-   covered automatically, without touching this module.
+   reports and increment turn_count before deciding how to respond. See
+   _handle_generate_reply_failure below: both writes happen exactly
+   once, driven by whether the exception is carrying usage
+   (services.agent.llm.errors.read_usage_so_far), not by a
+   per-exception-type checklist — a new exception type added to
+   generate_reply's loop in the future is covered automatically, without
+   touching this module.
+5a. Any of CLAUDE.md §9's three cap-exceeded exceptions
+    (TurnCapExceededError, TokenSpendCapExceededError,
+    DailySpendCapExceededError) — after step 5's recording above —  is
+    escalated to a human and answered with the exact same bilingual
+    fallback message a blocked reply gets in step 6
+    (_escalate_cap_exceeded), rather than just a logged status —
+    CLAUDE.md §9's "beyond the cap, escalate to a human" applied
+    literally to all three, not left as a comment nobody acts on. Every
+    other exception falls through to the generic, loudly-logged status
+    in _status_for_generate_reply_error instead.
 6. Run services.agent.output_guard.enforcement.enforce_outbound_text on
    the candidate reply. Allowed: send it. Blocked: never send it, never
    ask the model to rephrase it (a second, unmanipulated attempt is not
@@ -84,6 +98,7 @@ from fastapi.responses import JSONResponse, PlainTextResponse
 from services.agent.llm.caps import (
     MessageRateCapExceededError,
     check_message_rate_cap,
+    increment_turn_count,
     record_token_usage,
 )
 from services.agent.llm.client import GeminiTransport, ModelTransport
@@ -99,6 +114,7 @@ from services.agent.llm.errors import (
 from services.agent.output_guard.enforcement import (
     OUTPUT_GUARD_FALLBACK_MESSAGE,
     enforce_outbound_text,
+    open_escalation,
 )
 from services.agent.whatsapp_send import (
     WhatsAppCloudApiSender,
@@ -433,9 +449,46 @@ def _record_usage_or_log_failure(
     return True
 
 
+def _increment_turn_count_or_log_failure(
+    conn: psycopg.Connection[Any], *, conversation_id: int
+) -> None:
+    """Attempts increment_turn_count; on any failure, logs at ERROR with
+    the conversation id and the exception's type/message/traceback
+    instead of propagating. Called at the same two points as
+    _record_usage_or_log_failure above, under the same condition — see
+    caps.increment_turn_count's own docstring for why. No return value:
+    unlike usage recording, nothing downstream branches on whether this
+    particular write succeeded.
+    """
+    try:
+        increment_turn_count(conn, conversation_id=conversation_id)
+    except Exception as exc:
+        logger.error(
+            json.dumps(
+                {
+                    "event": "increment_turn_count_failed",
+                    "conversation_id": conversation_id,
+                    "exception_type": type(exc).__name__,
+                    "exception_message": str(exc),
+                }
+            ),
+            exc_info=exc,
+        )
+
+
 _STATUS_CAPPED = "capped"
 _STATUS_USAGE_UNAVAILABLE = "usage_unavailable"
 _STATUS_TURN_FAILED = "turn_failed"
+_STATUS_ESCALATED = "escalated"
+
+# One CapExceededError type, one reason -- a human reading escalations
+# must be able to tell which of CLAUDE.md §9's three caps stopped the
+# conversation without re-deriving it from notes.
+_CAP_EXCEEDED_ESCALATION_REASONS: dict[type[Exception], str] = {
+    TurnCapExceededError: "turn_cap_exceeded",
+    TokenSpendCapExceededError: "token_spend_cap_exceeded",
+    DailySpendCapExceededError: "daily_spend_cap_exceeded",
+}
 
 
 def _status_for_generate_reply_error(exc: Exception) -> str:
@@ -446,6 +499,12 @@ def _status_for_generate_reply_error(exc: Exception) -> str:
     below, driven by whether the exception is carrying usage at all, not
     by its type.
 
+    None of CLAUDE.md §9's three cap-exceeded exceptions
+    (_CAP_EXCEEDED_ESCALATION_REASONS above) are named here: all three
+    are intercepted earlier, in _handle_generate_reply_failure, before
+    this function is ever called for them — see _escalate_cap_exceeded
+    below.
+
     An exception type not named here still gets its usage recorded and
     still never produces a 500; it only falls into the generic
     _STATUS_TURN_FAILED bucket instead of a specific one — logged loudly
@@ -453,17 +512,109 @@ def _status_for_generate_reply_error(exc: Exception) -> str:
     the moment it happens. The point of always returning 200 is to stop
     Meta's retry-into-a-permanent-gap trap, not to make a real bug quiet.
     """
-    if isinstance(
-        exc,
-        (TurnCapExceededError, TokenSpendCapExceededError, DailySpendCapExceededError),
-    ):
-        return _STATUS_CAPPED
     if isinstance(exc, UsageUnavailableError):
         return _STATUS_USAGE_UNAVAILABLE
     return _STATUS_TURN_FAILED
 
 
-def _handle_generate_reply_failure(
+async def _escalate_cap_exceeded(
+    conn: psycopg.Connection[Any],
+    exc: TurnCapExceededError | TokenSpendCapExceededError | DailySpendCapExceededError,
+    *,
+    conversation_id: int,
+    customer_phone: str,
+) -> JSONResponse:
+    """Handles any of CLAUDE.md §9's three cap-exceeded exceptions the
+    same way enforce_outbound_text handles a blocked reply (§9's
+    "beyond the cap, escalate to a human" plus rule 8's "never leave a
+    customer with silence"): opens an escalation -- reason distinguishes
+    which cap fired, via _CAP_EXCEEDED_ESCALATION_REASONS -- then sends
+    the exact same bilingual fallback message through the exact same
+    guard-checked send path a guard block uses, not a second, bespoke
+    "sorry, capped" message per cap type. A customer waiting with nobody
+    notified is the same outcome regardless of which cap stopped the
+    conversation, so all three get identical treatment.
+
+    Whatever usage this turn incurred was already recorded by
+    _handle_generate_reply_failure's caller before this runs (or there
+    was none, for TurnCapExceededError -- it fires before any model call
+    this turn, errors.read_usage_so_far's own docstring); this function
+    only ever escalates and notifies, never records usage itself.
+
+    Never raises: any failure along this path (opening the escalation,
+    the guard check, loading WhatsApp send settings, the send itself) is
+    logged at ERROR and falls back to _STATUS_CAPPED, the same
+    never-a-500 posture as every other write in this module.
+    """
+    reason = _CAP_EXCEEDED_ESCALATION_REASONS[type(exc)]
+    try:
+        escalation_id = open_escalation(
+            conn,
+            conversation_id=conversation_id,
+            reason=reason,
+            notes={"detail": str(exc)},
+        )
+        logger.error(
+            json.dumps(
+                {
+                    "event": "cap_exceeded_escalated",
+                    "conversation_id": conversation_id,
+                    "reason": reason,
+                    "escalation_id": escalation_id,
+                }
+            )
+        )
+
+        verdict = enforce_outbound_text(
+            conn, conversation_id=conversation_id, text=OUTPUT_GUARD_FALLBACK_MESSAGE
+        )
+        if not verdict.allowed:
+            # Structurally impossible -- the same guarantee
+            # test_output_guard_fallback_message_is_always_allowed
+            # (tests/integration/test_output_guard.py) exists to prove.
+            # Logged loudly if it ever isn't, mirroring the
+            # fallback_message_blocked branch below.
+            logger.error(
+                json.dumps(
+                    {
+                        "event": "cap_exceeded_fallback_blocked",
+                        "conversation_id": conversation_id,
+                        "reason": reason,
+                        "cap_escalation_id": escalation_id,
+                        "fallback_escalation_id": verdict.escalation_id,
+                    }
+                )
+            )
+            return JSONResponse({"status": _STATUS_CAPPED})
+
+        whatsapp_settings = get_whatsapp_send_settings()
+        sender = get_whatsapp_sender(whatsapp_settings)
+        await _send_or_log_failure(
+            sender,
+            conn=conn,
+            conversation_id=conversation_id,
+            customer_phone=customer_phone,
+            text=OUTPUT_GUARD_FALLBACK_MESSAGE,
+        )
+    except Exception as unexpected_exc:
+        logger.error(
+            json.dumps(
+                {
+                    "event": "cap_exceeded_escalation_failed",
+                    "conversation_id": conversation_id,
+                    "reason": reason,
+                    "exception_type": type(unexpected_exc).__name__,
+                    "exception_message": str(unexpected_exc),
+                }
+            ),
+            exc_info=unexpected_exc,
+        )
+        return JSONResponse({"status": _STATUS_CAPPED})
+
+    return JSONResponse({"status": _STATUS_ESCALATED})
+
+
+async def _handle_generate_reply_failure(
     conn: psycopg.Connection[Any],
     exc: Exception,
     *,
@@ -476,11 +627,18 @@ def _handle_generate_reply_failure(
     Records whatever usage the exception is carrying — present only when
     one or more real model calls already happened this turn before it
     was raised, per errors.read_usage_so_far and conversation.py's own
-    docstring — then logs and always returns 200. Adding a new exception
-    type to generate_reply's tool-calling loop in the future needs no
-    change here: read_usage_so_far works on any exception, and an
-    unnamed type simply falls into the loudly-logged _STATUS_TURN_FAILED
-    bucket in _status_for_generate_reply_error above.
+    docstring — and increments turn_count alongside it (same condition,
+    same reasoning as caps.increment_turn_count's own docstring: a real
+    model call happened, so this turn counts, regardless of how it
+    ends). Any of the three CLAUDE.md §9 cap-exceeded exceptions is then
+    handled separately by _escalate_cap_exceeded above, after that
+    recording (TurnCapExceededError carries no usage to record; the two
+    spend caps might).
+
+    Adding a new exception type to generate_reply's tool-calling loop in
+    the future needs no change here: read_usage_so_far works on any
+    exception, and an unnamed type simply falls into the loudly-logged
+    _STATUS_TURN_FAILED bucket in _status_for_generate_reply_error above.
     """
     usage_so_far = read_usage_so_far(exc)
     if usage_so_far is not None and usage_so_far.total_tokens > 0:
@@ -491,6 +649,18 @@ def _handle_generate_reply_failure(
             usage=usage_so_far,
             now=now,
         )
+        _increment_turn_count_or_log_failure(conn, conversation_id=conversation_id)
+
+    if isinstance(
+        exc,
+        (TurnCapExceededError, TokenSpendCapExceededError, DailySpendCapExceededError),
+    ):
+        return await _escalate_cap_exceeded(
+            conn,
+            exc,
+            conversation_id=conversation_id,
+            customer_phone=customer_phone,
+        )
 
     status = _status_for_generate_reply_error(exc)
     if status == _STATUS_USAGE_UNAVAILABLE:
@@ -499,12 +669,16 @@ def _handle_generate_reply_failure(
                 {"event": "usage_unavailable", "conversation_id": conversation_id}
             )
         )
-    elif status == _STATUS_TURN_FAILED:
-        # Deliberately loud: CLAUDE.md forbids folding a real bug or a
-        # database outage quietly into a generic bucket. exc_info=exc
-        # attaches the full traceback to the log record — the type name
-        # and message are also in the JSON body so they are greppable
-        # without needing the traceback rendered alongside them.
+    else:
+        # _status_for_generate_reply_error now only ever returns
+        # _STATUS_USAGE_UNAVAILABLE or _STATUS_TURN_FAILED -- every cap
+        # exceeded exception is handled above before this line is ever
+        # reached. Deliberately loud: CLAUDE.md forbids folding a real
+        # bug or a database outage quietly into a generic bucket.
+        # exc_info=exc attaches the full traceback to the log record —
+        # the type name and message are also in the JSON body so they
+        # are greppable without needing the traceback rendered alongside
+        # them.
         logger.error(
             json.dumps(
                 {
@@ -516,13 +690,6 @@ def _handle_generate_reply_failure(
             ),
             exc_info=exc,
         )
-    # _STATUS_CAPPED needs no additional log here: TurnCapExceededError
-    # and TokenSpendCapExceededError are expected, common outcomes with
-    # nothing to add beyond the status itself, and DailySpendCapExceeded-
-    # Error already logs its own structured ERROR event inside
-    # check_token_spend_caps every time it is raised (services/agent/
-    # llm/caps.py) — logging it again here would just duplicate that
-    # event under a different name.
 
     return JSONResponse({"status": status})
 
@@ -621,7 +788,7 @@ async def receive_message(request: Request) -> JSONResponse:
                 now=now,
             )
         except Exception as exc:
-            return _handle_generate_reply_failure(
+            return await _handle_generate_reply_failure(
                 conn,
                 exc,
                 conversation_id=conversation_id,
@@ -636,6 +803,7 @@ async def receive_message(request: Request) -> JSONResponse:
             usage=reply.usage,
             now=now,
         )
+        _increment_turn_count_or_log_failure(conn, conversation_id=conversation_id)
 
         try:
             verdict = enforce_outbound_text(
@@ -714,4 +882,6 @@ async def receive_message(request: Request) -> JSONResponse:
 
         if not usage_recorded:
             return JSONResponse({"status": "usage_not_recorded"})
-        return JSONResponse({"status": "processed" if verdict.allowed else "escalated"})
+        return JSONResponse(
+            {"status": "processed" if verdict.allowed else _STATUS_ESCALATED}
+        )
