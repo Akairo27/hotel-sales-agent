@@ -83,6 +83,25 @@ def load_whatsapp_send_settings() -> WhatsAppSendSettings:
     )
 
 
+def _graph_api_error_detail(body: object) -> str | None:
+    """Extracts only the Graph API's own `error.code`/`error.message`
+    fields from a parsed JSON response body, if present — never the full
+    body. Every caller of this helper builds a WhatsAppSendError message
+    that ends up in a structured log line (services/agent/webhook.py's
+    "exception_message") in the same process that just sent a live
+    access token in this request's headers, so nothing beyond these two
+    identifying fields is safe to include.
+    """
+    if not isinstance(body, dict):
+        return None
+    error = body.get("error")
+    if not isinstance(error, dict):
+        return None
+    fields = (("code", error.get("code")), ("message", error.get("message")))
+    parts = [f"{name}={value}" for name, value in fields if value is not None]
+    return ", ".join(parts) if parts else None
+
+
 class WhatsAppSender(Protocol):
     """What webhook.py needs from a WhatsApp transport — small enough
     for a test fake to implement with no network access, mirroring
@@ -134,12 +153,34 @@ class WhatsAppCloudApiSender:
                 response = await client.post(self._url, json=payload, headers=headers)
                 response.raise_for_status()
         except httpx.HTTPError as exc:
-            raise WhatsAppSendError(f"WhatsApp send failed: {exc}") from exc
+            # Never interpolate str(exc) or the raw response here: this
+            # request just carried a live Bearer token in its headers,
+            # and this message is the only thing that flows into
+            # webhook.py's "exception_message" log field. httpx itself
+            # doesn't put headers in its exception text today, but a
+            # library upgrade or an edge case in an underlying transport
+            # error is not something to rely on for that — only
+            # identifying fields we've deliberately chosen are safe.
+            response_obj = getattr(exc, "response", None)
+            status_code = response_obj.status_code if response_obj is not None else None
+            detail = None
+            if response_obj is not None:
+                try:
+                    detail = _graph_api_error_detail(response_obj.json())
+                except ValueError:
+                    detail = None
+            description = f"WhatsApp send failed: {type(exc).__name__}"
+            if status_code is not None:
+                description += f" (status={status_code}"
+                description += f", {detail})" if detail else ")"
+            raise WhatsAppSendError(description) from exc
 
         data = response.json()
         try:
             return str(data["messages"][0]["id"])
         except (KeyError, IndexError, TypeError) as exc:
-            raise WhatsAppSendError(
-                f"WhatsApp send succeeded but response had no message id: {data!r}"
-            ) from exc
+            detail = _graph_api_error_detail(data)
+            description = "WhatsApp send succeeded but response had no message id"
+            if detail:
+                description += f" ({detail})"
+            raise WhatsAppSendError(description) from exc
