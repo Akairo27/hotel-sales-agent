@@ -43,7 +43,13 @@ MAX_TOOL_ITERATIONS = 4
 # name and short enough that an injected paragraph cannot fit.
 MAX_CUSTOMER_NAME_LENGTH = 60
 
-_DEFAULT_TIMEOUT_MS = 20_000
+# Lowered from 20_000: this is a WhatsApp conversation, not a batch job.
+# A customer waiting silently past ~30 seconds assumes the bot is
+# broken, and escalating to a human at that point (see webhook.py's
+# _escalate_and_notify) is a better outcome than a longer wait that may
+# still fail. See client.py's own retry constants for the matching
+# reasoning on attempt count and backoff.
+_DEFAULT_TIMEOUT_MS = 10_000
 
 
 @dataclass(frozen=True)
