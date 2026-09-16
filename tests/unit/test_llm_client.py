@@ -66,3 +66,75 @@ def test_generate_wraps_transport_timeout_as_model_unavailable(
     _patch_sdk_call_to_raise(monkeypatch, transport, httpx.ReadTimeout("timed out"))
     with pytest.raises(ModelUnavailableError):
         asyncio.run(transport.generate(contents=[], system_instruction="be helpful"))
+
+
+def test_generate_configures_the_sdks_own_retry_with_the_pinned_values() -> None:
+    """google-genai wraps every call in tenacity, but only retries when
+    HttpOptions.retry_options is set -- left unset (as this module did
+    before), it resolves to exactly one attempt, no retry at all. This
+    asserts the values this module pins actually reach the underlying
+    API client, rather than stacking a second, hand-rolled retry layer
+    on top of the SDK's own (see client.py's own module comment for the
+    incident and reasoning that led to these exact numbers)."""
+    transport = GeminiTransport(_SETTINGS)
+    retry_options = transport._client._api_client._http_options.retry_options
+
+    assert retry_options is not None
+    assert retry_options.attempts == 3
+    assert retry_options.initial_delay == 1.0
+    assert retry_options.max_delay == 5.0
+    assert retry_options.exp_base == 2.0
+    assert retry_options.jitter == 1.0
+    assert retry_options.http_status_codes == [408, 429, 500, 502, 503, 504]
+
+
+def test_generate_api_error_message_never_contains_the_raw_response_body(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Same leak pattern whatsapp_send.py's WhatsAppSendError fix closed
+    for the Graph API, never reached here until now: APIError's own
+    __str__ includes exc.details, Google's full raw response body,
+    verbatim -- and this call carries a live API key
+    (services/agent/llm/config.py's LLM_API_KEY, sent as the
+    x-goog-api-key header). Only .code and .status, Google's own short
+    status string, are safe to surface."""
+    transport = GeminiTransport(_SETTINGS)
+    secret_detail = "do-not-leak-this-response-detail"
+    _patch_sdk_call_to_raise(
+        monkeypatch,
+        transport,
+        errors.ServerError(
+            code=503,
+            response_json={
+                "error": {"status": "UNAVAILABLE", "message": secret_detail}
+            },
+        ),
+    )
+
+    with pytest.raises(ModelUnavailableError) as exc_info:
+        asyncio.run(transport.generate(contents=[], system_instruction="be helpful"))
+
+    message = str(exc_info.value)
+    assert secret_detail not in message
+    assert "503" in message
+    assert "UNAVAILABLE" in message
+
+
+def test_generate_transport_error_message_never_contains_the_raw_exception(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Same property for a transport-level (non-API) failure: httpx
+    exceptions don't put headers in their own message today (verified
+    directly in whatsapp_send.py's equivalent fix), but this module
+    doesn't rely on that holding forever either -- only the exception's
+    type name is surfaced."""
+    transport = GeminiTransport(_SETTINGS)
+    secret_detail = "do-not-leak-this-either"
+    _patch_sdk_call_to_raise(monkeypatch, transport, httpx.ConnectError(secret_detail))
+
+    with pytest.raises(ModelUnavailableError) as exc_info:
+        asyncio.run(transport.generate(contents=[], system_instruction="be helpful"))
+
+    message = str(exc_info.value)
+    assert secret_detail not in message
+    assert "ConnectError" in message

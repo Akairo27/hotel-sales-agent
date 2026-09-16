@@ -1071,7 +1071,7 @@ def test_receive_message_returns_capped_if_the_turn_cap_fallback_is_ever_blocked
     so this test forces the scenario directly by faking
     enforce_outbound_text's verdict, mirroring test_receive_message_
     logs_and_returns_fallback_blocked_if_it_ever_happens for the guard
-    path, to prove _escalate_cap_exceeded's own handling of the
+    path, to prove _escalate_and_notify's own handling of the
     branch."""
     settings = _settings(max_conversation_turns=1)
     _set_llm_settings(monkeypatch, settings)
@@ -1098,8 +1098,8 @@ def test_receive_message_returns_capped_if_the_turn_cap_fallback_is_ever_blocked
     error_records = [r for r in caplog.records if r.levelno == logging.ERROR]
     logged = [json.loads(r.getMessage()) for r in error_records]
     events = [entry["event"] for entry in logged]
-    assert "cap_exceeded_escalated" in events
-    assert "cap_exceeded_fallback_blocked" in events
+    assert "conversation_escalated" in events
+    assert "conversation_escalation_fallback_blocked" in events
     assert all(entry["reason"] == "turn_cap_exceeded" for entry in logged)
 
 
@@ -1110,7 +1110,7 @@ def test_receive_message_returns_capped_when_turn_cap_escalation_itself_errors(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     """open_escalation, enforce_outbound_text, and the WhatsApp send all
-    sit inside _escalate_cap_exceeded's own try/except -- this test
+    sit inside _escalate_and_notify's own try/except -- this test
     forces the first of those to raise, mirroring test_receive_message_
     returns_delivery_failed_when_the_guard_check_itself_errors for the
     normal reply path, to prove this new branch never lets a 500 escape
@@ -1144,7 +1144,7 @@ def test_receive_message_returns_capped_when_turn_cap_escalation_itself_errors(
     error_records = [r for r in caplog.records if r.levelno == logging.ERROR]
     assert len(error_records) == 1
     logged = json.loads(error_records[0].getMessage())
-    assert logged["event"] == "cap_exceeded_escalation_failed"
+    assert logged["event"] == "conversation_escalation_failed"
     assert logged["reason"] == "turn_cap_exceeded"
     assert logged["exception_type"] == "RuntimeError"
     assert error_records[0].exc_info is not None
@@ -1340,18 +1340,20 @@ def test_receive_message_records_partial_usage_when_usage_is_unavailable_mid_tur
     assert logged["conversation_id"] == conversation_row[0]
 
 
-def test_receive_message_records_partial_usage_when_the_transport_fails_mid_turn(
+def test_receive_message_escalates_and_sends_fallback_when_the_transport_fails_mid_turn(
     webhook_client: TestClient,
     monkeypatch: pytest.MonkeyPatch,
     db_conn: psycopg.Connection[Any],
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    """ModelUnavailableError (the transport layer's own failure mode --
-    services/agent/llm/client.py) is not named in webhook.py's status
-    mapping, so this exercises the generic "turn_failed" bucket: the
-    first call's real usage must still be recorded, and the failure
-    itself must be loud (ERROR, exception type, traceback) rather than
-    silently folded away."""
+    """ModelUnavailableError only ever reaches generate_reply's caller
+    after client.py's own retries are exhausted (this fake represents
+    that final, already-retried failure, not a single raw attempt) --
+    same "beyond the cap, escalate to a human" treatment the three
+    CLAUDE.md §9 caps get: a customer left silent by a transient model
+    failure is the same bad outcome as one left silent by a cap, so this
+    escalates and sends the fallback rather than just logging
+    "turn_failed". The first call's real usage must still be recorded."""
     _set_llm_settings(monkeypatch, _settings())
     transport = _ScriptedTransport(
         [
@@ -1365,6 +1367,8 @@ def test_receive_message_records_partial_usage_when_the_transport_fails_mid_turn
         ]
     )
     _set_transport(monkeypatch, transport)
+    sender = _FakeWhatsAppSender()
+    _set_whatsapp_sender(monkeypatch, sender)
     caplog.set_level(logging.ERROR, logger="services.agent.webhook")
     payload = _whatsapp_payload(
         wa_id=_WA_ID, message_id="wamid.transport-fails-mid-turn", body="hello"
@@ -1375,7 +1379,7 @@ def test_receive_message_records_partial_usage_when_the_transport_fails_mid_turn
     )
 
     assert response.status_code == 200
-    assert response.json() == {"status": "turn_failed"}
+    assert response.json() == {"status": "escalated"}
     assert len(transport.calls) == 2
     conversation_row = db_conn.execute(
         "SELECT id FROM conversations WHERE customer_phone = %s", (_PHONE,)
@@ -1387,16 +1391,61 @@ def test_receive_message_records_partial_usage_when_the_transport_fails_mid_turn
         (_PHONE,),
     ).fetchone()
     assert usage_row == (25, 5, 30)
+    assert len(sender.calls) == 1
+    assert sender.calls[0][1] == OUTPUT_GUARD_FALLBACK_MESSAGE
+    escalation_row = db_conn.execute(
+        "SELECT reason FROM escalations WHERE customer_phone = %s", (_PHONE,)
+    ).fetchone()
+    assert escalation_row == ("model_unavailable",)
     error_records = [r for r in caplog.records if r.levelno == logging.ERROR]
-    assert len(error_records) == 1
-    logged = json.loads(error_records[0].getMessage())
-    assert logged["event"] == "turn_failed"
-    assert logged["conversation_id"] == conversation_row[0]
-    assert logged["exception_type"] == "ModelUnavailableError"
-    assert "simulated transport failure" in logged["exception_message"]
-    assert error_records[0].exc_info is not None
-    assert error_records[0].exc_text is not None
-    assert "ModelUnavailableError" in error_records[0].exc_text
+    events = [json.loads(r.getMessage())["event"] for r in error_records]
+    assert "conversation_escalated" in events
+
+
+def test_receive_message_escalates_and_notifies_when_the_transport_fails_first(
+    webhook_client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+    db_conn: psycopg.Connection[Any],
+) -> None:
+    """The mid-turn test above always has one real prior call; this
+    covers the case it doesn't -- retries exhausted on the very first
+    model call, with no usage recorded at all this turn. usage_so_far
+    is zero here, not None: unlike TurnCapExceededError,
+    ModelUnavailableError is raised inside conversation.py's
+    tool-calling loop, so attach_usage_so_far always runs, just with a
+    still-zero UsageTotals. Escalation and the fallback send must not
+    depend on any prior successful call having happened -- the same
+    standard test_receive_message_escalates_and_sends_fallback_when_
+    the_turn_cap_is_exceeded already proves for a cap that also fires
+    with no usage."""
+    _set_llm_settings(monkeypatch, _settings())
+    transport = _ScriptedTransport(
+        [ModelUnavailableError("simulated transport failure")]
+    )
+    _set_transport(monkeypatch, transport)
+    sender = _FakeWhatsAppSender()
+    _set_whatsapp_sender(monkeypatch, sender)
+    payload = _whatsapp_payload(
+        wa_id=_WA_ID, message_id="wamid.transport-fails-first-call", body="hello"
+    )
+
+    response = _post(
+        webhook_client, payload, signature=_sign(json.dumps(payload).encode())
+    )
+
+    assert response.status_code == 200
+    assert response.json() == {"status": "escalated"}
+    assert len(transport.calls) == 1
+    assert len(sender.calls) == 1
+    assert sender.calls[0][1] == OUTPUT_GUARD_FALLBACK_MESSAGE
+    escalation_row = db_conn.execute(
+        "SELECT reason FROM escalations WHERE customer_phone = %s", (_PHONE,)
+    ).fetchone()
+    assert escalation_row == ("model_unavailable",)
+    usage_row_count = db_conn.execute(
+        "SELECT count(*) FROM token_usage WHERE customer_phone = %s", (_PHONE,)
+    ).fetchone()
+    assert usage_row_count == (0,)
 
 
 def test_receive_message_records_partial_usage_for_an_unknown_tool_call(

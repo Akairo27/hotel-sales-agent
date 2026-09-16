@@ -61,11 +61,18 @@ class LlmConfigurationError(LlmError):
 
 class ModelUnavailableError(LlmError):
     """Raised when the model transport itself fails — a timeout, a
-    network error, or any other SDK-level failure.
+    network error, or any other SDK-level failure — after
+    services.agent.llm.client's own retry configuration (the SDK's
+    built-in tenacity layer, not a second one stacked on top of it) has
+    already exhausted its attempts on a transient failure, or hit a
+    permanent one immediately.
 
     CLAUDE.md §8: every external call has a timeout and explicit failure
-    handling. The caller is expected to treat this as "the agent could
-    not respond this turn", not to retry silently inside this module.
+    handling. The caller (services.agent.webhook's _escalate_and_notify)
+    is expected to escalate to a human and answer with the fallback
+    message, the same as any of CLAUDE.md §9's caps — a customer has no
+    way to distinguish a transient model failure from a cap and must not
+    be left silent for either.
     """
 
 

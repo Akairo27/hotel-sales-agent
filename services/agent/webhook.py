@@ -23,10 +23,11 @@ Order matters and is deliberate:
    exceptions (see conversation.py's own docstring) after one or more
    real, already-paid-for model calls happened in the same turn — not
    only before any of them, since the per-conversation and daily spend
-   caps are re-checked before every model call, not just the first.
-   TurnCapExceededError is the one exception that never follows a model
-   call in the same turn — it is raised before generate_reply loads
-   even the message window.
+   caps are re-checked before every model call, not just the first, and
+   the model transport itself (services.agent.llm.client) can fail on
+   any call after its own retries are exhausted. TurnCapExceededError is
+   the one exception that never follows a model call in the same turn —
+   it is raised before generate_reply loads even the message window.
 5. Whatever generate_reply raises or returns, record any usage it
    reports and increment turn_count before deciding how to respond. See
    _handle_generate_reply_failure below: both writes happen exactly
@@ -35,16 +36,19 @@ Order matters and is deliberate:
    per-exception-type checklist — a new exception type added to
    generate_reply's loop in the future is covered automatically, without
    touching this module.
-5a. Any of CLAUDE.md §9's three cap-exceeded exceptions
-    (TurnCapExceededError, TokenSpendCapExceededError,
-    DailySpendCapExceededError) — after step 5's recording above —  is
-    escalated to a human and answered with the exact same bilingual
-    fallback message a blocked reply gets in step 6
-    (_escalate_cap_exceeded), rather than just a logged status —
-    CLAUDE.md §9's "beyond the cap, escalate to a human" applied
-    literally to all three, not left as a comment nobody acts on. Every
-    other exception falls through to the generic, loudly-logged status
-    in _status_for_generate_reply_error instead.
+5a. Any exception in _handle_generate_reply_failure's _ESCALATION_REASONS
+    — CLAUDE.md §9's three caps (TurnCapExceededError,
+    TokenSpendCapExceededError, DailySpendCapExceededError), or
+    ModelUnavailableError once the transport's own retries are exhausted
+    — after step 5's recording above, is escalated to a human and
+    answered with the exact same bilingual fallback message a blocked
+    reply gets in step 6 (_escalate_and_notify), rather than just a
+    logged status — CLAUDE.md §9's "beyond the cap, escalate to a
+    human" applied literally, and the same "never leave a customer with
+    silence" reasoning extended to a transient failure the customer has
+    no way to distinguish from one. Every other exception falls through
+    to the generic, loudly-logged status in
+    _status_for_generate_reply_error instead.
 6. Run services.agent.output_guard.enforcement.enforce_outbound_text on
    the candidate reply. Allowed: send it. Blocked: never send it, never
    ask the model to rephrase it (a second, unmanipulated attempt is not
@@ -106,6 +110,7 @@ from services.agent.llm.config import LlmSettings, load_llm_settings
 from services.agent.llm.conversation import UsageTotals, generate_reply
 from services.agent.llm.errors import (
     DailySpendCapExceededError,
+    ModelUnavailableError,
     TokenSpendCapExceededError,
     TurnCapExceededError,
     UsageUnavailableError,
@@ -481,13 +486,17 @@ _STATUS_USAGE_UNAVAILABLE = "usage_unavailable"
 _STATUS_TURN_FAILED = "turn_failed"
 _STATUS_ESCALATED = "escalated"
 
-# One CapExceededError type, one reason -- a human reading escalations
-# must be able to tell which of CLAUDE.md §9's three caps stopped the
-# conversation without re-deriving it from notes.
-_CAP_EXCEEDED_ESCALATION_REASONS: dict[type[Exception], str] = {
+# One exception type, one reason -- a human reading escalations must be
+# able to tell what actually stopped the conversation without
+# re-deriving it from notes. Covers CLAUDE.md §9's three caps plus
+# ModelUnavailableError (raised only after client.py's own retries are
+# exhausted -- see that module's constants for why retrying again here
+# would just stack a second layer on the SDK's).
+_ESCALATION_REASONS: dict[type[Exception], str] = {
     TurnCapExceededError: "turn_cap_exceeded",
     TokenSpendCapExceededError: "token_spend_cap_exceeded",
     DailySpendCapExceededError: "daily_spend_cap_exceeded",
+    ModelUnavailableError: "model_unavailable",
 }
 
 
@@ -499,11 +508,10 @@ def _status_for_generate_reply_error(exc: Exception) -> str:
     below, driven by whether the exception is carrying usage at all, not
     by its type.
 
-    None of CLAUDE.md §9's three cap-exceeded exceptions
-    (_CAP_EXCEEDED_ESCALATION_REASONS above) are named here: all three
-    are intercepted earlier, in _handle_generate_reply_failure, before
-    this function is ever called for them — see _escalate_cap_exceeded
-    below.
+    None of the exception types in _ESCALATION_REASONS above are named
+    here: all of them are intercepted earlier, in
+    _handle_generate_reply_failure, before this function is ever called
+    for them — see _escalate_and_notify below.
 
     An exception type not named here still gets its usage recorded and
     still never produces a 500; it only falls into the generic
@@ -517,23 +525,28 @@ def _status_for_generate_reply_error(exc: Exception) -> str:
     return _STATUS_TURN_FAILED
 
 
-async def _escalate_cap_exceeded(
+async def _escalate_and_notify(
     conn: psycopg.Connection[Any],
-    exc: TurnCapExceededError | TokenSpendCapExceededError | DailySpendCapExceededError,
+    exc: (
+        TurnCapExceededError
+        | TokenSpendCapExceededError
+        | DailySpendCapExceededError
+        | ModelUnavailableError
+    ),
     *,
     conversation_id: int,
     customer_phone: str,
 ) -> JSONResponse:
-    """Handles any of CLAUDE.md §9's three cap-exceeded exceptions the
-    same way enforce_outbound_text handles a blocked reply (§9's
+    """Handles any exception in _ESCALATION_REASONS the same way
+    enforce_outbound_text handles a blocked reply (CLAUDE.md §9's
     "beyond the cap, escalate to a human" plus rule 8's "never leave a
     customer with silence"): opens an escalation -- reason distinguishes
-    which cap fired, via _CAP_EXCEEDED_ESCALATION_REASONS -- then sends
-    the exact same bilingual fallback message through the exact same
-    guard-checked send path a guard block uses, not a second, bespoke
-    "sorry, capped" message per cap type. A customer waiting with nobody
-    notified is the same outcome regardless of which cap stopped the
-    conversation, so all three get identical treatment.
+    which of CLAUDE.md §9's three caps or ModelUnavailableError fired --
+    then sends the exact same bilingual fallback message through the
+    exact same guard-checked send path a guard block uses, not a
+    second, bespoke message per trigger. A customer waiting with nobody
+    notified is the same outcome regardless of which of these stopped
+    the conversation, so all four get identical treatment.
 
     Whatever usage this turn incurred was already recorded by
     _handle_generate_reply_failure's caller before this runs (or there
@@ -546,7 +559,7 @@ async def _escalate_cap_exceeded(
     logged at ERROR and falls back to _STATUS_CAPPED, the same
     never-a-500 posture as every other write in this module.
     """
-    reason = _CAP_EXCEEDED_ESCALATION_REASONS[type(exc)]
+    reason = _ESCALATION_REASONS[type(exc)]
     try:
         escalation_id = open_escalation(
             conn,
@@ -557,7 +570,7 @@ async def _escalate_cap_exceeded(
         logger.error(
             json.dumps(
                 {
-                    "event": "cap_exceeded_escalated",
+                    "event": "conversation_escalated",
                     "conversation_id": conversation_id,
                     "reason": reason,
                     "escalation_id": escalation_id,
@@ -577,10 +590,10 @@ async def _escalate_cap_exceeded(
             logger.error(
                 json.dumps(
                     {
-                        "event": "cap_exceeded_fallback_blocked",
+                        "event": "conversation_escalation_fallback_blocked",
                         "conversation_id": conversation_id,
                         "reason": reason,
-                        "cap_escalation_id": escalation_id,
+                        "escalation_id": escalation_id,
                         "fallback_escalation_id": verdict.escalation_id,
                     }
                 )
@@ -600,7 +613,7 @@ async def _escalate_cap_exceeded(
         logger.error(
             json.dumps(
                 {
-                    "event": "cap_exceeded_escalation_failed",
+                    "event": "conversation_escalation_failed",
                     "conversation_id": conversation_id,
                     "reason": reason,
                     "exception_type": type(unexpected_exc).__name__,
@@ -630,10 +643,11 @@ async def _handle_generate_reply_failure(
     docstring — and increments turn_count alongside it (same condition,
     same reasoning as caps.increment_turn_count's own docstring: a real
     model call happened, so this turn counts, regardless of how it
-    ends). Any of the three CLAUDE.md §9 cap-exceeded exceptions is then
-    handled separately by _escalate_cap_exceeded above, after that
-    recording (TurnCapExceededError carries no usage to record; the two
-    spend caps might).
+    ends). Any exception in _ESCALATION_REASONS -- CLAUDE.md §9's three
+    caps, or ModelUnavailableError once client.py's own retries are
+    exhausted -- is then handled separately by _escalate_and_notify
+    above, after that recording (TurnCapExceededError carries no usage
+    to record; the others might).
 
     Adding a new exception type to generate_reply's tool-calling loop in
     the future needs no change here: read_usage_so_far works on any
@@ -653,9 +667,14 @@ async def _handle_generate_reply_failure(
 
     if isinstance(
         exc,
-        (TurnCapExceededError, TokenSpendCapExceededError, DailySpendCapExceededError),
+        (
+            TurnCapExceededError,
+            TokenSpendCapExceededError,
+            DailySpendCapExceededError,
+            ModelUnavailableError,
+        ),
     ):
-        return await _escalate_cap_exceeded(
+        return await _escalate_and_notify(
             conn,
             exc,
             conversation_id=conversation_id,
