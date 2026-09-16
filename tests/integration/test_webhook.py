@@ -1402,6 +1402,52 @@ def test_receive_message_escalates_and_sends_fallback_when_the_transport_fails_m
     assert "conversation_escalated" in events
 
 
+def test_receive_message_escalates_and_notifies_when_the_transport_fails_first(
+    webhook_client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+    db_conn: psycopg.Connection[Any],
+) -> None:
+    """The mid-turn test above always has one real prior call; this
+    covers the case it doesn't -- retries exhausted on the very first
+    model call, with no usage recorded at all this turn. usage_so_far
+    is zero here, not None: unlike TurnCapExceededError,
+    ModelUnavailableError is raised inside conversation.py's
+    tool-calling loop, so attach_usage_so_far always runs, just with a
+    still-zero UsageTotals. Escalation and the fallback send must not
+    depend on any prior successful call having happened -- the same
+    standard test_receive_message_escalates_and_sends_fallback_when_
+    the_turn_cap_is_exceeded already proves for a cap that also fires
+    with no usage."""
+    _set_llm_settings(monkeypatch, _settings())
+    transport = _ScriptedTransport(
+        [ModelUnavailableError("simulated transport failure")]
+    )
+    _set_transport(monkeypatch, transport)
+    sender = _FakeWhatsAppSender()
+    _set_whatsapp_sender(monkeypatch, sender)
+    payload = _whatsapp_payload(
+        wa_id=_WA_ID, message_id="wamid.transport-fails-first-call", body="hello"
+    )
+
+    response = _post(
+        webhook_client, payload, signature=_sign(json.dumps(payload).encode())
+    )
+
+    assert response.status_code == 200
+    assert response.json() == {"status": "escalated"}
+    assert len(transport.calls) == 1
+    assert len(sender.calls) == 1
+    assert sender.calls[0][1] == OUTPUT_GUARD_FALLBACK_MESSAGE
+    escalation_row = db_conn.execute(
+        "SELECT reason FROM escalations WHERE customer_phone = %s", (_PHONE,)
+    ).fetchone()
+    assert escalation_row == ("model_unavailable",)
+    usage_row_count = db_conn.execute(
+        "SELECT count(*) FROM token_usage WHERE customer_phone = %s", (_PHONE,)
+    ).fetchone()
+    assert usage_row_count == (0,)
+
+
 def test_receive_message_records_partial_usage_for_an_unknown_tool_call(
     webhook_client: TestClient,
     monkeypatch: pytest.MonkeyPatch,
