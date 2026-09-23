@@ -42,6 +42,7 @@ from typing import Any
 import psycopg
 from google.genai import types
 
+from lib.hijri import to_hijri
 from services.agent.llm.caps import check_token_spend_caps
 from services.agent.llm.client import ModelTransport
 from services.agent.llm.config import MAX_TOOL_ITERATIONS, MESSAGE_WINDOW, LlmSettings
@@ -57,6 +58,7 @@ from services.agent.llm.errors import (
     UsageUnavailableError,
     attach_usage_so_far,
 )
+from services.agent.llm.pricing import riyadh_calendar_day
 from services.agent.llm.prompt import render_system_instruction
 
 
@@ -201,7 +203,10 @@ async def generate_reply(
 
     messages = load_recent_messages(conn, conversation_id, limit=MESSAGE_WINDOW)
     contents = build_contents(messages)
-    system_instruction = render_system_instruction(customer_name=customer_name)
+    today = riyadh_calendar_day(now)
+    system_instruction = render_system_instruction(
+        customer_name=customer_name, today=today, today_hijri=to_hijri(today)
+    )
 
     tool_calls: list[ToolCallRecord] = []
     quote_ids: list[int] = []
