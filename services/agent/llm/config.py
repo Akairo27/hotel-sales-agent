@@ -12,6 +12,12 @@ snapshot version ("3.7-flash-08-2026", not a "-latest"/"-preview" floating
 alias) and supports generateContent. Every entry point that needs a model
 (load_llm_settings) fails loudly with LlmConfigurationError if LLM_MODEL
 names anything else; there is no silent fallback.
+
+A model reachable through OpenRouter is added the same reviewed way: one
+OPENROUTER_ROUTES entry naming its exact OpenRouter slug, the providers
+approved to serve it, and its token rates. OPENROUTER_ROUTES is empty
+today, so no OpenRouter model is selectable and nothing about the running
+Gemini deployment changes until a route is deliberately added.
 """
 
 from __future__ import annotations
@@ -22,8 +28,33 @@ from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
 
 from services.agent.llm.errors import LlmConfigurationError
+from services.agent.llm.pricing import GEMINI_FLASH_RATES, TokenRates
 
-ALLOWED_MODELS: frozenset[str] = frozenset({"gemini-3.7-flash"})
+GEMINI_MODELS: frozenset[str] = frozenset({"gemini-3.7-flash"})
+
+
+@dataclass(frozen=True)
+class OpenRouterRoute:
+    """Everything reviewed about serving one model through OpenRouter.
+
+    providers is an allowlist of OpenRouter provider slugs, deny-by-default
+    (CLAUDE.md rule 10's posture applied to data processors): a provider
+    not named here can never receive a customer's conversation. An empty
+    tuple means no provider has been approved yet, and
+    OpenRouterTransport refuses to construct from it.
+
+    token_rates must be the HIGHEST rates among the approved providers, so
+    the daily spend cap (CLAUDE.md §9) errs toward tripping early, never
+    late, whichever approved provider OpenRouter picks.
+    """
+
+    providers: tuple[str, ...]
+    token_rates: TokenRates
+
+
+OPENROUTER_ROUTES: Mapping[str, OpenRouterRoute] = {}
+
+ALLOWED_MODELS: frozenset[str] = GEMINI_MODELS | frozenset(OPENROUTER_ROUTES)
 
 # ARCHITECTURE.md §7: "the last 10 messages only" is sent as context on
 # every call — not the full conversation history.
@@ -63,6 +94,8 @@ class LlmSettings:
     max_tokens_per_conversation: int
     max_spend_per_day_usd: Decimal
     max_messages_per_number_per_day: int
+    token_rates: TokenRates = GEMINI_FLASH_RATES
+    openrouter_route: OpenRouterRoute | None = None
 
 
 def _require(env: Mapping[str, str], key: str) -> str:
@@ -104,10 +137,15 @@ def _require_positive_decimal(env: Mapping[str, str], key: str) -> Decimal:
 def load_llm_settings(env: Mapping[str, str] | None = None) -> LlmSettings:
     """Builds LlmSettings from environment variables.
 
+    A model with an OPENROUTER_ROUTES entry is served through OpenRouter
+    and authenticated with OPENROUTER_API_KEY; any other allowed model is
+    served by Gemini with LLM_API_KEY.
+
     Raises:
         LlmConfigurationError: LLM_MODEL is unset or not in
-            ALLOWED_MODELS, LLM_API_KEY is unset, or a numeric setting is
-            missing, non-numeric, or not positive.
+            ALLOWED_MODELS, the selected model's API key (LLM_API_KEY, or
+            OPENROUTER_API_KEY for an OpenRouter model) is unset, or a
+            numeric setting is missing, non-numeric, or not positive.
     """
     active_env = env if env is not None else os.environ
 
@@ -118,9 +156,19 @@ def load_llm_settings(env: Mapping[str, str] | None = None) -> LlmSettings:
             f"{sorted(ALLOWED_MODELS)!r}"
         )
 
+    route = OPENROUTER_ROUTES.get(model)
+    if route is None:
+        api_key = _require(active_env, "LLM_API_KEY")
+        token_rates = GEMINI_FLASH_RATES
+    else:
+        api_key = _require(active_env, "OPENROUTER_API_KEY")
+        token_rates = route.token_rates
+
     return LlmSettings(
         model=model,
-        api_key=_require(active_env, "LLM_API_KEY"),
+        api_key=api_key,
+        token_rates=token_rates,
+        openrouter_route=route,
         timeout_ms=_DEFAULT_TIMEOUT_MS,
         max_conversation_turns=_require_positive_int(
             active_env, "MAX_CONVERSATION_TURNS"

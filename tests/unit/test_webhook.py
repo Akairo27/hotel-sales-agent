@@ -14,8 +14,10 @@ from decimal import Decimal
 
 import pytest
 
-from services.agent.llm.client import GeminiTransport
-from services.agent.llm.config import LlmSettings
+from services.agent.llm.client import GeminiTransport, OpenRouterTransport
+from services.agent.llm.config import LlmSettings, OpenRouterRoute
+from services.agent.llm.errors import LlmConfigurationError
+from services.agent.llm.pricing import TokenRates
 from services.agent.webhook import (
     WebhookConfigurationError,
     _normalize_phone,
@@ -227,3 +229,35 @@ def test_get_model_transport_returns_a_real_gemini_transport() -> None:
     transport = get_model_transport(settings)
 
     assert isinstance(transport, GeminiTransport)
+
+
+def _openrouter_settings(providers: tuple[str, ...]) -> LlmSettings:
+    return LlmSettings(
+        model="vendor/model-1",
+        api_key="test-openrouter-key",
+        timeout_ms=10_000,
+        max_conversation_turns=20,
+        max_tokens_per_conversation=50_000,
+        max_spend_per_day_usd=Decimal("5.00"),
+        max_messages_per_number_per_day=50,
+        openrouter_route=OpenRouterRoute(
+            providers=providers,
+            token_rates=TokenRates(
+                input_usd_per_million_tokens=Decimal("0.50"),
+                output_usd_per_million_tokens=Decimal("2.00"),
+            ),
+        ),
+    )
+
+
+def test_get_model_transport_returns_an_openrouter_transport_for_a_routed_model() -> (
+    None
+):
+    transport = get_model_transport(_openrouter_settings(("provider-a",)))
+
+    assert isinstance(transport, OpenRouterTransport)
+
+
+def test_get_model_transport_refuses_a_route_with_no_approved_provider() -> None:
+    with pytest.raises(LlmConfigurationError, match="no OpenRouter provider"):
+        get_model_transport(_openrouter_settings(()))

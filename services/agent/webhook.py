@@ -139,7 +139,11 @@ from services.agent.llm.caps import (
     increment_turn_count,
     record_token_usage,
 )
-from services.agent.llm.client import GeminiTransport, ModelTransport
+from services.agent.llm.client import (
+    GeminiTransport,
+    ModelTransport,
+    OpenRouterTransport,
+)
 from services.agent.llm.config import LlmSettings, load_llm_settings
 from services.agent.llm.conversation import UsageTotals, generate_reply
 from services.agent.llm.errors import (
@@ -211,7 +215,15 @@ def get_llm_settings() -> LlmSettings:
 
 
 def get_model_transport(settings: LlmSettings) -> ModelTransport:
-    return GeminiTransport(settings)
+    route = settings.openrouter_route
+    if route is None:
+        return GeminiTransport(settings)
+    return OpenRouterTransport(
+        model=settings.model,
+        api_key=settings.api_key,
+        providers=route.providers,
+        timeout_ms=settings.timeout_ms,
+    )
 
 
 def get_whatsapp_send_settings() -> WhatsAppSendSettings:
