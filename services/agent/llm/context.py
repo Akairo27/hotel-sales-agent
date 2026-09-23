@@ -27,9 +27,9 @@ from dataclasses import dataclass
 from typing import Any
 
 import psycopg
-from google.genai import types
 
 from services.agent.llm.errors import ConversationNotFoundError
+from services.agent.llm.model_types import ModelTurn, Turn, UserTurn
 
 _INBOUND = "inbound"
 
@@ -97,17 +97,20 @@ def load_recent_messages(
     return messages
 
 
-def build_contents(messages: list[MessageRecord]) -> list[types.Content]:
-    """Turns message rows into the Content list sent to the model.
+def build_contents(messages: list[MessageRecord]) -> list[Turn]:
+    """Turns message rows into the provider-neutral turn history sent to
+    the model (services.agent.llm.model_types) — client.py is the only
+    place that translates this into a specific provider's wire format.
 
     Only `direction` and `body` are read — no message row's
     customer_phone column is ever touched here, so it cannot leak into a
-    Content by accident.
+    Turn by accident. A past outbound reply becomes a ModelTurn with no
+    tool_calls: this codebase does not store tool-call history, only the
+    final text of what was actually sent.
     """
     return [
-        types.Content(
-            role="user" if message.direction == _INBOUND else "model",
-            parts=[types.Part.from_text(text=message.body)],
-        )
+        UserTurn(text=message.body)
+        if message.direction == _INBOUND
+        else ModelTurn(text=message.body, tool_calls=())
         for message in messages
     ]

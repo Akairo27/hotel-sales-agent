@@ -1,10 +1,13 @@
 """Unit tests for the tool-calling loop itself, with no database and no
 network: load_conversation_state, load_recent_messages, and dispatch_tool
 are monkeypatched to fakes, and the model transport is a fake driven by a
-canned list of responses. What this file actually exercises is
-conversation.py's own orchestration — the turn cap, the tool-call ->
-function-response round trip, usage accumulation, and the loop-iteration
-limit — not context.py or dispatch.py, which have their own tests.
+canned list of provider-neutral responses (services.agent.llm.model_types).
+What this file actually exercises is conversation.py's own orchestration —
+the turn cap, the tool-call -> tool-result round trip, usage accumulation,
+and the loop-iteration limit — not context.py or dispatch.py, which have
+their own tests, and not a specific provider's response parsing, which
+belongs to that provider's own transport tests (e.g.
+tests/unit/test_llm_client.py for Gemini).
 """
 
 from __future__ import annotations
@@ -16,7 +19,6 @@ from decimal import Decimal
 from typing import Any
 
 import pytest
-from google.genai import types
 
 from services.agent.llm import conversation as conversation_module
 from services.agent.llm.config import MAX_TOOL_ITERATIONS, LlmSettings
@@ -27,8 +29,15 @@ from services.agent.llm.errors import (
     TokenSpendCapExceededError,
     ToolLoopLimitError,
     TurnCapExceededError,
-    UsageUnavailableError,
     read_usage_so_far,
+)
+from services.agent.llm.model_types import (
+    ModelResponse,
+    ModelTurn,
+    ModelUsage,
+    ToolCall,
+    ToolResultTurn,
+    Turn,
 )
 
 _NOW = datetime(2026, 9, 1, tzinfo=UTC)
@@ -47,43 +56,43 @@ _SETTINGS = LlmSettings(
 
 @dataclass
 class FakeTransport:
-    responses: list[types.GenerateContentResponse]
-    calls: list[list[types.Content]] = field(default_factory=list)
+    responses: list[ModelResponse]
+    calls: list[list[Turn]] = field(default_factory=list)
 
     async def generate(
-        self, *, contents: list[types.Content], system_instruction: str
-    ) -> types.GenerateContentResponse:
-        del system_instruction  # unused: this fake only records `contents`
-        self.calls.append(list(contents))
+        self, *, turns: list[Turn], system_instruction: str
+    ) -> ModelResponse:
+        del system_instruction  # unused: this fake only records `turns`
+        self.calls.append(list(turns))
         return self.responses.pop(0)
 
 
-def _text_response(
-    text: str, *, total_tokens: int = 10
-) -> types.GenerateContentResponse:
-    content = types.Content(role="model", parts=[types.Part.from_text(text=text)])
-    return types.GenerateContentResponse(
-        candidates=[types.Candidate(content=content)],
-        usage_metadata=types.GenerateContentResponseUsageMetadata(
-            prompt_token_count=total_tokens - 2,
-            candidates_token_count=2,
-            total_token_count=total_tokens,
+def _text_response(text: str, *, total_tokens: int = 10) -> ModelResponse:
+    return ModelResponse(
+        turn=ModelTurn(text=text, tool_calls=()),
+        usage=ModelUsage(
+            prompt_tokens=total_tokens - 2,
+            candidates_tokens=2,
+            total_tokens=total_tokens,
         ),
     )
 
 
 def _function_call_response(
-    name: str, args: dict[str, Any], *, total_tokens: int = 12
-) -> types.GenerateContentResponse:
-    content = types.Content(
-        role="model", parts=[types.Part.from_function_call(name=name, args=args)]
-    )
-    return types.GenerateContentResponse(
-        candidates=[types.Candidate(content=content)],
-        usage_metadata=types.GenerateContentResponseUsageMetadata(
-            prompt_token_count=total_tokens - 2,
-            candidates_token_count=2,
-            total_token_count=total_tokens,
+    name: str,
+    args: dict[str, Any],
+    *,
+    total_tokens: int = 12,
+    call_id: str = "call_0",
+) -> ModelResponse:
+    return ModelResponse(
+        turn=ModelTurn(
+            text=None, tool_calls=(ToolCall(id=call_id, name=name, args=args),)
+        ),
+        usage=ModelUsage(
+            prompt_tokens=total_tokens - 2,
+            candidates_tokens=2,
+            total_tokens=total_tokens,
         ),
     )
 
@@ -177,12 +186,16 @@ def test_generate_reply_executes_a_tool_call_then_returns_text(
     assert [call.name for call in reply.tool_calls] == ["get_quote"]
     assert reply.tool_calls[0].result == fake_result
     assert reply.quote_ids == (99,)
-    # The model's function-call turn and our function-response turn were
-    # both appended before the second model call.
+    # The model's tool-call turn and our tool-result turn were both
+    # appended before the second model call.
     assert len(transport.calls) == 2
-    assert len(transport.calls[1]) == 2
-    assert transport.calls[1][1].parts is not None
-    assert transport.calls[1][1].parts[0].function_response is not None
+    second_call_turns = transport.calls[1]
+    assert len(second_call_turns) == 2
+    assert isinstance(second_call_turns[0], ModelTurn)
+    assert second_call_turns[0].tool_calls[0].name == "get_quote"
+    assert isinstance(second_call_turns[1], ToolResultTurn)
+    assert second_call_turns[1].results[0].name == "get_quote"
+    assert second_call_turns[1].results[0].result == fake_result
 
 
 def test_generate_reply_refuses_at_the_turn_cap_without_calling_the_model(
@@ -359,114 +372,3 @@ def test_generate_reply_rechecks_the_spend_cap_before_every_model_call(
     attached = read_usage_so_far(exc_info.value)
     assert attached is not None
     assert attached.total_tokens == 24
-
-
-def test_generate_reply_raises_usage_unavailable_when_metadata_is_missing(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    _stub_conversation_state(monkeypatch, turn_count=0)
-    content = types.Content(role="model", parts=[types.Part.from_text(text="hi")])
-    response_with_no_usage = types.GenerateContentResponse(
-        candidates=[types.Candidate(content=content)], usage_metadata=None
-    )
-    transport = FakeTransport([response_with_no_usage])
-
-    with pytest.raises(UsageUnavailableError):
-        asyncio.run(
-            generate_reply(
-                _NOT_A_CONNECTION,
-                conversation_id=1,
-                customer_name=None,
-                transport=transport,
-                settings=_SETTINGS,
-                now=_NOW,
-            )
-        )
-
-
-def test_generate_reply_folds_thinking_tokens_into_candidates_tokens(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Gemini bills extended-thinking tokens at the output rate but the
-    SDK reports them in their own thoughts_token_count field, separate
-    from candidates_token_count — _usage_from must fold them in so
-    pricing.estimate_cost_usd's two-bucket formula doesn't silently
-    undercount a call that used extended thinking."""
-    _stub_conversation_state(monkeypatch, turn_count=0)
-    content = types.Content(role="model", parts=[types.Part.from_text(text="hi")])
-    response_with_thinking = types.GenerateContentResponse(
-        candidates=[types.Candidate(content=content)],
-        usage_metadata=types.GenerateContentResponseUsageMetadata(
-            prompt_token_count=10,
-            candidates_token_count=5,
-            thoughts_token_count=40,
-            total_token_count=55,
-        ),
-    )
-    transport = FakeTransport([response_with_thinking])
-
-    reply = asyncio.run(
-        generate_reply(
-            _NOT_A_CONNECTION,
-            conversation_id=1,
-            customer_name=None,
-            transport=transport,
-            settings=_SETTINGS,
-            now=_NOW,
-        )
-    )
-
-    assert reply.usage.prompt_tokens == 10
-    assert reply.usage.candidates_tokens == 45
-    assert reply.usage.total_tokens == 55
-
-
-def test_generate_reply_treats_absent_thinking_tokens_as_zero(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """thoughts_token_count is legitimately None for a call that used no
-    extended thinking — unlike the three required usage fields, its
-    absence must not raise UsageUnavailableError."""
-    _stub_conversation_state(monkeypatch, turn_count=0)
-    transport = FakeTransport([_text_response("hello", total_tokens=28)])
-
-    reply = asyncio.run(
-        generate_reply(
-            _NOT_A_CONNECTION,
-            conversation_id=1,
-            customer_name=None,
-            transport=transport,
-            settings=_SETTINGS,
-            now=_NOW,
-        )
-    )
-
-    assert reply.usage.candidates_tokens == 2
-
-
-def test_generate_reply_raises_usage_unavailable_when_metadata_is_incomplete(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    _stub_conversation_state(monkeypatch, turn_count=0)
-    content = types.Content(role="model", parts=[types.Part.from_text(text="hi")])
-    response_with_partial_usage = types.GenerateContentResponse(
-        candidates=[types.Candidate(content=content)],
-        usage_metadata=types.GenerateContentResponseUsageMetadata(
-            prompt_token_count=10,
-            candidates_token_count=None,
-            total_token_count=None,
-        ),
-    )
-    transport = FakeTransport([response_with_partial_usage])
-
-    with pytest.raises(UsageUnavailableError):
-        asyncio.run(
-            generate_reply(
-                _NOT_A_CONNECTION,
-                conversation_id=1,
-                customer_name=None,
-                transport=transport,
-                settings=_SETTINGS,
-                now=_NOW,
-            )
-        )

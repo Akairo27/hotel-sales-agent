@@ -8,6 +8,11 @@ through dispatch.py, and returns an AgentReply. It never writes to
 conversations or messages, and it never sends anything to a customer —
 both belong to the not-yet-built webhook.
 
+Everything in this module speaks services.agent.llm.model_types, the
+provider-neutral vocabulary — never a specific provider's SDK types.
+services.agent.llm.client is the only place that translates to and from
+whichever provider a given ModelTransport actually calls.
+
 Spend caps are checked, not written. check_token_spend_caps
 (services.agent.llm.caps) runs before every transport.generate() call
 inside the tool-calling loop below — not just once before the loop — so
@@ -40,7 +45,6 @@ from datetime import datetime
 from typing import Any
 
 import psycopg
-from google.genai import types
 
 from lib.hijri import to_hijri
 from services.agent.llm.caps import check_token_spend_caps
@@ -55,9 +59,9 @@ from services.agent.llm.dispatch import dispatch_tool
 from services.agent.llm.errors import (
     ToolLoopLimitError,
     TurnCapExceededError,
-    UsageUnavailableError,
     attach_usage_so_far,
 )
+from services.agent.llm.model_types import ModelUsage, ToolResult, ToolResultTurn, Turn
 from services.agent.llm.pricing import riyadh_calendar_day
 from services.agent.llm.prompt import render_system_instruction
 
@@ -91,6 +95,18 @@ class UsageTotals:
             self.total_tokens + other.total_tokens,
         )
 
+    @staticmethod
+    def from_model_usage(usage: ModelUsage) -> UsageTotals:
+        """Provider-neutral ModelUsage (one call) -> this module's own
+        UsageTotals (accumulated across a turn's calls) -- same three
+        figures, different type, so a turn's running total and one
+        call's usage can never be confused for each other."""
+        return UsageTotals(
+            prompt_tokens=usage.prompt_tokens,
+            candidates_tokens=usage.candidates_tokens,
+            total_tokens=usage.total_tokens,
+        )
+
 
 @dataclass(frozen=True)
 class AgentReply:
@@ -105,44 +121,6 @@ class AgentReply:
     tool_calls: tuple[ToolCallRecord, ...]
     quote_ids: tuple[int, ...]
     usage: UsageTotals
-
-
-def _usage_from(response: types.GenerateContentResponse) -> UsageTotals:
-    """Extracts one model call's token usage.
-
-    thoughts_token_count (the SDK's separate field for extended-thinking
-    tokens) is folded into candidates_tokens, not tracked on its own:
-    Gemini bills thinking tokens at the output rate, and
-    services.agent.llm.pricing.estimate_cost_usd's two-bucket formula
-    would silently undercount any call that used extended thinking if
-    this weren't added in. Unlike the three fields below, its absence is
-    not a sign of a broken response — a call that used no extended
-    thinking legitimately reports none — so it defaults to 0 rather than
-    raising. total_token_count is left untouched: the SDK already
-    includes thinking tokens in that figure, so re-adding them here would
-    double-count against the per-conversation token cap.
-
-    Raises:
-        UsageUnavailableError: usage_metadata is absent, or one of its
-            three required counts is None. An untelemetered call is not
-            a free call — treating it as zero would let real spend go
-            uncounted against every cap this module and caps.py check.
-    """
-    usage = response.usage_metadata
-    if usage is None:
-        raise UsageUnavailableError("model response carried no usage_metadata")
-    if (
-        usage.prompt_token_count is None
-        or usage.candidates_token_count is None
-        or usage.total_token_count is None
-    ):
-        raise UsageUnavailableError("model response usage_metadata is incomplete")
-    candidates_tokens = usage.candidates_token_count + (usage.thoughts_token_count or 0)
-    return UsageTotals(
-        prompt_tokens=usage.prompt_token_count,
-        candidates_tokens=candidates_tokens,
-        total_tokens=usage.total_token_count,
-    )
 
 
 async def generate_reply(
@@ -176,7 +154,9 @@ async def generate_reply(
             own usage so far, has reached settings.max_spend_per_day_usd.
             Same mid-turn timing as TokenSpendCapExceededError above.
         UsageUnavailableError: a model response carried no usable
-            token-usage data — see _usage_from.
+            token-usage data — see the active transport's own
+            translation code (e.g. services.agent.llm.client's
+            _gemini_response_to_model_response).
         ToolLoopLimitError: the model kept calling tools past
             MAX_TOOL_ITERATIONS without producing a final reply.
         ModelUnavailableError: the model transport failed.
@@ -202,7 +182,7 @@ async def generate_reply(
         )
 
     messages = load_recent_messages(conn, conversation_id, limit=MESSAGE_WINDOW)
-    contents = build_contents(messages)
+    turns: list[Turn] = build_contents(messages)
     today = riyadh_calendar_day(now)
     system_instruction = render_system_instruction(
         customer_name=customer_name, today=today, today_hijri=to_hijri(today)
@@ -222,44 +202,40 @@ async def generate_reply(
                 usage_so_far=usage,
             )
             response = await transport.generate(
-                contents=contents, system_instruction=system_instruction
+                turns=turns, system_instruction=system_instruction
             )
-            usage = usage + _usage_from(response)
+            usage = usage + UsageTotals.from_model_usage(response.usage)
 
-            calls = response.function_calls
-            if not calls:
+            model_turn = response.turn
+            if not model_turn.tool_calls:
                 return AgentReply(
-                    text=response.text or "",
+                    text=model_turn.text or "",
                     tool_calls=tuple(tool_calls),
                     quote_ids=tuple(quote_ids),
                     usage=usage,
                 )
 
-            candidates = response.candidates
-            if candidates:
-                model_content = candidates[0].content
-                if model_content is not None:
-                    contents.append(model_content)
+            turns.append(model_turn)
 
-            response_parts: list[types.Part] = []
-            for call in calls:
-                name = call.name or ""
-                args = call.args or {}
+            results: list[ToolResult] = []
+            for call in model_turn.tool_calls:
                 result = dispatch_tool(
                     conn,
-                    name,
-                    args,
+                    call.name,
+                    call.args,
                     now=now,
                     customer_phone=state.customer_phone,
                     conversation_id=state.id,
                 )
-                tool_calls.append(ToolCallRecord(name=name, args=args, result=result))
+                tool_calls.append(
+                    ToolCallRecord(name=call.name, args=call.args, result=result)
+                )
                 if result.get("priced") is True:
                     quote_ids.append(int(result["quote_id"]))
-                response_parts.append(
-                    types.Part.from_function_response(name=name, response=result)
+                results.append(
+                    ToolResult(call_id=call.id, name=call.name, result=result)
                 )
-            contents.append(types.Content(role="user", parts=response_parts))
+            turns.append(ToolResultTurn(results=tuple(results)))
 
         raise ToolLoopLimitError(
             f"conversation {conversation_id} exceeded {MAX_TOOL_ITERATIONS} tool "

@@ -18,6 +18,7 @@ from services.agent.llm.context import (
     load_conversation_state,
     load_recent_messages,
 )
+from services.agent.llm.model_types import ModelTurn, UserTurn
 from services.agent.llm.prompt import render_system_instruction
 from tests.integration._seed import seed_conversation, seed_message
 
@@ -53,9 +54,10 @@ def test_build_contents_maps_message_direction_to_model_role(
     seed_message(db_conn, conversation_id, direction="outbound", body="hi there")
 
     messages = load_recent_messages(db_conn, conversation_id, limit=10)
-    contents = build_contents(messages)
+    turns = build_contents(messages)
 
-    assert [content.role for content in contents] == ["user", "model"]
+    roles = ["user" if isinstance(turn, UserTurn) else "model" for turn in turns]
+    assert roles == ["user", "model"]
 
 
 def test_customer_phone_never_appears_in_any_built_content_or_the_system_instruction(
@@ -81,18 +83,17 @@ def test_customer_phone_never_appears_in_any_built_content_or_the_system_instruc
     assert state.customer_phone == _PHONE
 
     messages = load_recent_messages(db_conn, conversation_id, limit=10)
-    contents = build_contents(messages)
+    turns = build_contents(messages)
 
     haystacks: list[str] = [
         render_system_instruction(
             customer_name="Ahmed", today=_TODAY, today_hijri=to_hijri(_TODAY)
         )
     ]
-    for content in contents:
-        assert content.parts is not None
-        for part in content.parts:
-            assert part.text is not None
-            haystacks.append(part.text)
+    for turn in turns:
+        assert isinstance(turn, UserTurn | ModelTurn)
+        assert turn.text is not None
+        haystacks.append(turn.text)
 
     assert len(haystacks) == 1 + len(bodies)  # every part really was scanned
     for haystack in haystacks:
