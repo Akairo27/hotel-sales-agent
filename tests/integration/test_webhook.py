@@ -27,14 +27,20 @@ from typing import Any
 import psycopg
 import pytest
 from fastapi.testclient import TestClient
-from google.genai import types
 
 from services.agent import webhook as webhook_module
 from services.agent.llm.caps import record_token_usage
 from services.agent.llm.client import ModelTransport
 from services.agent.llm.config import MAX_TOOL_ITERATIONS, LlmSettings
 from services.agent.llm.conversation import UsageTotals
-from services.agent.llm.errors import ModelUnavailableError
+from services.agent.llm.errors import ModelUnavailableError, UsageUnavailableError
+from services.agent.llm.model_types import (
+    ModelResponse,
+    ModelTurn,
+    ModelUsage,
+    ToolCall,
+    Turn,
+)
 from services.agent.main import app
 from services.agent.output_guard.enforcement import (
     OUTPUT_GUARD_FALLBACK_MESSAGE,
@@ -101,51 +107,46 @@ def _settings(
 @dataclass
 class _FakeTransport:
     """Always returns a plain text reply with the given token counts — no
-    function calls, so generate_reply returns after exactly one call."""
+    tool calls, so generate_reply returns after exactly one call."""
 
     prompt_tokens: int = 50
     candidates_tokens: int = 10
     calls: list[str] = field(default_factory=list)
 
     async def generate(
-        self, *, contents: list[types.Content], system_instruction: str
-    ) -> types.GenerateContentResponse:
-        del contents, system_instruction
+        self, *, turns: list[Turn], system_instruction: str
+    ) -> ModelResponse:
+        del turns, system_instruction
         self.calls.append("call")
-        content = types.Content(
-            role="model", parts=[types.Part.from_text(text="hello from the model")]
-        )
-        return types.GenerateContentResponse(
-            candidates=[types.Candidate(content=content)],
-            usage_metadata=types.GenerateContentResponseUsageMetadata(
-                prompt_token_count=self.prompt_tokens,
-                candidates_token_count=self.candidates_tokens,
-                total_token_count=self.prompt_tokens + self.candidates_tokens,
+        return ModelResponse(
+            turn=ModelTurn(text="hello from the model", tool_calls=()),
+            usage=ModelUsage(
+                prompt_tokens=self.prompt_tokens,
+                candidates_tokens=self.candidates_tokens,
+                total_tokens=self.prompt_tokens + self.candidates_tokens,
             ),
         )
 
 
 @dataclass
 class _NoUsageTransport:
-    """Returns a reply with no usage_metadata at all — the exact shape
-    conversation.py's _usage_from raises UsageUnavailableError against
-    (tests/unit/test_llm_conversation.py covers that function directly;
-    this double exists only to drive that path through the real webhook
-    endpoint)."""
+    """Raises UsageUnavailableError directly -- what a real GeminiTransport
+    raises for a Gemini response with no usable usage data (see
+    tests/unit/test_llm_client.py for that translation-level proof, and
+    services.agent.llm.model_types.ModelUsage's own docstring for why the
+    provider-neutral response type cannot represent "no usage" at all).
+    This fake exists only to drive the webhook's own handling of that
+    exception end to end through the real endpoint, not to re-prove the
+    Gemini-specific translation that produces it in practice."""
 
     calls: list[str] = field(default_factory=list)
 
     async def generate(
-        self, *, contents: list[types.Content], system_instruction: str
-    ) -> types.GenerateContentResponse:
-        del contents, system_instruction
+        self, *, turns: list[Turn], system_instruction: str
+    ) -> ModelResponse:
+        del turns, system_instruction
         self.calls.append("call")
-        content = types.Content(
-            role="model", parts=[types.Part.from_text(text="hello from the model")]
-        )
-        return types.GenerateContentResponse(
-            candidates=[types.Candidate(content=content)], usage_metadata=None
-        )
+        raise UsageUnavailableError("model response carried no usage_metadata")
 
 
 @dataclass
@@ -167,31 +168,31 @@ class _ToolCallingTransport:
     calls: list[str] = field(default_factory=list)
 
     async def generate(
-        self, *, contents: list[types.Content], system_instruction: str
-    ) -> types.GenerateContentResponse:
-        del contents, system_instruction
+        self, *, turns: list[Turn], system_instruction: str
+    ) -> ModelResponse:
+        del turns, system_instruction
         self.calls.append("call")
-        content = types.Content(
-            role="model",
-            parts=[
-                types.Part.from_function_call(
-                    name="check_availability",
-                    args={
-                        "hotel_id": 1,
-                        "room_type_id": 1,
-                        "check_in": "2026-01-01",
-                        "check_out": "2026-01-02",
-                        "rooms": 1,
-                    },
-                )
-            ],
-        )
-        return types.GenerateContentResponse(
-            candidates=[types.Candidate(content=content)],
-            usage_metadata=types.GenerateContentResponseUsageMetadata(
-                prompt_token_count=self.prompt_tokens,
-                candidates_token_count=self.candidates_tokens,
-                total_token_count=self.prompt_tokens + self.candidates_tokens,
+        return ModelResponse(
+            turn=ModelTurn(
+                text=None,
+                tool_calls=(
+                    ToolCall(
+                        id=f"call_{len(self.calls)}",
+                        name="check_availability",
+                        args={
+                            "hotel_id": 1,
+                            "room_type_id": 1,
+                            "check_in": "2026-01-01",
+                            "check_out": "2026-01-02",
+                            "rooms": 1,
+                        },
+                    ),
+                ),
+            ),
+            usage=ModelUsage(
+                prompt_tokens=self.prompt_tokens,
+                candidates_tokens=self.candidates_tokens,
+                total_tokens=self.prompt_tokens + self.candidates_tokens,
             ),
         )
 
@@ -202,22 +203,21 @@ def _function_call_response(
     *,
     prompt_tokens: int,
     candidates_tokens: int,
-) -> types.GenerateContentResponse:
+) -> ModelResponse:
     """One real, billed model call whose response is a tool call —
     dispatch_tool runs it for real against this module's fresh test
     schema (no monkeypatching), so a call to a bad tool name or with bad
     arguments raises the real UnknownToolError/InvalidToolArgumentsError,
     and a valid check_availability call against nonexistent inventory
     keeps generate_reply's loop going without raising anything."""
-    content = types.Content(
-        role="model", parts=[types.Part.from_function_call(name=name, args=args)]
-    )
-    return types.GenerateContentResponse(
-        candidates=[types.Candidate(content=content)],
-        usage_metadata=types.GenerateContentResponseUsageMetadata(
-            prompt_token_count=prompt_tokens,
-            candidates_token_count=candidates_tokens,
-            total_token_count=prompt_tokens + candidates_tokens,
+    return ModelResponse(
+        turn=ModelTurn(
+            text=None, tool_calls=(ToolCall(id="call_0", name=name, args=args),)
+        ),
+        usage=ModelUsage(
+            prompt_tokens=prompt_tokens,
+            candidates_tokens=candidates_tokens,
+            total_tokens=prompt_tokens + candidates_tokens,
         ),
     )
 
@@ -227,22 +227,23 @@ class _ScriptedTransport:
     """Returns (or raises) each scripted item in order, one per call to
     generate() -- one reusable fake standing in for a bespoke dataclass
     per exception type under test. Each script item is either a real,
-    billed response (a types.GenerateContentResponse, whose usage is
-    always counted by conversation.py before anything else happens with
-    it) or an exception the transport layer itself raises directly
-    (ModelUnavailableError, or a stand-in for a completely unanticipated
-    failure) -- exceptions dispatch_tool raises instead (UnknownToolError,
-    InvalidToolArgumentsError, pricing misconfigurations) are triggered by
-    scripting a function-call response naming a bad tool or bad
-    arguments, not by raising from here."""
+    billed response (a ModelResponse, whose usage is always counted by
+    conversation.py before anything else happens with it) or an
+    exception the transport layer itself raises directly
+    (ModelUnavailableError, UsageUnavailableError, or a stand-in for a
+    completely unanticipated failure) -- exceptions dispatch_tool raises
+    instead (UnknownToolError, InvalidToolArgumentsError, pricing
+    misconfigurations) are triggered by scripting a function-call
+    response naming a bad tool or bad arguments, not by raising from
+    here."""
 
-    script: list[types.GenerateContentResponse | BaseException]
+    script: list[ModelResponse | BaseException]
     calls: list[str] = field(default_factory=list)
 
     async def generate(
-        self, *, contents: list[types.Content], system_instruction: str
-    ) -> types.GenerateContentResponse:
-        del contents, system_instruction
+        self, *, turns: list[Turn], system_instruction: str
+    ) -> ModelResponse:
+        del turns, system_instruction
         item = self.script[len(self.calls)]
         self.calls.append("call")
         if isinstance(item, BaseException):
@@ -492,14 +493,13 @@ def test_receive_message_with_valid_signature_processes_and_records_usage(
 
 def _text_response(
     text: str, *, prompt_tokens: int = 50, candidates_tokens: int = 10
-) -> types.GenerateContentResponse:
-    content = types.Content(role="model", parts=[types.Part.from_text(text=text)])
-    return types.GenerateContentResponse(
-        candidates=[types.Candidate(content=content)],
-        usage_metadata=types.GenerateContentResponseUsageMetadata(
-            prompt_token_count=prompt_tokens,
-            candidates_token_count=candidates_tokens,
-            total_token_count=prompt_tokens + candidates_tokens,
+) -> ModelResponse:
+    return ModelResponse(
+        turn=ModelTurn(text=text, tool_calls=()),
+        usage=ModelUsage(
+            prompt_tokens=prompt_tokens,
+            candidates_tokens=candidates_tokens,
+            total_tokens=prompt_tokens + candidates_tokens,
         ),
     )
 
@@ -1289,15 +1289,14 @@ def test_receive_message_records_partial_usage_when_usage_is_unavailable_mid_tur
     usage_is_unavailable above), that first call's usage must now be
     recorded, not silently discarded."""
     _set_llm_settings(monkeypatch, _settings())
-    unusable_response = types.GenerateContentResponse(
-        candidates=[
-            types.Candidate(
-                content=types.Content(
-                    role="model", parts=[types.Part.from_text(text="irrelevant")]
-                )
-            )
-        ],
-        usage_metadata=None,
+    # What a real GeminiTransport raises for a response with no usable
+    # usage data (see tests/unit/test_llm_client.py for that translation-
+    # level proof, and _NoUsageTransport's own docstring above) -- the
+    # provider-neutral ModelResponse cannot represent "no usage" at all,
+    # so the second scripted call raises directly instead of returning
+    # an unusable response object.
+    unusable_response = UsageUnavailableError(
+        "model response carried no usage_metadata"
     )
     transport = _ScriptedTransport(
         [
