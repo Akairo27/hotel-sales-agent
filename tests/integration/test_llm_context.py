@@ -6,11 +6,13 @@ number never reaches the model's context.
 
 from __future__ import annotations
 
+from datetime import date
 from typing import Any
 
 import psycopg
 import pytest
 
+from lib.hijri import to_hijri
 from services.agent.llm.context import (
     build_contents,
     load_conversation_state,
@@ -21,6 +23,7 @@ from tests.integration._seed import seed_conversation, seed_message
 
 pytestmark = pytest.mark.usefixtures("db_conn")
 
+_TODAY = date(2026, 9, 23)
 _PHONE = "+966500000001"
 # Every representation the same phone number could plausibly take —
 # structurally impossible for any of these to appear given build_contents
@@ -80,7 +83,11 @@ def test_customer_phone_never_appears_in_any_built_content_or_the_system_instruc
     messages = load_recent_messages(db_conn, conversation_id, limit=10)
     contents = build_contents(messages)
 
-    haystacks: list[str] = [render_system_instruction(customer_name="Ahmed")]
+    haystacks: list[str] = [
+        render_system_instruction(
+            customer_name="Ahmed", today=_TODAY, today_hijri=to_hijri(_TODAY)
+        )
+    ]
     for content in contents:
         assert content.parts is not None
         for part in content.parts:
