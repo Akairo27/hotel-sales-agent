@@ -131,7 +131,9 @@ def check_token_spend_caps(
     daily_prompt_tokens = daily_row[0] + usage_so_far.prompt_tokens
     daily_candidates_tokens = daily_row[1] + usage_so_far.candidates_tokens
     daily_spend_usd = estimate_cost_usd(
-        prompt_tokens=daily_prompt_tokens, candidates_tokens=daily_candidates_tokens
+        prompt_tokens=daily_prompt_tokens,
+        candidates_tokens=daily_candidates_tokens,
+        rates=settings.token_rates,
     )
     if daily_spend_usd >= settings.max_spend_per_day_usd:
         logger.error(

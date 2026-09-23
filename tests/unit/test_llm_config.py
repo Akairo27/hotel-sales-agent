@@ -4,8 +4,13 @@ from decimal import Decimal
 
 import pytest
 
-from services.agent.llm.config import LlmSettings, load_llm_settings
+from services.agent.llm.config import (
+    LlmSettings,
+    OpenRouterRoute,
+    load_llm_settings,
+)
 from services.agent.llm.errors import LlmConfigurationError
+from services.agent.llm.pricing import GEMINI_FLASH_RATES, TokenRates
 
 _VALID_ENV = {
     "LLM_MODEL": "test-model-v1",
@@ -116,4 +121,64 @@ def test_load_llm_settings_rejects_bad_max_messages_per_number_per_day(
     env = _env_with_allowed_model(monkeypatch)
     env["MAX_MESSAGES_PER_NUMBER_PER_DAY"] = raw_value
     with pytest.raises(LlmConfigurationError, match="MAX_MESSAGES_PER_NUMBER_PER_DAY"):
+        load_llm_settings(env)
+
+
+_OPENROUTER_MODEL = "vendor/model-1"
+_OPENROUTER_ROUTE = OpenRouterRoute(
+    providers=("provider-a",),
+    token_rates=TokenRates(
+        input_usd_per_million_tokens=Decimal("0.50"),
+        output_usd_per_million_tokens=Decimal("2.00"),
+    ),
+)
+
+
+def _openrouter_env(monkeypatch: pytest.MonkeyPatch) -> dict[str, str]:
+    monkeypatch.setattr(
+        "services.agent.llm.config.OPENROUTER_ROUTES",
+        {_OPENROUTER_MODEL: _OPENROUTER_ROUTE},
+    )
+    monkeypatch.setattr(
+        "services.agent.llm.config.ALLOWED_MODELS", frozenset({_OPENROUTER_MODEL})
+    )
+    env = dict(_VALID_ENV)
+    env["LLM_MODEL"] = _OPENROUTER_MODEL
+    env["LLM_API_KEY"] = "gemini-key-must-not-be-used"
+    env["OPENROUTER_API_KEY"] = "test-openrouter-key"
+    return env
+
+
+def test_a_gemini_model_uses_gemini_rates_and_has_no_openrouter_route(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = load_llm_settings(_env_with_allowed_model(monkeypatch))
+    assert settings.token_rates == GEMINI_FLASH_RATES
+    assert settings.openrouter_route is None
+
+
+def test_an_openrouter_model_takes_its_key_route_and_rates_from_its_route(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = load_llm_settings(_openrouter_env(monkeypatch))
+    assert settings.model == _OPENROUTER_MODEL
+    assert settings.api_key == "test-openrouter-key"
+    assert settings.openrouter_route == _OPENROUTER_ROUTE
+    assert settings.token_rates == _OPENROUTER_ROUTE.token_rates
+
+
+def test_an_openrouter_model_does_not_need_the_gemini_key(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    env = _openrouter_env(monkeypatch)
+    del env["LLM_API_KEY"]
+    assert load_llm_settings(env).api_key == "test-openrouter-key"
+
+
+def test_an_openrouter_model_requires_the_openrouter_key(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    env = _openrouter_env(monkeypatch)
+    del env["OPENROUTER_API_KEY"]
+    with pytest.raises(LlmConfigurationError, match="OPENROUTER_API_KEY"):
         load_llm_settings(env)

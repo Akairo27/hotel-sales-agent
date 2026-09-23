@@ -11,9 +11,12 @@ from decimal import Decimal
 
 import pytest
 
+from services.agent.llm.errors import LlmConfigurationError
 from services.agent.llm.pricing import (
     GEMINI_FLASH_INPUT_USD_PER_MILLION_TOKENS,
     GEMINI_FLASH_OUTPUT_USD_PER_MILLION_TOKENS,
+    GEMINI_FLASH_RATES,
+    TokenRates,
     estimate_cost_usd,
     riyadh_calendar_day,
     riyadh_day_bounds_utc,
@@ -47,6 +50,48 @@ def test_estimate_cost_usd_never_rounds_a_sub_cent_amount_away() -> None:
     cost = estimate_cost_usd(prompt_tokens=1, candidates_tokens=0)
     assert cost == Decimal("0.00000075")
     assert cost != Decimal("0.00")
+
+
+def test_estimate_cost_usd_defaults_to_gemini_flash_rates() -> None:
+    expected_rates = TokenRates(
+        input_usd_per_million_tokens=GEMINI_FLASH_INPUT_USD_PER_MILLION_TOKENS,
+        output_usd_per_million_tokens=GEMINI_FLASH_OUTPUT_USD_PER_MILLION_TOKENS,
+    )
+    assert expected_rates == GEMINI_FLASH_RATES
+    assert estimate_cost_usd(
+        prompt_tokens=123, candidates_tokens=456
+    ) == estimate_cost_usd(
+        prompt_tokens=123, candidates_tokens=456, rates=GEMINI_FLASH_RATES
+    )
+
+
+def test_estimate_cost_usd_prices_tokens_at_the_rates_it_is_given() -> None:
+    rates = TokenRates(
+        input_usd_per_million_tokens=Decimal("2.00"),
+        output_usd_per_million_tokens=Decimal("8.00"),
+    )
+    cost = estimate_cost_usd(
+        prompt_tokens=500_000, candidates_tokens=250_000, rates=rates
+    )
+    assert cost == Decimal("1.00") + Decimal("2.00")
+
+
+@pytest.mark.parametrize(
+    "bad_rate",
+    [Decimal(0), Decimal("-0.01"), Decimal("NaN"), Decimal("Infinity")],
+)
+@pytest.mark.parametrize("field", ["input", "output"])
+def test_token_rates_rejects_a_rate_that_would_disable_the_daily_cap(
+    field: str, bad_rate: Decimal
+) -> None:
+    good = Decimal("1.00")
+    rates = {
+        "input_usd_per_million_tokens": good,
+        "output_usd_per_million_tokens": good,
+    }
+    rates[f"{field}_usd_per_million_tokens"] = bad_rate
+    with pytest.raises(LlmConfigurationError, match=f"{field}_usd_per_million"):
+        TokenRates(**rates)
 
 
 @pytest.mark.parametrize(

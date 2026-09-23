@@ -7,7 +7,9 @@ services.agent.llm.model_types (the provider-neutral vocabulary the rest
 of services/agent/llm/ speaks) and a specific provider's own wire format.
 Adding a second transport (a different provider, or a fallback model)
 means a new class here implementing ModelTransport — never a change to
-conversation.py, context.py, or tools.py.
+conversation.py, context.py, or tools.py. OpenRouterTransport (an
+OpenAI-compatible wire format, no SDK) is that second transport; it never
+imports google.genai and GeminiTransport never sees its types.
 
 ModelTransport is a Protocol so conversation.py's tool-calling loop can be
 tested against a fake transport, with no network access and no API key,
@@ -21,14 +23,19 @@ import json
 import logging
 import random
 import time
-from typing import Protocol
+from dataclasses import dataclass
+from typing import Any, Protocol
 
 import httpx
 from google import genai
 from google.genai import errors, types
 
 from services.agent.llm.config import LlmSettings
-from services.agent.llm.errors import ModelUnavailableError, UsageUnavailableError
+from services.agent.llm.errors import (
+    LlmConfigurationError,
+    ModelUnavailableError,
+    UsageUnavailableError,
+)
 from services.agent.llm.model_types import (
     ModelResponse,
     ModelTurn,
@@ -380,25 +387,29 @@ def _retry_delay_seconds(attempt: int) -> float:
 
 
 def _log_retry_attempt(
-    *, attempt: int, exc: errors.APIError | httpx.HTTPError, elapsed_ms: int
+    *,
+    attempt: int,
+    exc: Exception,
+    elapsed_ms: int,
+    status_code: int | None = None,
 ) -> None:
     """WARNING for one retried attempt. Deliberately only attempt number,
-    exception type, and elapsed time -- never str(exc): for
-    errors.APIError that includes exc.details, Google's raw response
-    body, the exact leak _wrap_as_model_unavailable below also guards
-    against. Nothing about the prompt or the model's response is in
-    scope here either way -- this function never sees either."""
-    logger.warning(
-        json.dumps(
-            {
-                "event": "model_call_retry",
-                "attempt": attempt,
-                "max_attempts": _RETRY_ATTEMPTS,
-                "exception_type": type(exc).__name__,
-                "elapsed_ms": elapsed_ms,
-            }
-        )
-    )
+    exception type, elapsed time, and (when the caller has one) an HTTP
+    status code -- never str(exc): for errors.APIError that includes
+    exc.details, Google's raw response body, the exact leak
+    _wrap_as_model_unavailable below also guards against. Nothing about
+    the prompt or the model's response is in scope here either way --
+    this function never sees either."""
+    record: dict[str, object] = {
+        "event": "model_call_retry",
+        "attempt": attempt,
+        "max_attempts": _RETRY_ATTEMPTS,
+        "exception_type": type(exc).__name__,
+        "elapsed_ms": elapsed_ms,
+    }
+    if status_code is not None:
+        record["status_code"] = status_code
+    logger.warning(json.dumps(record))
 
 
 def _wrap_as_model_unavailable(
@@ -498,5 +509,398 @@ class GeminiTransport:
             if attempt == _RETRY_ATTEMPTS or not _is_retryable(last_exc):
                 raise _wrap_as_model_unavailable(last_exc) from last_exc
             _log_retry_attempt(attempt=attempt, exc=last_exc, elapsed_ms=elapsed_ms)
+            await asyncio.sleep(_retry_delay_seconds(attempt))
+        raise AssertionError("unreachable: the loop above always returns or raises")
+
+
+# --- OpenRouter (OpenAI-compatible) transport --------------------------------
+
+OPENROUTER_CHAT_COMPLETIONS_URL = "https://openrouter.ai/api/v1/chat/completions"
+
+# OpenRouter's own documented error statuses (its "Errors and Debugging"
+# page), pinned here rather than shared with _RETRY_HTTP_STATUS_CODES above
+# so neither provider's classification can drift with the other's. 408
+# timeout, 429 rate limit, 500 internal error, 502 model down or invalid
+# provider response, 504 provider gateway timeout, and 503 -- documented as
+# "no available model provider that meets your routing requirements",
+# which under a narrow provider allowlist is what a temporary outage of the
+# only approved host looks like -- are retried. 400/401/402/403/404/412/
+# 413/422 are caller- or account-caused; retrying cannot fix them.
+_OPENROUTER_RETRYABLE_STATUS_CODES = (408, 429, 500, 502, 503, 504)
+
+# The assistant-message fields OpenRouter documents for carrying a
+# reasoning model's reasoning. On a tool-calling turn they must be passed
+# back unchanged (its "Reasoning Tokens" page) -- the OpenRouter analogue
+# of the Gemini thought_signature ModelTurn.provider_state exists for.
+_OPENROUTER_REASONING_FIELDS = ("reasoning", "reasoning_details")
+
+
+class OpenRouterCallError(Exception):
+    """One failed OpenRouter attempt that reached OpenRouter (or read its
+    reply) but did not yield a usable response.
+
+    Carries only what is safe to log: a fixed description, the HTTP status
+    or provider error code when there is one, and whether a retry can
+    help. Never the response body -- an error body can echo request
+    content or provider-side detail, the same leak class
+    _wrap_as_model_unavailable guards against for Gemini.
+    """
+
+    def __init__(
+        self, message: str, *, status_code: int | None, retryable: bool
+    ) -> None:
+        super().__init__(message)
+        self.status_code = status_code
+        self.retryable = retryable
+
+
+@dataclass(frozen=True)
+class _OpenRouterAssistantMessage:
+    """The assistant message OpenRouter returned, kept verbatim (reasoning
+    fields included) as ModelTurn.provider_state so it can be sent back
+    unchanged on the next request. A distinct type, not a bare dict, so a
+    provider_state from any other transport can never be mistaken for it."""
+
+    message: dict[str, Any]
+
+
+def _openrouter_provider_routing(providers: tuple[str, ...]) -> dict[str, object]:
+    """The per-request `provider` object, from docs verified against
+    OpenRouter's provider-routing page.
+
+    `only` is an allowlist, deliberately not `ignore` (a denylist):
+    deny-by-default, so a provider nobody reviewed can never receive a
+    customer's conversation. allow_fallbacks=False so OpenRouter never
+    retries across providers on its own -- this module's retry loop stays
+    the single, visible owner of retries. data_collection="deny" and
+    zdr=True are enforced by OpenRouter per request. require_parameters
+    stops a provider that would silently ignore `tools` from serving a
+    request whose whole purpose is tool calling.
+    """
+    return {
+        "order": list(providers),
+        "only": list(providers),
+        "allow_fallbacks": False,
+        "data_collection": "deny",
+        "zdr": True,
+        "require_parameters": True,
+    }
+
+
+def _tool_declaration_to_openrouter(declaration: ToolDeclaration) -> dict[str, Any]:
+    return {
+        "type": "function",
+        "function": {
+            "name": declaration.name,
+            "description": declaration.description,
+            "parameters": declaration.parameters,
+        },
+    }
+
+
+def _model_turn_to_openrouter_message(turn: ModelTurn) -> dict[str, Any]:
+    """A ModelTurn this transport produced earlier in the same turn is
+    sent back verbatim (see _OpenRouterAssistantMessage). One loaded from
+    message history, or produced by another transport, is rebuilt from
+    text/tool_calls; ToolCall.id is always populated, so the rebuilt
+    tool_calls still match the tool results that follow."""
+    if isinstance(turn.provider_state, _OpenRouterAssistantMessage):
+        return turn.provider_state.message
+    message: dict[str, Any] = {"role": "assistant", "content": turn.text}
+    if turn.tool_calls:
+        message["tool_calls"] = [
+            {
+                "id": call.id,
+                "type": "function",
+                "function": {"name": call.name, "arguments": json.dumps(call.args)},
+            }
+            for call in turn.tool_calls
+        ]
+    return message
+
+
+def _turns_to_openrouter_messages(
+    turns: list[Turn], system_instruction: str
+) -> list[dict[str, Any]]:
+    messages: list[dict[str, Any]] = [{"role": "system", "content": system_instruction}]
+    for turn in turns:
+        if isinstance(turn, UserTurn):
+            messages.append({"role": "user", "content": turn.text})
+        elif isinstance(turn, ModelTurn):
+            messages.append(_model_turn_to_openrouter_message(turn))
+        elif isinstance(turn, ToolResultTurn):
+            messages.extend(
+                {
+                    "role": "tool",
+                    "tool_call_id": result.call_id,
+                    "content": json.dumps(result.result),
+                }
+                for result in turn.results
+            )
+        else:
+            raise NotImplementedError(f"unhandled turn type: {type(turn).__name__}")
+    return messages
+
+
+def _malformed(what: str) -> OpenRouterCallError:
+    return OpenRouterCallError(
+        f"malformed response: {what}", status_code=None, retryable=True
+    )
+
+
+def _require_mapping(value: object, *, what: str) -> dict[str, Any]:
+    if isinstance(value, dict):
+        return value
+    raise _malformed(f"{what} is not an object")
+
+
+def _decode_tool_arguments(arguments: object) -> dict[str, Any]:
+    """function.arguments is a JSON-encoded string per OpenRouter's
+    tool-calling docs; a provider that sends an already-decoded object is
+    tolerated. Anything else is a malformed reply, retried like any other
+    transient failure -- a weaker model's broken arguments are a known risk,
+    and a retry is the cheapest honest response to one."""
+    if isinstance(arguments, dict):
+        return arguments
+    if isinstance(arguments, str):
+        try:
+            decoded = json.loads(arguments)
+        except ValueError as exc:
+            raise _malformed("tool call arguments are not valid JSON") from exc
+        if isinstance(decoded, dict):
+            return decoded
+    raise _malformed("tool call arguments are not a JSON object")
+
+
+def _parse_tool_call(raw: object, index: int) -> tuple[dict[str, Any], ToolCall]:
+    """Returns the tool call twice: normalized for echoing back inside
+    provider_state (id guaranteed present, arguments kept as the string
+    the provider sent), and as the provider-neutral ToolCall."""
+    call = _require_mapping(raw, what="tool call")
+    function = _require_mapping(call.get("function"), what="tool call function")
+    name = function.get("name")
+    if not isinstance(name, str) or not name:
+        raise _malformed("tool call has no function name")
+    arguments = function.get("arguments")
+    args = _decode_tool_arguments(arguments)
+    raw_id = call.get("id")
+    call_id = raw_id if isinstance(raw_id, str) and raw_id else f"call_{index}"
+    echoed_arguments = arguments if isinstance(arguments, str) else json.dumps(args)
+    normalized = {
+        "id": call_id,
+        "type": "function",
+        "function": {"name": name, "arguments": echoed_arguments},
+    }
+    return normalized, ToolCall(id=call_id, name=name, args=args)
+
+
+def _openrouter_message_to_turn(message: dict[str, Any]) -> ModelTurn:
+    content = message.get("content")
+    if content is not None and not isinstance(content, str):
+        raise _malformed("message content is not text")
+    raw_calls = message.get("tool_calls") or []
+    if not isinstance(raw_calls, list):
+        raise _malformed("message tool_calls is not a list")
+    parsed = [_parse_tool_call(raw, index) for index, raw in enumerate(raw_calls)]
+
+    state_message: dict[str, Any] = {"role": "assistant", "content": content}
+    if parsed:
+        state_message["tool_calls"] = [normalized for normalized, _ in parsed]
+    for field in _OPENROUTER_REASONING_FIELDS:
+        if message.get(field) is not None:
+            state_message[field] = message[field]
+    return ModelTurn(
+        text=content or None,
+        tool_calls=tuple(call for _, call in parsed),
+        provider_state=_OpenRouterAssistantMessage(state_message),
+    )
+
+
+def _openrouter_usage(body: dict[str, Any]) -> ModelUsage:
+    """completion_tokens is used as-is: OpenRouter's reasoning-token docs
+    state reasoning tokens are output tokens already counted in
+    completion_tokens (completion_tokens_details.reasoning_tokens is a
+    breakdown of it, not an addition) -- so, unlike the Gemini path, there
+    is nothing to fold in, and adding it would double-count against every
+    cap.
+
+    Raises:
+        UsageUnavailableError: usage is absent or any of its three counts
+            is missing or not an integer -- an untelemetered call is not a
+            free call (same reasoning as _gemini_response_to_model_response).
+    """
+    usage = body.get("usage")
+    if not isinstance(usage, dict):
+        raise UsageUnavailableError("model response carried no usage")
+    return ModelUsage(
+        prompt_tokens=_require_token_count(usage, "prompt_tokens"),
+        candidates_tokens=_require_token_count(usage, "completion_tokens"),
+        total_tokens=_require_token_count(usage, "total_tokens"),
+    )
+
+
+def _require_token_count(usage: dict[str, Any], key: str) -> int:
+    # bool is a subclass of int in Python -- excluded explicitly so a stray
+    # boolean is never silently accepted as a token count.
+    value = usage.get(key)
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise UsageUnavailableError("model response usage is incomplete")
+    return value
+
+
+def _openrouter_body_to_model_response(payload: object) -> ModelResponse:
+    """Translates one HTTP 200 body into the provider-neutral shape.
+
+    A provider failure after the response started still arrives as HTTP
+    200, with finish_reason "error" and an `error` object on the choice
+    (OpenRouter's error docs) -- treated as a transient failure, not a
+    reply.
+
+    Raises:
+        OpenRouterCallError: the body is malformed, or reports a
+            mid-generation provider error. Always retryable.
+        UsageUnavailableError: see _openrouter_usage.
+    """
+    body = _require_mapping(payload, what="response body")
+    choices = body.get("choices")
+    if not isinstance(choices, list) or not choices:
+        raise _malformed("response has no choices")
+    choice = _require_mapping(choices[0], what="first choice")
+    error = choice.get("error")
+    if choice.get("finish_reason") == "error" or error is not None:
+        code = error.get("code") if isinstance(error, dict) else None
+        raise OpenRouterCallError(
+            "provider error after the response started",
+            status_code=code if isinstance(code, int) else None,
+            retryable=True,
+        )
+    usage = _openrouter_usage(body)
+    message = _require_mapping(choice.get("message"), what="first choice message")
+    return ModelResponse(turn=_openrouter_message_to_turn(message), usage=usage)
+
+
+def _openrouter_is_retryable(exc: OpenRouterCallError | httpx.HTTPError) -> bool:
+    if isinstance(exc, OpenRouterCallError):
+        return exc.retryable
+    return isinstance(exc, _RETRYABLE_TRANSPORT_ERRORS)
+
+
+def _openrouter_status_code(exc: OpenRouterCallError | httpx.HTTPError) -> int | None:
+    return exc.status_code if isinstance(exc, OpenRouterCallError) else None
+
+
+def _wrap_openrouter_failure(
+    exc: OpenRouterCallError | httpx.HTTPError,
+) -> ModelUnavailableError:
+    """The final, retries-exhausted failure. Only the exception type and
+    status code -- never str(exc) or any response body, and never the
+    request (which carries the API key in its Authorization header)."""
+    status_code = _openrouter_status_code(exc)
+    suffix = f" (status={status_code})" if status_code is not None else ""
+    return ModelUnavailableError(f"model call failed: {type(exc).__name__}{suffix}")
+
+
+class OpenRouterTransport:
+    """The OpenRouter transport, over its OpenAI-compatible chat
+    completions endpoint, through httpx (already a pinned dependency).
+
+    Built from explicit arguments, not LlmSettings: services.agent.llm.
+    config decides which models and providers are approved; this class
+    only refuses to run without a provider allowlist. Retries are owned
+    here, with the same attempt count, backoff and logging as
+    GeminiTransport, so a switch of transport does not change how long a
+    customer can be kept waiting.
+    """
+
+    def __init__(
+        self,
+        *,
+        model: str,
+        api_key: str,
+        providers: tuple[str, ...],
+        timeout_ms: int,
+        http_transport: httpx.AsyncBaseTransport | None = None,
+    ) -> None:
+        """
+        Raises:
+            LlmConfigurationError: providers is empty (no provider has
+                been approved -- an empty `only` list could be read by the
+                router as "no restriction", so this fails closed instead
+                of sending it) or api_key is empty.
+        """
+        if not providers:
+            raise LlmConfigurationError(
+                f"no OpenRouter provider is approved for model {model!r}; "
+                "refusing to send a request with an empty provider allowlist"
+            )
+        if not api_key:
+            raise LlmConfigurationError("OPENROUTER_API_KEY is empty")
+        self._model = model
+        self._headers = {"Authorization": f"Bearer {api_key}"}
+        self._timeout = httpx.Timeout(timeout_ms / 1000)
+        self._provider_routing = _openrouter_provider_routing(providers)
+        self._tools = [_tool_declaration_to_openrouter(d) for d in AGENT_TOOLS]
+        self._http_transport = http_transport
+
+    async def _call_once(self, body: dict[str, Any]) -> ModelResponse:
+        async with httpx.AsyncClient(
+            timeout=self._timeout, transport=self._http_transport
+        ) as client:
+            response = await client.post(
+                OPENROUTER_CHAT_COMPLETIONS_URL, headers=self._headers, json=body
+            )
+        if response.status_code != httpx.codes.OK:
+            raise OpenRouterCallError(
+                f"HTTP {response.status_code}",
+                status_code=response.status_code,
+                retryable=response.status_code in _OPENROUTER_RETRYABLE_STATUS_CODES,
+            )
+        try:
+            payload = response.json()
+        except ValueError as exc:
+            raise _malformed("body is not valid JSON") from exc
+        return _openrouter_body_to_model_response(payload)
+
+    async def generate(
+        self,
+        *,
+        turns: list[Turn],
+        system_instruction: str,
+    ) -> ModelResponse:
+        """Calls the model, retrying transient failures up to
+        _RETRY_ATTEMPTS times with logged backoff between attempts.
+        `tools` is sent on every request, as OpenRouter's tool-calling
+        docs require, and tool execution stays entirely with
+        conversation.py (CLAUDE.md rule 1).
+
+        Raises:
+            ModelUnavailableError: every attempt failed on a transient
+                error, or a single attempt hit a permanent one.
+            UsageUnavailableError: raised only after a successful
+                attempt, never counted as a retryable failure.
+        """
+        body = {
+            "model": self._model,
+            "messages": _turns_to_openrouter_messages(turns, system_instruction),
+            "tools": self._tools,
+            "tool_choice": "auto",
+            "provider": self._provider_routing,
+        }
+        last_exc: OpenRouterCallError | httpx.HTTPError
+        for attempt in range(1, _RETRY_ATTEMPTS + 1):
+            started = time.monotonic()
+            try:
+                return await self._call_once(body)
+            except (OpenRouterCallError, httpx.HTTPError) as exc:
+                last_exc = exc
+            elapsed_ms = int((time.monotonic() - started) * 1000)
+            if attempt == _RETRY_ATTEMPTS or not _openrouter_is_retryable(last_exc):
+                raise _wrap_openrouter_failure(last_exc) from last_exc
+            _log_retry_attempt(
+                attempt=attempt,
+                exc=last_exc,
+                elapsed_ms=elapsed_ms,
+                status_code=_openrouter_status_code(last_exc),
+            )
             await asyncio.sleep(_retry_delay_seconds(attempt))
         raise AssertionError("unreachable: the loop above always returns or raises")
