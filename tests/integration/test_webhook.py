@@ -471,7 +471,7 @@ def test_receive_message_with_valid_signature_processes_and_records_usage(
     )
 
     assert response.status_code == 200
-    assert response.json() == {"status": "processed"}
+    assert response.json() == {"status": "accepted"}
     assert len(transport.calls) == 1
     rows = db_conn.execute(
         "SELECT direction, body, whatsapp_message_id FROM messages "
@@ -526,7 +526,7 @@ def test_receive_message_blocks_a_guard_violating_reply_and_sends_the_fallback(
     )
 
     assert response.status_code == 200
-    assert response.json() == {"status": "escalated"}
+    assert response.json() == {"status": "accepted"}
     assert len(transport.calls) == 1
     # The fallback was sent, not the guard-violating text.
     assert len(sender.calls) == 1
@@ -573,7 +573,7 @@ def test_receive_message_returns_send_failed_when_the_whatsapp_send_fails(
     )
 
     assert response.status_code == 200
-    assert response.json() == {"status": "send_failed"}
+    assert response.json() == {"status": "accepted"}
     outbound_row = db_conn.execute(
         "SELECT count(*) FROM messages "
         "WHERE customer_phone = %s AND direction = 'outbound'",
@@ -631,7 +631,7 @@ def test_receive_message_logs_and_returns_fallback_blocked_if_it_ever_happens(
     )
 
     assert response.status_code == 200
-    assert response.json() == {"status": "fallback_blocked"}
+    assert response.json() == {"status": "accepted"}
     assert call_count["n"] == 2
     error_records = [r for r in caplog.records if r.levelno == logging.ERROR]
     assert len(error_records) == 1
@@ -675,7 +675,7 @@ def test_receive_message_returns_delivery_failed_when_the_guard_check_itself_err
     )
 
     assert response.status_code == 200
-    assert response.json() == {"status": "delivery_failed"}
+    assert response.json() == {"status": "accepted"}
     usage_row = db_conn.execute(
         "SELECT total_tokens FROM token_usage WHERE customer_phone = %s", (_PHONE,)
     ).fetchone()
@@ -716,7 +716,7 @@ def test_receive_message_returns_200_and_logs_when_usage_is_unavailable(
     )
 
     assert response.status_code == 200
-    assert response.json() == {"status": "usage_unavailable"}
+    assert response.json() == {"status": "accepted"}
     assert len(transport.calls) == 1
     conversation_row = db_conn.execute(
         "SELECT id FROM conversations WHERE customer_phone = %s", (_PHONE,)
@@ -771,7 +771,7 @@ def test_receive_message_returns_200_and_logs_when_record_token_usage_fails(
     )
 
     assert response.status_code == 200
-    assert response.json() == {"status": "usage_not_recorded"}
+    assert response.json() == {"status": "accepted"}
     assert len(transport.calls) == 1
     conversation_row = db_conn.execute(
         "SELECT id FROM conversations WHERE customer_phone = %s", (_PHONE,)
@@ -834,7 +834,7 @@ def test_receive_message_returns_200_when_record_token_usage_raises_a_non_db_err
     )
 
     assert response.status_code == 200
-    assert response.json() == {"status": "usage_not_recorded"}
+    assert response.json() == {"status": "accepted"}
     error_records = [r for r in caplog.records if r.levelno == logging.ERROR]
     assert len(error_records) == 1
     logged = json.loads(error_records[0].getMessage())
@@ -878,7 +878,7 @@ def test_receive_message_still_processes_when_increment_turn_count_fails(
     )
 
     assert response.status_code == 200
-    assert response.json() == {"status": "processed"}
+    assert response.json() == {"status": "accepted"}
     conversation_row = db_conn.execute(
         "SELECT id, turn_count FROM conversations WHERE customer_phone = %s",
         (_PHONE,),
@@ -972,7 +972,7 @@ def test_receive_message_escalates_and_sends_fallback_when_the_spend_cap_is_exce
     )
 
     assert response.status_code == 200
-    assert response.json() == {"status": "escalated"}
+    assert response.json() == {"status": "accepted"}
     assert transport.calls == []
     assert len(sender.calls) == 1
     assert sender.calls[0][1] == OUTPUT_GUARD_FALLBACK_MESSAGE
@@ -1035,7 +1035,7 @@ def test_receive_message_escalates_and_sends_fallback_when_the_turn_cap_is_excee
     )
 
     assert response.status_code == 200
-    assert response.json() == {"status": "escalated"}
+    assert response.json() == {"status": "accepted"}
     assert transport.calls == []
     assert len(sender.calls) == 1
     assert sender.calls[0][1] == OUTPUT_GUARD_FALLBACK_MESSAGE
@@ -1094,7 +1094,7 @@ def test_receive_message_returns_capped_if_the_turn_cap_fallback_is_ever_blocked
     )
 
     assert response.status_code == 200
-    assert response.json() == {"status": "capped"}
+    assert response.json() == {"status": "accepted"}
     error_records = [r for r in caplog.records if r.levelno == logging.ERROR]
     logged = [json.loads(r.getMessage()) for r in error_records]
     events = [entry["event"] for entry in logged]
@@ -1136,7 +1136,7 @@ def test_receive_message_returns_capped_when_turn_cap_escalation_itself_errors(
     )
 
     assert response.status_code == 200
-    assert response.json() == {"status": "capped"}
+    assert response.json() == {"status": "accepted"}
     escalation_count = db_conn.execute(
         "SELECT count(*) FROM escalations WHERE customer_phone = %s", (_PHONE,)
     ).fetchone()
@@ -1173,7 +1173,7 @@ def test_receive_message_increments_turn_count_after_a_normal_turn(
     )
 
     assert response.status_code == 200
-    assert response.json() == {"status": "processed"}
+    assert response.json() == {"status": "accepted"}
     turn_count_row = db_conn.execute(
         "SELECT turn_count FROM conversations WHERE id = %s", (conversation_id,)
     ).fetchone()
@@ -1215,7 +1215,7 @@ def test_receive_message_records_partial_usage_when_the_cap_crosses_mid_turn(
     )
 
     assert response.status_code == 200
-    assert response.json() == {"status": "escalated"}
+    assert response.json() == {"status": "accepted"}
     assert len(transport.calls) == 2
     usage_row = db_conn.execute(
         "SELECT prompt_tokens, candidates_tokens, total_tokens FROM token_usage "
@@ -1259,7 +1259,7 @@ def test_receive_message_records_partial_usage_when_the_daily_cap_crosses_mid_tu
     )
 
     assert response.status_code == 200
-    assert response.json() == {"status": "escalated"}
+    assert response.json() == {"status": "accepted"}
     assert len(transport.calls) == 2
     usage_row = db_conn.execute(
         "SELECT prompt_tokens, candidates_tokens, total_tokens FROM token_usage "
@@ -1321,7 +1321,7 @@ def test_receive_message_records_partial_usage_when_usage_is_unavailable_mid_tur
     )
 
     assert response.status_code == 200
-    assert response.json() == {"status": "usage_unavailable"}
+    assert response.json() == {"status": "accepted"}
     assert len(transport.calls) == 2
     conversation_row = db_conn.execute(
         "SELECT id FROM conversations WHERE customer_phone = %s", (_PHONE,)
@@ -1379,7 +1379,7 @@ def test_receive_message_escalates_and_sends_fallback_when_the_transport_fails_m
     )
 
     assert response.status_code == 200
-    assert response.json() == {"status": "escalated"}
+    assert response.json() == {"status": "accepted"}
     assert len(transport.calls) == 2
     conversation_row = db_conn.execute(
         "SELECT id FROM conversations WHERE customer_phone = %s", (_PHONE,)
@@ -1406,6 +1406,7 @@ def test_receive_message_escalates_and_notifies_when_the_transport_fails_first(
     webhook_client: TestClient,
     monkeypatch: pytest.MonkeyPatch,
     db_conn: psycopg.Connection[Any],
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
     """The mid-turn test above always has one real prior call; this
     covers the case it doesn't -- retries exhausted on the very first
@@ -1417,7 +1418,13 @@ def test_receive_message_escalates_and_notifies_when_the_transport_fails_first(
     depend on any prior successful call having happened -- the same
     standard test_receive_message_escalates_and_sends_fallback_when_
     the_turn_cap_is_exceeded already proves for a cap that also fires
-    with no usage."""
+    with no usage.
+
+    Also proves the conversation_escalated log event carries the real
+    exception type and message for ModelUnavailableError specifically --
+    the underlying transport failure that produced the 2026-09-21
+    escalations was otherwise invisible in the logs, only in
+    escalations.notes."""
     _set_llm_settings(monkeypatch, _settings())
     transport = _ScriptedTransport(
         [ModelUnavailableError("simulated transport failure")]
@@ -1425,6 +1432,7 @@ def test_receive_message_escalates_and_notifies_when_the_transport_fails_first(
     _set_transport(monkeypatch, transport)
     sender = _FakeWhatsAppSender()
     _set_whatsapp_sender(monkeypatch, sender)
+    caplog.set_level(logging.ERROR, logger="services.agent.webhook")
     payload = _whatsapp_payload(
         wa_id=_WA_ID, message_id="wamid.transport-fails-first-call", body="hello"
     )
@@ -1434,7 +1442,7 @@ def test_receive_message_escalates_and_notifies_when_the_transport_fails_first(
     )
 
     assert response.status_code == 200
-    assert response.json() == {"status": "escalated"}
+    assert response.json() == {"status": "accepted"}
     assert len(transport.calls) == 1
     assert len(sender.calls) == 1
     assert sender.calls[0][1] == OUTPUT_GUARD_FALLBACK_MESSAGE
@@ -1446,6 +1454,15 @@ def test_receive_message_escalates_and_notifies_when_the_transport_fails_first(
         "SELECT count(*) FROM token_usage WHERE customer_phone = %s", (_PHONE,)
     ).fetchone()
     assert usage_row_count == (0,)
+    escalated_records = [
+        json.loads(r.getMessage())
+        for r in caplog.records
+        if r.levelno == logging.ERROR
+        and json.loads(r.getMessage())["event"] == "conversation_escalated"
+    ]
+    assert len(escalated_records) == 1
+    assert escalated_records[0]["exception_type"] == "ModelUnavailableError"
+    assert escalated_records[0]["exception_message"] == ("simulated transport failure")
 
 
 def test_receive_message_records_partial_usage_for_an_unknown_tool_call(
@@ -1479,7 +1496,7 @@ def test_receive_message_records_partial_usage_for_an_unknown_tool_call(
     )
 
     assert response.status_code == 200
-    assert response.json() == {"status": "turn_failed"}
+    assert response.json() == {"status": "accepted"}
     assert len(transport.calls) == 1
     conversation_row = db_conn.execute(
         "SELECT id FROM conversations WHERE customer_phone = %s", (_PHONE,)
@@ -1531,7 +1548,7 @@ def test_receive_message_records_partial_usage_for_invalid_tool_arguments(
     )
 
     assert response.status_code == 200
-    assert response.json() == {"status": "turn_failed"}
+    assert response.json() == {"status": "accepted"}
     assert len(transport.calls) == 1
     conversation_row = db_conn.execute(
         "SELECT id FROM conversations WHERE customer_phone = %s", (_PHONE,)
@@ -1590,7 +1607,7 @@ def test_receive_message_records_full_usage_when_the_tool_loop_limit_is_exceeded
     )
 
     assert response.status_code == 200
-    assert response.json() == {"status": "turn_failed"}
+    assert response.json() == {"status": "accepted"}
     assert len(transport.calls) == MAX_TOOL_ITERATIONS
     usage_row = db_conn.execute(
         "SELECT prompt_tokens, candidates_tokens, total_tokens FROM token_usage "
@@ -1679,7 +1696,7 @@ def test_receive_message_records_partial_usage_for_a_missing_price_rule_chain(
     )
 
     assert response.status_code == 200
-    assert response.json() == {"status": "turn_failed"}
+    assert response.json() == {"status": "accepted"}
     assert len(transport.calls) == 1
     usage_row = db_conn.execute(
         "SELECT prompt_tokens, candidates_tokens, total_tokens FROM token_usage "
@@ -1767,7 +1784,7 @@ def test_receive_message_records_partial_usage_for_a_fully_booked_night(
     )
 
     assert response.status_code == 200
-    assert response.json() == {"status": "turn_failed"}
+    assert response.json() == {"status": "accepted"}
     assert len(transport.calls) == 1
     usage_row = db_conn.execute(
         "SELECT prompt_tokens, candidates_tokens, total_tokens FROM token_usage "
@@ -1853,7 +1870,7 @@ def test_receive_message_records_partial_usage_when_the_price_floor_exceeds_the_
     )
 
     assert response.status_code == 200
-    assert response.json() == {"status": "turn_failed"}
+    assert response.json() == {"status": "accepted"}
     assert len(transport.calls) == 1
     usage_row = db_conn.execute(
         "SELECT prompt_tokens, candidates_tokens, total_tokens FROM token_usage "
@@ -1906,7 +1923,7 @@ def test_receive_message_records_partial_usage_and_logs_a_never_seen_error(
     )
 
     assert response.status_code == 200
-    assert response.json() == {"status": "turn_failed"}
+    assert response.json() == {"status": "accepted"}
     assert len(transport.calls) == 2
     usage_row = db_conn.execute(
         "SELECT prompt_tokens, candidates_tokens, total_tokens FROM token_usage "
@@ -1995,7 +2012,7 @@ def test_receive_message_second_message_hits_the_cap_from_the_first_recording(
         signature=_sign(json.dumps(first_payload).encode()),
     )
     assert first_response.status_code == 200
-    assert first_response.json() == {"status": "processed"}
+    assert first_response.json() == {"status": "accepted"}
     assert len(transport.calls) == 1
 
     second_sender = _FakeWhatsAppSender(message_id="wamid.OUTBOUND-SECOND")
@@ -2010,7 +2027,7 @@ def test_receive_message_second_message_hits_the_cap_from_the_first_recording(
     )
 
     assert second_response.status_code == 200
-    assert second_response.json() == {"status": "escalated"}
+    assert second_response.json() == {"status": "accepted"}
     # No second call: the first message's 60 recorded tokens already
     # exceed the 50-token cap before the second message's own model call
     # would have happened.
@@ -2094,7 +2111,7 @@ def test_receive_message_duplicate_delivery_is_a_no_op(
 
     first_response = _post(webhook_client, payload, signature=signature)
     assert first_response.status_code == 200
-    assert first_response.json() == {"status": "processed"}
+    assert first_response.json() == {"status": "accepted"}
     assert len(transport.calls) == 1
 
     second_response = _post(webhook_client, payload, signature=signature)
