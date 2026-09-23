@@ -15,9 +15,9 @@ names anything else; there is no silent fallback.
 
 A model reachable through OpenRouter is added the same reviewed way: one
 OPENROUTER_ROUTES entry naming its exact OpenRouter slug, the providers
-approved to serve it, and its token rates. OPENROUTER_ROUTES is empty
-today, so no OpenRouter model is selectable and nothing about the running
-Gemini deployment changes until a route is deliberately added.
+approved to serve it, and its token rates. The one route below makes
+GLM-5.3 selectable, but the running Gemini deployment changes only when
+LLM_MODEL is deliberately set to it.
 """
 
 from __future__ import annotations
@@ -52,7 +52,20 @@ class OpenRouterRoute:
     token_rates: TokenRates
 
 
-OPENROUTER_ROUTES: Mapping[str, OpenRouterRoute] = {}
+# The dated snapshot slug, not the bare "z-ai/glm-5.3" alias (CLAUDE.md §9);
+# OpenRouter accepted both in a live call on 2026-09-24. Providers in
+# priority order, per ARCHITECTURE.md §10's recorded decision. The rates are
+# Crusoe's, the higher of the two (InferenceNet: 0.90 / 3.00): OpenRouter's
+# endpoint data on 2026-09-24, and a live call billed exactly this rate.
+OPENROUTER_ROUTES: Mapping[str, OpenRouterRoute] = {
+    "z-ai/glm-5.3-20260816": OpenRouterRoute(
+        providers=("crusoe", "inference-net"),
+        token_rates=TokenRates(
+            input_usd_per_million_tokens=Decimal("1.40"),
+            output_usd_per_million_tokens=Decimal("4.40"),
+        ),
+    ),
+}
 
 ALLOWED_MODELS: frozenset[str] = GEMINI_MODELS | frozenset(OPENROUTER_ROUTES)
 
