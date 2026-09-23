@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import json
 import logging
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from typing import Any
 
@@ -484,3 +484,77 @@ def test_check_message_rate_cap_is_isolated_per_phone_number(
     check_message_rate_cap(
         db_conn, customer_phone=_OTHER_PHONE, now=now, settings=settings
     )
+
+
+def test_check_token_spend_caps_ignores_usage_from_an_earlier_session(
+    db_conn: psycopg.Connection[Any],
+) -> None:
+    """conversations has one row per phone number forever, so the
+    per-conversation cap must count the current session only: 95 tokens
+    spent yesterday must not leave a returning customer 5 tokens from an
+    escalation."""
+    settings = _settings(max_tokens_per_conversation=100)
+    conversation_id = seed_conversation(db_conn, customer_phone=_PHONE)
+    yesterday = _NOW - timedelta(days=1)
+    seed_message(
+        db_conn,
+        conversation_id,
+        direction="inbound",
+        body="yesterday",
+        customer_phone=_PHONE,
+        created_at=yesterday,
+    )
+    record_token_usage(
+        db_conn,
+        conversation_id=conversation_id,
+        customer_phone=_PHONE,
+        usage=UsageTotals(90, 5, 95),
+        now=yesterday + timedelta(minutes=1),
+    )
+    seed_message(
+        db_conn,
+        conversation_id,
+        direction="inbound",
+        body="hello again",
+        customer_phone=_PHONE,
+        created_at=_NOW,
+    )
+
+    check_token_spend_caps(
+        db_conn,
+        conversation_id=conversation_id,
+        now=_NOW,
+        settings=settings,
+        usage_so_far=UsageTotals(8, 2, 10),
+    )
+
+
+def test_check_token_spend_caps_still_counts_usage_from_the_current_session(
+    db_conn: psycopg.Connection[Any],
+) -> None:
+    settings = _settings(max_tokens_per_conversation=100)
+    conversation_id = seed_conversation(db_conn, customer_phone=_PHONE)
+    seed_message(
+        db_conn,
+        conversation_id,
+        direction="inbound",
+        body="hello",
+        customer_phone=_PHONE,
+        created_at=_NOW,
+    )
+    record_token_usage(
+        db_conn,
+        conversation_id=conversation_id,
+        customer_phone=_PHONE,
+        usage=UsageTotals(90, 5, 95),
+        now=_NOW + timedelta(minutes=1),
+    )
+
+    with pytest.raises(TokenSpendCapExceededError):
+        check_token_spend_caps(
+            db_conn,
+            conversation_id=conversation_id,
+            now=_NOW,
+            settings=settings,
+            usage_so_far=UsageTotals(8, 2, 10),
+        )

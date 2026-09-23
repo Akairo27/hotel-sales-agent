@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import fields
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 from typing import Any
 
 import psycopg
@@ -35,6 +35,7 @@ from tests.integration._seed import (
     seed_allotment_nights,
     seed_conversation,
     seed_hotel_and_room_type,
+    seed_message,
     seed_price_rule,
     seed_quote,
     seed_season,
@@ -600,3 +601,77 @@ def test_output_guard_fallback_message_is_always_allowed(
     )
     assert with_quote_verdict.allowed is True
     assert with_quote_verdict.escalation_id is None
+
+
+def _seed_two_sessions(
+    db_conn: psycopg.Connection[Any],
+) -> tuple[int, int]:
+    """One conversation with a quote from yesterday's session (777,000
+    halalas) and a quote from today's (135,000). Returns the conversation
+    id and today's quote id."""
+    hotel_id, room_type_id = seed_hotel_and_room_type(db_conn)
+    conversation_id = seed_conversation(db_conn)
+    yesterday = _NOW - timedelta(days=1)
+    seed_message(
+        db_conn,
+        conversation_id,
+        direction="inbound",
+        body="yesterday",
+        created_at=yesterday,
+    )
+    seed_quote(
+        db_conn,
+        hotel_id,
+        room_type_id,
+        conversation_id=conversation_id,
+        ask_price_total=777_000,
+        min_allowed_total=500_000,
+        created_at=yesterday + timedelta(minutes=1),
+    )
+    seed_message(
+        db_conn, conversation_id, direction="inbound", body="hello", created_at=_NOW
+    )
+    todays_quote = seed_quote(
+        db_conn,
+        hotel_id,
+        room_type_id,
+        conversation_id=conversation_id,
+        ask_price_total=135_000,
+        min_allowed_total=90_000,
+        created_at=_NOW + timedelta(minutes=1),
+    )
+    return conversation_id, todays_quote
+
+
+def test_load_allowed_amounts_ignores_quotes_from_an_earlier_session(
+    db_conn: psycopg.Connection[Any],
+) -> None:
+    conversation_id, todays_quote = _seed_two_sessions(db_conn)
+
+    result = load_allowed_amounts(db_conn, conversation_id)
+
+    assert result.quote_ids == (todays_quote,)
+    assert 135_000 in result.amounts_halalas
+    assert 777_000 not in result.amounts_halalas
+
+
+def test_a_reply_stating_yesterdays_price_is_blocked_but_todays_is_allowed(
+    db_conn: psycopg.Connection[Any],
+) -> None:
+    """A price quoted in an earlier session may have gone stale (demand
+    and lead time move), so restating it must not pass the guard."""
+    conversation_id, _ = _seed_two_sessions(db_conn)
+
+    stale = enforce_outbound_text(
+        db_conn,
+        conversation_id=conversation_id,
+        text=f"The total is {format_halalas_as_sar(777_000)}.",
+    )
+    current = enforce_outbound_text(
+        db_conn,
+        conversation_id=conversation_id,
+        text=f"The total is {format_halalas_as_sar(135_000)}.",
+    )
+
+    assert stale.allowed is False
+    assert current.allowed is True

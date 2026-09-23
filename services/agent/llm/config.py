@@ -25,6 +25,7 @@ from __future__ import annotations
 import os
 from collections.abc import Mapping
 from dataclasses import dataclass
+from datetime import timedelta
 from decimal import Decimal, InvalidOperation
 
 from services.agent.llm.errors import LlmConfigurationError
@@ -72,6 +73,12 @@ ALLOWED_MODELS: frozenset[str] = GEMINI_MODELS | frozenset(OPENROUTER_ROUTES)
 # ARCHITECTURE.md §7: "the last 10 messages only" is sent as context on
 # every call — not the full conversation history.
 MESSAGE_WINDOW = 10
+
+# A conversation session ends after this long with no message in either
+# direction (see services.agent.llm.session). Chosen by the owner
+# (2026-09-24): long enough that a customer stepping away for a few hours
+# keeps their context, short enough that "hello" the next day starts fresh.
+SESSION_IDLE_GAP = timedelta(hours=6)
 
 # A customer turn against check_availability/get_quote resolves in at most
 # a couple of tool calls. Beyond this, the loop stops and raises rather

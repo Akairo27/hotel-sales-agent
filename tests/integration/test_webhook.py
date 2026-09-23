@@ -20,7 +20,7 @@ import json
 import logging
 from collections.abc import Iterator
 from dataclasses import dataclass, field
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from typing import Any
 
@@ -40,6 +40,7 @@ from services.agent.llm.model_types import (
     ModelUsage,
     ToolCall,
     Turn,
+    UserTurn,
 )
 from services.agent.main import app
 from services.agent.output_guard.enforcement import (
@@ -956,12 +957,23 @@ def test_receive_message_escalates_and_sends_fallback_when_the_spend_cap_is_exce
     # webhook) — the point of this test is what happens on the *next*
     # inbound message against an already-capped conversation.
     conversation_id = seed_conversation(db_conn, customer_phone=_PHONE)
+    # The token cap counts the conversation's CURRENT session only
+    # (caps.check_token_spend_caps), so this usage has to sit inside it: an
+    # earlier message 10 minutes ago opens the session, and the usage is
+    # recorded after that. Usage from before the session opened is proven
+    # not to count in tests/integration/test_llm_caps.py.
+    db_conn.execute(
+        "INSERT INTO messages (conversation_id, customer_phone, direction, "
+        "whatsapp_message_id, body, created_at) "
+        "VALUES (%s, %s, 'inbound', 'wamid.earlier', 'earlier', %s)",
+        (conversation_id, _PHONE, datetime.now(UTC) - timedelta(minutes=10)),
+    )
     record_token_usage(
         db_conn,
         conversation_id=conversation_id,
         customer_phone=_PHONE,
         usage=UsageTotals(50, 0, 50),
-        now=datetime(2026, 9, 1, tzinfo=UTC),
+        now=datetime.now(UTC) - timedelta(minutes=5),
     )
     payload = _whatsapp_payload(
         wa_id=_WA_ID, message_id="wamid.capped", body="hi again"
@@ -978,7 +990,8 @@ def test_receive_message_escalates_and_sends_fallback_when_the_spend_cap_is_exce
     assert sender.calls[0][1] == OUTPUT_GUARD_FALLBACK_MESSAGE
     inbound_row = db_conn.execute(
         "SELECT whatsapp_message_id FROM messages "
-        "WHERE conversation_id = %s AND direction = 'inbound'",
+        "WHERE conversation_id = %s AND direction = 'inbound' "
+        "AND whatsapp_message_id = 'wamid.capped'",
         (conversation_id,),
     ).fetchone()
     assert inbound_row == ("wamid.capped",)
@@ -2141,3 +2154,132 @@ def test_get_db_connection_opens_a_working_connection_and_closes_it(
         assert row == (1,)
 
     assert conn.closed
+
+
+@dataclass
+class _RecordingTransport:
+    """Records the turns every model call is given, to prove what the
+    model can see; always answers with a plain text reply."""
+
+    turns_seen: list[list[Turn]] = field(default_factory=list)
+
+    async def generate(
+        self, *, turns: list[Turn], system_instruction: str
+    ) -> ModelResponse:
+        del system_instruction
+        self.turns_seen.append(list(turns))
+        return ModelResponse(
+            turn=ModelTurn(text="hello from the model", tool_calls=()),
+            usage=ModelUsage(prompt_tokens=10, candidates_tokens=5, total_tokens=15),
+        )
+
+
+_EARLIER_QUESTION = "a room for 5-7 October"
+_EARLIER_ANSWER = "Sure, for 5-7 October."
+
+
+def _seed_earlier_exchange(
+    db_conn: psycopg.Connection[Any], conversation_id: int, *, ago: timedelta
+) -> None:
+    then = datetime.now(UTC) - ago
+    seed_message(
+        db_conn,
+        conversation_id,
+        direction="inbound",
+        body=_EARLIER_QUESTION,
+        customer_phone=_PHONE,
+        created_at=then,
+    )
+    seed_message(
+        db_conn,
+        conversation_id,
+        direction="outbound",
+        body=_EARLIER_ANSWER,
+        customer_phone=_PHONE,
+        created_at=then + timedelta(seconds=30),
+    )
+
+
+def _turn_count(db_conn: psycopg.Connection[Any], conversation_id: int) -> int:
+    row = db_conn.execute(
+        "SELECT turn_count FROM conversations WHERE id = %s", (conversation_id,)
+    ).fetchone()
+    assert row is not None
+    return int(row[0])
+
+
+def test_a_message_after_an_idle_gap_starts_a_fresh_session(
+    webhook_client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+    db_conn: psycopg.Connection[Any],
+) -> None:
+    """A bare "hello" ten hours later must not show the model the earlier
+    dates, and the turn counter starts over instead of carrying the whole
+    history of this phone number."""
+    _set_llm_settings(monkeypatch, _settings())
+    transport = _RecordingTransport()
+    _set_transport(monkeypatch, transport)
+    conversation_id = seed_conversation(db_conn, customer_phone=_PHONE, turn_count=7)
+    _seed_earlier_exchange(db_conn, conversation_id, ago=timedelta(hours=10))
+    payload = _whatsapp_payload(wa_id=_WA_ID, message_id="wamid.fresh", body="hello")
+
+    response = _post(
+        webhook_client, payload, signature=_sign(json.dumps(payload).encode())
+    )
+
+    assert response.status_code == 200
+    assert transport.turns_seen == [[UserTurn("hello")]]
+    # Reset to 0 as the message arrived, then this one turn counted.
+    assert _turn_count(db_conn, conversation_id) == 1
+
+
+def test_a_message_within_the_idle_gap_keeps_the_context_and_counters(
+    webhook_client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+    db_conn: psycopg.Connection[Any],
+) -> None:
+    _set_llm_settings(monkeypatch, _settings())
+    transport = _RecordingTransport()
+    _set_transport(monkeypatch, transport)
+    conversation_id = seed_conversation(db_conn, customer_phone=_PHONE, turn_count=7)
+    _seed_earlier_exchange(db_conn, conversation_id, ago=timedelta(hours=1))
+    payload = _whatsapp_payload(
+        wa_id=_WA_ID, message_id="wamid.continued", body="and how much?"
+    )
+
+    response = _post(
+        webhook_client, payload, signature=_sign(json.dumps(payload).encode())
+    )
+
+    assert response.status_code == 200
+    assert transport.turns_seen == [
+        [
+            UserTurn(_EARLIER_QUESTION),
+            ModelTurn(text=_EARLIER_ANSWER, tool_calls=()),
+            UserTurn("and how much?"),
+        ]
+    ]
+    assert _turn_count(db_conn, conversation_id) == 8
+
+
+def test_last_message_at_moves_with_the_messages_of_a_turn(
+    webhook_client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+    db_conn: psycopg.Connection[Any],
+) -> None:
+    _set_llm_settings(monkeypatch, _settings())
+    _set_transport(monkeypatch, _RecordingTransport())
+    conversation_id = seed_conversation(db_conn, customer_phone=_PHONE)
+    db_conn.execute(
+        "UPDATE conversations SET last_message_at = %s WHERE id = %s",
+        (datetime(2020, 1, 1, tzinfo=UTC), conversation_id),
+    )
+    payload = _whatsapp_payload(wa_id=_WA_ID, message_id="wamid.stamp", body="hi")
+
+    _post(webhook_client, payload, signature=_sign(json.dumps(payload).encode()))
+
+    row = db_conn.execute(
+        "SELECT last_message_at FROM conversations WHERE id = %s", (conversation_id,)
+    ).fetchone()
+    assert row is not None
+    assert abs(datetime.now(UTC) - row[0]) < timedelta(minutes=1)

@@ -21,6 +21,13 @@ cost outright, so the safest place to keep it out of a Python value that
 could later reach a log line is to never read it into one at all. This is
 the same whitelist-by-hand discipline dispatch.quote_to_tool_result
 already uses for what the model sees, pushed one layer further out.
+
+Only quotes from the conversation's CURRENT SESSION count
+(services/agent/llm/session.py). conversations has one row per phone
+number forever, so without this a price quoted yesterday would still let a
+reply pass today, long after the demand and lead-time inputs that produced
+it have moved. A conversation with no messages has no session, and its
+quotes are read without a lower bound.
 """
 
 from __future__ import annotations
@@ -29,6 +36,7 @@ from typing import Any
 
 import psycopg
 
+from services.agent.llm.session import load_session_start
 from services.agent.output_guard.decision import AllowedAmounts
 
 # migration 0009's quotes_all_nights_are_complete constraint guarantees
@@ -46,6 +54,7 @@ _LOAD_ALLOWED_AMOUNTS_SQL = """
          FROM jsonb_array_elements(q.nights) AS night) AS night_floors
     FROM quotes AS q
     WHERE q.conversation_id = %s
+      AND q.created_at >= COALESCE(%s, '-infinity'::timestamptz)
     ORDER BY q.id
 """
 
@@ -53,17 +62,20 @@ _LOAD_ALLOWED_AMOUNTS_SQL = """
 def load_allowed_amounts(
     conn: psycopg.Connection[Any], conversation_id: int
 ) -> AllowedAmounts:
-    """Reads every quote for conversation_id and builds the set of
-    amounts a reply may legitimately state, plus the floor none may fall
-    below.
+    """Reads every quote from conversation_id's current session and builds
+    the set of amounts a reply may legitimately state, plus the floor none
+    may fall below.
 
     Returns an AllowedAmounts with an empty amounts_halalas and
-    floor_halalas=None when the conversation has no quotes yet — every
-    stated amount is then illegitimate by construction, which is correct:
-    a reply that states any price before get_quote has ever run for this
-    conversation has nothing legitimate to have copied it from.
+    floor_halalas=None when the session has no quotes yet — every stated
+    amount is then illegitimate by construction, which is correct: a reply
+    that states any price before get_quote has run in this session has
+    nothing legitimate to have copied it from.
     """
-    rows = conn.execute(_LOAD_ALLOWED_AMOUNTS_SQL, (conversation_id,)).fetchall()
+    session_start = load_session_start(conn, conversation_id)
+    rows = conn.execute(
+        _LOAD_ALLOWED_AMOUNTS_SQL, (conversation_id, session_start)
+    ).fetchall()
 
     quote_ids: list[int] = []
     amounts: set[int] = set()
