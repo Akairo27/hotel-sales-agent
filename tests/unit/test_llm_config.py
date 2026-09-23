@@ -5,6 +5,8 @@ from decimal import Decimal
 import pytest
 
 from services.agent.llm.config import (
+    ALLOWED_MODELS,
+    OPENROUTER_ROUTES,
     LlmSettings,
     OpenRouterRoute,
     load_llm_settings,
@@ -182,3 +184,34 @@ def test_an_openrouter_model_requires_the_openrouter_key(
     del env["OPENROUTER_API_KEY"]
     with pytest.raises(LlmConfigurationError, match="OPENROUTER_API_KEY"):
         load_llm_settings(env)
+
+
+_GLM_MODEL = "z-ai/glm-5.3-20260816"
+
+
+def test_the_shipped_route_is_the_recorded_glm_decision() -> None:
+    """Pins ARCHITECTURE.md §10's decision (Crusoe primary, InferenceNet
+    secondary, GLM-5.3 only, Crusoe's rates as the higher of the two): any
+    change to the reviewed route must show up here as a deliberate diff."""
+    assert set(OPENROUTER_ROUTES) == {_GLM_MODEL}
+    assert _GLM_MODEL in ALLOWED_MODELS
+    route = OPENROUTER_ROUTES[_GLM_MODEL]
+    assert route.providers == ("crusoe", "inference-net")
+    assert route.token_rates == TokenRates(
+        input_usd_per_million_tokens=Decimal("1.40"),
+        output_usd_per_million_tokens=Decimal("4.40"),
+    )
+
+
+def test_the_shipped_route_loads_with_the_openrouter_key_only() -> None:
+    env = dict(_VALID_ENV)
+    env["LLM_MODEL"] = _GLM_MODEL
+    env["OPENROUTER_API_KEY"] = "test-openrouter-key"
+    del env["LLM_API_KEY"]
+
+    settings = load_llm_settings(env)
+
+    assert settings.model == _GLM_MODEL
+    assert settings.api_key == "test-openrouter-key"
+    assert settings.openrouter_route == OPENROUTER_ROUTES[_GLM_MODEL]
+    assert settings.token_rates == OPENROUTER_ROUTES[_GLM_MODEL].token_rates

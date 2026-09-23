@@ -570,9 +570,11 @@ def _openrouter_provider_routing(providers: tuple[str, ...]) -> dict[str, object
 
     `only` is an allowlist, deliberately not `ignore` (a denylist):
     deny-by-default, so a provider nobody reviewed can never receive a
-    customer's conversation. allow_fallbacks=False so OpenRouter never
-    retries across providers on its own -- this module's retry loop stays
-    the single, visible owner of retries. data_collection="deny" and
+    customer's conversation. allow_fallbacks=False keeps OpenRouter from
+    ever going outside that list; inside it, per OpenRouter's docs, it
+    still tries the next provider in `order` when one is unavailable
+    (that is how a secondary provider is used), while retrying the whole
+    request stays this module's job. data_collection="deny" and
     zdr=True are enforced by OpenRouter per request. require_parameters
     stops a provider that would silently ignore `tools` from serving a
     request whose whole purpose is tool calling.

@@ -15,7 +15,7 @@ from decimal import Decimal
 import pytest
 
 from services.agent.llm.client import GeminiTransport, OpenRouterTransport
-from services.agent.llm.config import LlmSettings, OpenRouterRoute
+from services.agent.llm.config import LlmSettings, OpenRouterRoute, load_llm_settings
 from services.agent.llm.errors import LlmConfigurationError
 from services.agent.llm.pricing import TokenRates
 from services.agent.webhook import (
@@ -261,3 +261,18 @@ def test_get_model_transport_returns_an_openrouter_transport_for_a_routed_model(
 def test_get_model_transport_refuses_a_route_with_no_approved_provider() -> None:
     with pytest.raises(LlmConfigurationError, match="no OpenRouter provider"):
         get_model_transport(_openrouter_settings(()))
+
+
+def test_get_model_transport_builds_a_transport_for_the_shipped_glm_route() -> None:
+    settings = load_llm_settings(
+        {
+            "LLM_MODEL": "z-ai/glm-5.3-20260816",
+            "OPENROUTER_API_KEY": "test-openrouter-key",
+            "MAX_CONVERSATION_TURNS": "20",
+            "LLM_MAX_TOKENS_PER_CONVERSATION": "50000",
+            "LLM_MAX_SPEND_PER_DAY_USD": "5.00",
+            "MAX_MESSAGES_PER_NUMBER_PER_DAY": "50",
+        }
+    )
+
+    assert isinstance(get_model_transport(settings), OpenRouterTransport)
