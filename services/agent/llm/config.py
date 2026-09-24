@@ -80,6 +80,16 @@ MESSAGE_WINDOW = 10
 # keeps their context, short enough that "hello" the next day starts fresh.
 SESSION_IDLE_GAP = timedelta(hours=6)
 
+# token_usage rows are stamped with the application clock at the start of a
+# request (webhook.receive_message's `now`), while messages -- and so a
+# session's start -- are stamped by the database when inserted. A session's
+# first turn therefore records its usage a moment BEFORE its own first
+# message: the fast path's latency plus any clock skew. The per-session
+# token sum looks back this far past the session start so that turn still
+# counts. An earlier session's usage is always at least SESSION_IDLE_GAP
+# older than the start, so this can never pull it in.
+SESSION_CLOCK_SKEW_TOLERANCE = timedelta(minutes=1)
+
 # A customer turn against check_availability/get_quote resolves in at most
 # a couple of tool calls. Beyond this, the loop stops and raises rather
 # than continuing to spend tokens (CLAUDE.md §9's per-conversation cap).

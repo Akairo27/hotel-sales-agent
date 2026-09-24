@@ -30,7 +30,7 @@ from typing import TYPE_CHECKING, Any
 
 import psycopg
 
-from services.agent.llm.config import LlmSettings
+from services.agent.llm.config import SESSION_CLOCK_SKEW_TOLERANCE, LlmSettings
 from services.agent.llm.errors import (
     DailySpendCapExceededError,
     TokenSpendCapExceededError,
@@ -108,13 +108,20 @@ def check_token_spend_caps(
     # Per session, not for the life of the phone number: conversations has
     # one row per number forever, so an unbounded sum would eventually
     # escalate every returning customer. A conversation with no messages
-    # has no session, and is summed without a lower bound.
+    # has no session, and is summed without a lower bound. The bound is
+    # loosened by SESSION_CLOCK_SKEW_TOLERANCE: the session's first turn is
+    # stamped by a different clock than the message that opens the session.
     session_start = load_session_start(conn, conversation_id)
+    usage_since = (
+        session_start - SESSION_CLOCK_SKEW_TOLERANCE
+        if session_start is not None
+        else None
+    )
     conversation_row = conn.execute(
         "SELECT COALESCE(SUM(total_tokens), 0) FROM token_usage "
         "WHERE conversation_id = %s "
         "AND created_at >= COALESCE(%s, '-infinity'::timestamptz)",
-        (conversation_id, session_start),
+        (conversation_id, usage_since),
     ).fetchone()
     if conversation_row is None:
         raise RuntimeError("SELECT SUM(...) with no GROUP BY returned no row")
