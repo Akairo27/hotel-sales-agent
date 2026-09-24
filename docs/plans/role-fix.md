@@ -16,7 +16,7 @@ Written 2026-09-24. This file contains no secrets: only role names, variable nam
 ## 2. Approval checklist (what the owner approves before implementation starts)
 
 1. The design in section 4 and the grant manifest in section 5.
-2. The PR contents in section 6, including the two docs changes flagged there.
+2. The PR contents in section 6.
 3. The cutover order in section 7.
 4. The draft host-level steps in section 8 (each is shown again, and none is run before approval).
 5. The `statement_timeout` values in section 4 (proposed, not decided).
@@ -68,7 +68,7 @@ Written 2026-09-24. This file contains no secrets: only role names, variable nam
 - **Comment fix:** `tests/conftest.py:125` claims tests run "at the same privilege level" as production, which becomes false.
 - **Units in `ops/`:** `hotel-worker.service` and `hotel-agent.service` gain `User=`/`Group=`, the new interpreter path and hardening; the worker points at `worker.env`.
 - **`docs/deployment.md`:** rule 5 is amended to allow dedicated service accounts for `hotel-agent` and `hotel-worker` only, recording the reason: the internet-facing admin process must not share a UID with the agent, or it could read the agent's process environment (database credential, LLM key, WhatsApp token). The non-root layout is documented.
-- **`ARCHITECTURE.md`:** a subsection recording the role decisions. **Flagged for the owner:** the same PR would also update the status wording in section 4 (pricing formula and floor, location fields including the `district_name` exception, `FAREAST` direction), which still reads "proposed", to "approved as a plan; not built". Say if this should be a separate docs PR instead.
+- **`ARCHITECTURE.md`:** a subsection recording the role decisions. The status wording for the pricing, location and `FAREAST` approvals is handled by the separate docs PR #57, not by this PR.
 - **Not touched:** `SETUP.md` (the owner's local change stays; its lines about `DATABASE_URL` will need an update later) and migration 0001's false comment (a migration that has run is never edited).
 
 ## 7. Cutover (who does what)
