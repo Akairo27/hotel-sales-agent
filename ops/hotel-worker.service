@@ -1,0 +1,36 @@
+# One worker pass (services/worker/runner.py): release expired holds.
+# Started by hotel-worker.timer every minute; not enabled on its own.
+#
+# Install (root, one time — nothing here is applied by merging the PR):
+#   cp ops/hotel-worker.service ops/hotel-worker.timer /etc/systemd/system/
+#   systemctl daemon-reload
+#   systemctl start hotel-worker.service      # one manual pass first
+#   journalctl -u hotel-worker.service -n 5   # expect a worker_run_finished line
+#   systemctl enable --now hotel-worker.timer
+#
+# Same environment file and working tree as hotel-agent.service, so
+# DATABASE_URL is the same value. No restart of hotel-agent is involved.
+
+[Unit]
+Description=Hotel Sales Agent worker (one pass: release expired holds)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=/srv/hotel-admin/app
+EnvironmentFile=/etc/hotel-admin/agent.env
+# The venv's interpreter, not `uv run`: uv would re-check the lockfile and
+# environment on every one of the ~1,440 daily passes, and could write to
+# the tree the live agent runs from.
+ExecStart=/srv/hotel-admin/app/.venv/bin/python -m services.worker
+# A oneshot unit has no start timeout by default; without this a hung pass
+# would block every later one. Kept under the timer's one-minute cadence.
+TimeoutStartSec=50
+Environment=PYTHONDONTWRITEBYTECODE=1
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=read-only
+StandardOutput=journal
+StandardError=journal
