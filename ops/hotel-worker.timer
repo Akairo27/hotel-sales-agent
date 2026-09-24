@@ -1,0 +1,21 @@
+# Runs hotel-worker.service one minute after each pass finishes — ARCHITECTURE.md
+# §6 ("the worker runs every minute"). Measured from the end of the last
+# pass, so passes never overlap; a hung pass is killed by the service's own
+# TimeoutStartSec and the timer carries on. See hotel-worker.service for
+# installation.
+
+[Unit]
+Description=Run the Hotel Sales Agent worker every minute
+
+[Timer]
+# First pass shortly after the timer starts (at boot, or on `enable --now`);
+# OnUnitInactiveSec alone would never fire before the service had run once.
+OnActiveSec=30s
+OnUnitInactiveSec=60s
+# systemd's default accuracy is one minute, which would let a "one minute"
+# timer drift by up to another.
+AccuracySec=1s
+Unit=hotel-worker.service
+
+[Install]
+WantedBy=timers.target
