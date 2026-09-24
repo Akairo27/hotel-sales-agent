@@ -2,7 +2,10 @@
 
 Two closed decisions this module exists to enforce:
 - "The last 10 messages only are sent with every call, not the full
-  history." MESSAGE_WINDOW (services/agent/llm/config.py) is that number.
+  history." MESSAGE_WINDOW (services/agent/llm/config.py) is that number,
+  and the window never reaches back past the start of the current session
+  (services/agent/llm/session.py): a customer returning after an idle gap
+  starts from a clean context.
 - "Customer identity: name only, without the phone number. The phone
   number stays entirely outside the model's context — identity matching
   and reading/writing customer_phone happen in the application code
@@ -30,6 +33,7 @@ import psycopg
 
 from services.agent.llm.errors import ConversationNotFoundError
 from services.agent.llm.model_types import ModelTurn, Turn, UserTurn
+from services.agent.llm.session import load_session_start
 
 _INBOUND = "inbound"
 
@@ -83,14 +87,19 @@ def load_conversation_state(
 def load_recent_messages(
     conn: psycopg.Connection[Any], conversation_id: int, *, limit: int
 ) -> list[MessageRecord]:
-    """Reads the most recent `limit` messages for a conversation, oldest
-    first — the exact window ARCHITECTURE.md §7 fixes at 10 messages, not
-    the full conversation history.
+    """Reads the most recent `limit` messages of the conversation's
+    current session, oldest first — the exact window ARCHITECTURE.md §7
+    fixes at 10 messages, not the full conversation history, and never
+    reaching back across an idle gap (see session.load_session_start).
     """
+    session_start = load_session_start(conn, conversation_id)
+    if session_start is None:
+        return []
     rows = conn.execute(
-        "SELECT direction, body FROM messages WHERE conversation_id = %s "
+        "SELECT direction, body FROM messages "
+        "WHERE conversation_id = %s AND created_at >= %s "
         "ORDER BY created_at DESC, id DESC LIMIT %s",
-        (conversation_id, limit),
+        (conversation_id, session_start, limit),
     ).fetchall()
     messages = [MessageRecord(direction=row[0], body=row[1]) for row in rows]
     messages.reverse()

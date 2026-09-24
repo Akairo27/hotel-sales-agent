@@ -275,14 +275,17 @@ def seed_quote(
     ask_price_total: int = 20_000,
     min_allowed_total: int = 10_000,
     nights: str = _VALID_QUOTE_NIGHTS,
+    created_at: datetime | None = None,
 ) -> int:
+    """created_at defaults to now(); pass one to place the quote at an
+    exact time (session-boundary tests)."""
     return returning_id(
         conn,
         "INSERT INTO quotes (hotel_id, room_type_id, check_in, check_out, rooms, "
         "ask_price_total, min_allowed_total, nights, negotiation_open, "
-        "customer_phone, conversation_id) "
+        "customer_phone, conversation_id, created_at) "
         "VALUES (%s, %s, '2026-09-01', '2026-09-02', 1, %s, %s, %s::jsonb, "
-        "true, %s, %s) RETURNING id",
+        "true, %s, %s, COALESCE(%s, now())) RETURNING id",
         (
             hotel_id,
             room_type_id,
@@ -291,6 +294,7 @@ def seed_quote(
             nights,
             customer_phone,
             conversation_id,
+            created_at,
         ),
     )
 
@@ -350,16 +354,17 @@ def seed_message(
     direction: str,
     body: str,
     customer_phone: str = "+966500000001",
+    created_at: datetime | None = None,
 ) -> int:
-    """Inserts one messages row. created_at is left to its DEFAULT now() —
-    callers that need a specific ordering insert in the order they want
-    created_at to sort in and rely on the column's monotonically
-    increasing default, same as every other append-only timestamp in this
-    schema.
+    """Inserts one messages row. created_at defaults to now() — callers
+    that need a specific ordering insert in the order they want created_at
+    to sort in and rely on the column's monotonically increasing default,
+    same as every other append-only timestamp in this schema. Pass one to
+    place the message at an exact time (session-boundary tests).
     """
     return returning_id(
         conn,
-        "INSERT INTO messages (conversation_id, customer_phone, direction, body) "
-        "VALUES (%s, %s, %s, %s) RETURNING id",
-        (conversation_id, customer_phone, direction, body),
+        "INSERT INTO messages (conversation_id, customer_phone, direction, body, "
+        "created_at) VALUES (%s, %s, %s, %s, COALESCE(%s, now())) RETURNING id",
+        (conversation_id, customer_phone, direction, body, created_at),
     )

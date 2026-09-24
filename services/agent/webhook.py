@@ -154,6 +154,10 @@ from services.agent.llm.errors import (
     UsageUnavailableError,
     read_usage_so_far,
 )
+from services.agent.llm.session import (
+    start_new_session_if_idle,
+    touch_last_message_at,
+)
 from services.agent.output_guard.enforcement import (
     OUTPUT_GUARD_FALLBACK_MESSAGE,
     enforce_outbound_text,
@@ -391,6 +395,7 @@ def _insert_outbound_message(
         "VALUES (%s, %s, 'outbound', %s, %s)",
         (conversation_id, customer_phone, whatsapp_message_id, body),
     )
+    touch_last_message_at(conn, conversation_id=conversation_id)
 
 
 async def _send_or_log_failure(
@@ -1065,6 +1070,7 @@ async def receive_message(
         conversation_id = _find_or_create_conversation(
             conn, customer_phone=inbound.customer_phone
         )
+        start_new_session_if_idle(conn, conversation_id=conversation_id, now=now)
         message_id = _insert_inbound_message(
             conn,
             conversation_id=conversation_id,
@@ -1074,6 +1080,7 @@ async def receive_message(
         )
         if message_id is None:
             return JSONResponse({"status": "duplicate"})
+        touch_last_message_at(conn, conversation_id=conversation_id)
 
         try:
             check_message_rate_cap(

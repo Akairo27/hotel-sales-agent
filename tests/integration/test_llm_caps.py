@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import json
 import logging
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from typing import Any
 
@@ -23,7 +23,7 @@ from services.agent.llm.caps import (
     increment_turn_count,
     record_token_usage,
 )
-from services.agent.llm.config import LlmSettings
+from services.agent.llm.config import SESSION_CLOCK_SKEW_TOLERANCE, LlmSettings
 from services.agent.llm.conversation import UsageTotals
 from services.agent.llm.errors import (
     DailySpendCapExceededError,
@@ -484,3 +484,164 @@ def test_check_message_rate_cap_is_isolated_per_phone_number(
     check_message_rate_cap(
         db_conn, customer_phone=_OTHER_PHONE, now=now, settings=settings
     )
+
+
+def test_check_token_spend_caps_ignores_usage_from_an_earlier_session(
+    db_conn: psycopg.Connection[Any],
+) -> None:
+    """conversations has one row per phone number forever, so the
+    per-conversation cap must count the current session only: 95 tokens
+    spent yesterday must not leave a returning customer 5 tokens from an
+    escalation."""
+    settings = _settings(max_tokens_per_conversation=100)
+    conversation_id = seed_conversation(db_conn, customer_phone=_PHONE)
+    yesterday = _NOW - timedelta(days=1)
+    seed_message(
+        db_conn,
+        conversation_id,
+        direction="inbound",
+        body="yesterday",
+        customer_phone=_PHONE,
+        created_at=yesterday,
+    )
+    record_token_usage(
+        db_conn,
+        conversation_id=conversation_id,
+        customer_phone=_PHONE,
+        usage=UsageTotals(90, 5, 95),
+        now=yesterday + timedelta(minutes=1),
+    )
+    seed_message(
+        db_conn,
+        conversation_id,
+        direction="inbound",
+        body="hello again",
+        customer_phone=_PHONE,
+        created_at=_NOW,
+    )
+
+    check_token_spend_caps(
+        db_conn,
+        conversation_id=conversation_id,
+        now=_NOW,
+        settings=settings,
+        usage_so_far=UsageTotals(8, 2, 10),
+    )
+
+
+def test_check_token_spend_caps_still_counts_usage_from_the_current_session(
+    db_conn: psycopg.Connection[Any],
+) -> None:
+    settings = _settings(max_tokens_per_conversation=100)
+    conversation_id = seed_conversation(db_conn, customer_phone=_PHONE)
+    seed_message(
+        db_conn,
+        conversation_id,
+        direction="inbound",
+        body="hello",
+        customer_phone=_PHONE,
+        created_at=_NOW,
+    )
+    record_token_usage(
+        db_conn,
+        conversation_id=conversation_id,
+        customer_phone=_PHONE,
+        usage=UsageTotals(90, 5, 95),
+        now=_NOW + timedelta(minutes=1),
+    )
+
+    with pytest.raises(TokenSpendCapExceededError):
+        check_token_spend_caps(
+            db_conn,
+            conversation_id=conversation_id,
+            now=_NOW,
+            settings=settings,
+            usage_so_far=UsageTotals(8, 2, 10),
+        )
+
+
+def _open_session_at(
+    db_conn: psycopg.Connection[Any], conversation_id: int, session_start: datetime
+) -> None:
+    """A message a day earlier and one at `session_start`, so the session
+    provably begins exactly there."""
+    for created_at in (session_start - timedelta(days=1), session_start):
+        seed_message(
+            db_conn,
+            conversation_id,
+            direction="inbound",
+            body="m",
+            customer_phone=_PHONE,
+            created_at=created_at,
+        )
+
+
+def test_check_token_spend_caps_counts_first_turn_usage_stamped_before_the_session(
+    db_conn: psycopg.Connection[Any],
+) -> None:
+    """Regression: usage is stamped by the application clock at the start
+    of a request, the opening message by the database a moment later, so a
+    session's first turn records usage slightly BEFORE the session starts.
+    It must still count, or a capped customer's next message would reach
+    the model."""
+    settings = _settings(max_tokens_per_conversation=100)
+    conversation_id = seed_conversation(db_conn, customer_phone=_PHONE)
+    _open_session_at(db_conn, conversation_id, _NOW)
+    record_token_usage(
+        db_conn,
+        conversation_id=conversation_id,
+        customer_phone=_PHONE,
+        usage=UsageTotals(90, 5, 95),
+        now=_NOW - timedelta(seconds=5),
+    )
+
+    with pytest.raises(TokenSpendCapExceededError):
+        check_token_spend_caps(
+            db_conn,
+            conversation_id=conversation_id,
+            now=_NOW,
+            settings=settings,
+            usage_so_far=UsageTotals(8, 2, 10),
+        )
+
+
+def test_check_token_spend_caps_skew_tolerance_is_exact_and_stays_small(
+    db_conn: psycopg.Connection[Any],
+) -> None:
+    """Usage exactly the tolerance before the session start counts; one
+    second earlier does not. The tolerance is tiny next to the session
+    idle gap, so a previous session's usage can never be pulled in."""
+    settings = _settings(max_tokens_per_conversation=100)
+    conversation_id = seed_conversation(db_conn, customer_phone=_PHONE)
+    _open_session_at(db_conn, conversation_id, _NOW)
+    record_token_usage(
+        db_conn,
+        conversation_id=conversation_id,
+        customer_phone=_PHONE,
+        usage=UsageTotals(90, 5, 95),
+        now=_NOW - SESSION_CLOCK_SKEW_TOLERANCE - timedelta(seconds=1),
+    )
+
+    check_token_spend_caps(
+        db_conn,
+        conversation_id=conversation_id,
+        now=_NOW,
+        settings=settings,
+        usage_so_far=UsageTotals(8, 2, 10),
+    )
+
+    record_token_usage(
+        db_conn,
+        conversation_id=conversation_id,
+        customer_phone=_PHONE,
+        usage=UsageTotals(90, 5, 95),
+        now=_NOW - SESSION_CLOCK_SKEW_TOLERANCE,
+    )
+    with pytest.raises(TokenSpendCapExceededError):
+        check_token_spend_caps(
+            db_conn,
+            conversation_id=conversation_id,
+            now=_NOW,
+            settings=settings,
+            usage_so_far=UsageTotals(8, 2, 10),
+        )
