@@ -1,0 +1,25 @@
+# Copy of /etc/systemd/system/hotel-agent.service as installed on the trial
+# host on 2026-09-24. It holds no secrets: the only environment source is the
+# EnvironmentFile= path, which systemd reads as root. It runs as root today
+# (no User=); moving it to a non-root service user is planned separately.
+#
+# Editing this file does not change the host. To apply a change (root):
+#   cp ops/hotel-agent.service /etc/systemd/system/hotel-agent.service
+#   systemctl daemon-reload
+# then restart hotel-agent, which is done only with the owner's confirmation.
+
+[Unit]
+Description=Hotel Sales Agent webhook
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=exec
+WorkingDirectory=/srv/hotel-admin/app
+EnvironmentFile=/etc/hotel-admin/agent.env
+ExecStart=/root/.local/bin/uv run uvicorn services.agent.main:app --host 127.0.0.1 --port 8000
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
