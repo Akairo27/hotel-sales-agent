@@ -65,10 +65,6 @@ GRANT UPDATE (
     customer_phone, turn_count, active_quote_id, concession_count, last_message_at
 ) ON TABLE conversations TO hotel_agent;
 
-CREATE POLICY conversations_agent_select ON conversations
-FOR SELECT TO hotel_agent
-USING (true);
-
 CREATE POLICY conversations_agent_insert ON conversations
 FOR INSERT TO hotel_agent
 WITH CHECK (true);
@@ -138,8 +134,6 @@ GRANT INSERT (
     hotel_id, room_type_id, check_in, check_out, rooms, ask_price_total,
     min_allowed_total, nights, negotiation_open, customer_phone, conversation_id
 ) ON TABLE quotes TO hotel_agent;
-GRANT EXECUTE ON FUNCTION quotes_is_valid_night_record(jsonb) TO hotel_agent;
-GRANT EXECUTE ON FUNCTION quotes_all_nights_are_complete(jsonb) TO hotel_agent;
 
 CREATE POLICY quotes_agent_select ON quotes
 FOR SELECT TO hotel_agent
@@ -202,7 +196,7 @@ USING (true)
 WITH CHECK (true);
 
 GRANT SELECT ON TABLE room_night_inventory TO hotel_worker;
-GRANT UPDATE (held, reserved) ON TABLE room_night_inventory TO hotel_worker;
+GRANT UPDATE (held) ON TABLE room_night_inventory TO hotel_worker;
 
 CREATE POLICY room_night_inventory_worker_select ON room_night_inventory
 FOR SELECT TO hotel_worker
