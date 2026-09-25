@@ -186,7 +186,9 @@ USING (true);
 -- SELECT ... FOR UPDATE (which needs UPDATE on at least one column) and sets
 -- held and reserved together, even when the reserved delta is zero, so both
 -- columns need UPDATE. It reads allotments only to join hotel and room type
--- to the night rows.
+-- to the night rows, so it gets only the three columns that join uses and
+-- cannot read cost_per_night. A future worker job that needs more widens this
+-- in its own change.
 -- ---------------------------------------------------------------------------
 
 GRANT SELECT ON TABLE holds TO hotel_worker;
@@ -213,7 +215,7 @@ FOR UPDATE TO hotel_worker
 USING (true)
 WITH CHECK (true);
 
-GRANT SELECT ON TABLE allotments TO hotel_worker;
+GRANT SELECT (id, hotel_id, room_type_id) ON TABLE allotments TO hotel_worker;
 
 CREATE POLICY allotments_worker_select ON allotments
 FOR SELECT TO hotel_worker

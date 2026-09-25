@@ -56,7 +56,7 @@ Written 2026-09-24. This file contains no secrets: only role names, variable nam
 | agent | `allotments`, `room_night_inventory`, `seasons`, `price_rules`, `price_overrides` | SELECT | compute.py, demand.py, operations.py, dispatch.py:175, seasons.py, rules.py |
 | worker | `holds` | SELECT; UPDATE (released_at) | hold_expiry.py:34, operations.py:308 |
 | worker | `room_night_inventory` | SELECT; UPDATE (held, reserved) | operations.py:93,133 |
-| worker | `allotments` | SELECT | joins at operations.py:31,135 |
+| worker | `allotments` | SELECT (id, hotel_id, room_type_id) only, so it cannot read `cost_per_night` (owner decision, 2026-09-25; a future worker job widens it in its own change) | joins at operations.py:31,135 |
 
 - The worker needs `UPDATE` on `reserved` too, because `release_hold` sets it even when the delta is 0.
 - The agent never calls `create_hold` or `confirm_hold`, so it gets no hold grants until the booking flow is wired.

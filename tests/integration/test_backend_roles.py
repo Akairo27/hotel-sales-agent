@@ -136,7 +136,9 @@ _MANIFEST: dict[str, dict[str, dict[str, tuple[str, ...] | str]]] = {
     "hotel_worker": {
         "holds": {"SELECT": _ALL, "UPDATE": ("released_at",)},
         "room_night_inventory": {"SELECT": _ALL, "UPDATE": ("held", "reserved")},
-        "allotments": {"SELECT": _ALL},
+        # Only the columns release_hold's join uses: the worker cannot read
+        # cost_per_night. A future worker job widens this in its own change.
+        "allotments": {"SELECT": ("id", "hotel_id", "room_type_id")},
     },
 }
 
@@ -357,6 +359,27 @@ def test_worker_cannot_read_quotes(worker_database_url: str) -> None:
         pytest.raises(psycopg.errors.InsufficientPrivilege),
     ):
         conn.execute("SELECT count(*) FROM quotes")
+
+
+@pytest.mark.parametrize(
+    "statement",
+    [
+        "SELECT cost_per_night FROM allotments",
+        "SELECT * FROM allotments",
+        "SELECT count(*) FROM allotments WHERE cost_per_night > 0",
+    ],
+)
+def test_worker_cannot_read_the_allotment_cost(
+    statement: str, worker_database_url: str
+) -> None:
+    """The worker joins allotments only to reach hotel and room type, so its
+    SELECT is limited to those columns and the cost stays unreadable to it,
+    including through SELECT * and a filter on the cost column."""
+    with (
+        _connect(worker_database_url) as conn,
+        pytest.raises(psycopg.errors.InsufficientPrivilege),
+    ):
+        conn.execute(statement)
 
 
 def test_the_roles_are_subject_to_rls(
