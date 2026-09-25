@@ -1,7 +1,9 @@
 # Plan: dedicated database roles and non-root services (role-fix)
 
-**Status: plan only. Implementation has not started and does not start until the owner approves this file.**
+**Status: approved by the owner on 2026-09-25 as written. The repository changes are in PR #58 (draft while in progress).**
 Written 2026-09-24. This file contains no secrets: only role names, variable names and paths.
+
+**The gates in this plan still apply and are not relaxed by the approval:** the final SQL of migration 0027 is shown to the owner before it is applied, and it is applied only on the owner's explicit go-ahead at that moment; every host-level step is shown before it is run; the assistant creates no credential and touches no `.env`; nothing is restarted without the owner's confirmation. As of this update, **migration 0027 has not been applied to any database and no host-level step has been run.**
 
 ## 1. Decisions on record (owner, 2026-09-24)
 
@@ -40,7 +42,7 @@ Written 2026-09-24. This file contains no secrets: only role names, variable nam
 3. **The 0013 lockdown binds the new roles.** `quotes`: `SELECT` and `INSERT` only. `audit_log`: no grant (the backend never reads it). The erasure functions stay ungranted (no code calls them).
 4. **Manifest test.** It fails if any `public` table is unclassified for a role, or if a role holds any privilege beyond the manifest.
 5. **New roles are in no default ACL**, so future tables are invisible to them until a migration grants access.
-6. **`statement_timeout`** is set with `ALTER ROLE ... SET` for each role. Proposed starting values: 10 s for `hotel_agent`, 30 s for `hotel_worker` (to be confirmed). Whether the setting takes effect through the pooler is verified with `SHOW statement_timeout` on the first connection as each role.
+6. **`statement_timeout`** is set with `ALTER ROLE ... SET` for each role. Approved values (owner, 2026-09-25): 10 s for `hotel_agent`, 30 s for `hotel_worker`. Whether the setting takes effect through the pooler is verified with `SHOW statement_timeout` on the first connection as each role.
 
 ## 5. Grant manifest (from the code in `services/`)
 
@@ -99,11 +101,17 @@ Every step is unexecuted and is shown to the owner first. Nothing touches the ru
 7. **Agent cutover (owner's confirmation):** apply the new agent unit, `systemctl daemon-reload`, `systemctl restart hotel-agent`, verify with `systemctl show hotel-agent -p User` and `ps -o user=`.
 8. **Rollback at every step:** restore the previous unit files from `ops/` (git history), `systemctl daemon-reload`, restart. The old venv and the root-owned `uv` stay until the new setup is verified.
 
-## 9. Not yet verified (CI or the first connection must settle it; there is no Postgres on this host)
+## 9. What was unverified, and what is still unverified
+
+There is no Postgres on this host, so the database tests run in CI only. Settled in CI (2026-09-25):
+
+- **`EXECUTE` on the two `quotes` `CHECK` validators is required.** A deliberate-breakage run on a throwaway branch (closed, not merged) removed the grants and the agent's quote test failed with "permission denied for function".
+- **The paired `SELECT` policy is required for the `conversations` upsert.** Removing it made 32 of the webhook tests fail as `hotel_agent` with "new row violates row-level security policy". The same run showed that dropping the worker's `UPDATE` on `reserved` breaks the worker pass.
+- **Identity columns need no sequence privilege:** the whole webhook suite and the worker pass run as the roles, and the manifest test proves neither role holds any sequence privilege.
+- **Every agent code path works under the grants:** the webhook integration suite runs a second time with the app connected as `hotel_agent`, and passes.
+
+Still unverified (needs the first real connection to the hosted database):
 
 - The custom-role pooler username `<role>.<project-ref>`: confirm on the first connection.
-- `EXECUTE` on the two `quotes` `CHECK` validators: very likely needed (precedent in section 3).
-- Paired `SELECT` policies for the `conversations` upsert (`ON CONFLICT DO UPDATE`) and the `messages` conflict handling.
-- Identity columns needing no separate sequence privilege.
-- The role-level `statement_timeout` taking effect through the pooler.
+- The role-level `statement_timeout` taking effect through the pooler (`SHOW statement_timeout` as each role).
 - The `--no-dev` flag and the venv placement in section 8, step 3.

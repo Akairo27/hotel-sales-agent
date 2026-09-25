@@ -1,12 +1,23 @@
-# Copy of /etc/systemd/system/hotel-agent.service as installed on the trial
-# host on 2026-09-24. It holds no secrets: the only environment source is the
-# EnvironmentFile= path, which systemd reads as root. It runs as root today
-# (no User=); moving it to a non-root service user is planned separately.
+# The WhatsApp webhook agent. TARGET STATE of the non-root move described in
+# docs/plans/role-fix.md: a dedicated non-root user, the venv outside /root,
+# and hardening. It holds no secrets: the only environment source is the
+# EnvironmentFile= path, which systemd reads as root before dropping
+# privileges, so that file stays 0600 root:root.
 #
-# Editing this file does not change the host. To apply a change (root):
+# The host does NOT run this version yet. It still runs the previous unit
+# (as root, started with `uv run` from /root/.local/bin/uv), and this file
+# must not be installed until its prerequisites exist, or the agent will
+# fail to start:
+#   - the system user and group hotel-agent,
+#   - Python 3.14 and the venv at /opt/hotel/venv (built without touching the
+#     repo's own .venv),
+#   - the hotel_agent DATABASE_URL in /etc/hotel-admin/agent.env, set by the
+#     owner (the value is never written to the repository).
+# Each host step is shown to the owner before it is run, and hotel-agent is
+# restarted only with the owner's explicit confirmation. To apply (root):
 #   cp ops/hotel-agent.service /etc/systemd/system/hotel-agent.service
 #   systemctl daemon-reload
-# then restart hotel-agent, which is done only with the owner's confirmation.
+# then restart hotel-agent, and check `systemctl show hotel-agent -p User`.
 
 [Unit]
 Description=Hotel Sales Agent webhook
@@ -15,11 +26,18 @@ Wants=network-online.target
 
 [Service]
 Type=exec
+User=hotel-agent
+Group=hotel-agent
 WorkingDirectory=/srv/hotel-admin/app
 EnvironmentFile=/etc/hotel-admin/agent.env
-ExecStart=/root/.local/bin/uv run uvicorn services.agent.main:app --host 127.0.0.1 --port 8000
+ExecStart=/opt/hotel/venv/bin/uvicorn services.agent.main:app --host 127.0.0.1 --port 8000
 Restart=on-failure
 RestartSec=5
+Environment=PYTHONDONTWRITEBYTECODE=1
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=yes
 
 [Install]
 WantedBy=multi-user.target
