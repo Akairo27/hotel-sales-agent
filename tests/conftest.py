@@ -15,6 +15,7 @@ from typing import Any
 import psycopg
 import pytest
 from psycopg import sql
+from psycopg.conninfo import make_conninfo
 
 MIGRATIONS_DIR = Path(__file__).resolve().parent.parent / "db" / "migrations"
 _DEFAULT_ACL_BASELINE_PATH = (
@@ -119,10 +120,31 @@ def _schema(test_database_url: str) -> None:
     return None
 
 
+@pytest.fixture(scope="session")
+def agent_database_url(test_database_url: str, _schema: None) -> str:
+    """The test database's DSN as hotel_agent, the role the webhook process
+    connects as (migration 0027): the same host, port and database as
+    TEST_DATABASE_URL with only the user swapped. The role has no password,
+    which works here because the CI Postgres uses trust authentication.
+    """
+    return make_conninfo(test_database_url, user="hotel_agent")
+
+
+@pytest.fixture(scope="session")
+def worker_database_url(test_database_url: str, _schema: None) -> str:
+    """The test database's DSN as hotel_worker, the role the scheduled worker
+    connects as (migration 0027). See agent_database_url."""
+    return make_conninfo(test_database_url, user="hotel_worker")
+
+
 @pytest.fixture
 def db_conn(test_database_url: str, _schema: None) -> Iterator[psycopg.Connection[Any]]:
-    """A fresh, truncated-clean autocommit connection at the same privilege
-    level services/inventory holds through DATABASE_URL in production.
+    """A fresh, truncated-clean autocommit connection with full privileges
+    (the test database's own `postgres` role), used to seed, truncate and
+    assert. It is deliberately NOT the privilege level the backend runs with:
+    since migration 0027 the agent and the worker connect as hotel_agent and
+    hotel_worker, and tests that must prove the backend works under those
+    roles use agent_database_url and worker_database_url instead.
 
     Autocommit keeps a failed constraint from poisoning the rest of a test;
     code that needs an atomic multi-statement transaction opens one
