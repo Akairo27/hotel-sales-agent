@@ -1,15 +1,21 @@
 # One worker pass (services/worker/runner.py): release expired holds.
 # Started by hotel-worker.timer every minute; not enabled on its own.
 #
-# Install (root, one time — nothing here is applied by merging the PR):
-#   cp ops/hotel-worker.service ops/hotel-worker.timer /etc/systemd/system/
+# TARGET STATE of the non-root move described in docs/plans/role-fix.md. The
+# host does NOT run this version yet: it runs the previous unit (as root,
+# from the repo's own .venv, with agent.env). Do not install this file until
+# its prerequisites exist, or every pass will fail to start:
+#   - the system user and group hotel-worker,
+#   - Python 3.14 and the venv at /opt/hotel/venv,
+#   - /etc/hotel-admin/worker.env (0600 root:root) holding the hotel_worker
+#     DATABASE_URL, created by the owner (the value is never written to the
+#     repository). systemd reads it as root before dropping privileges, so it
+#     does not need to be readable by the service user.
+# Each host step is shown to the owner before it is run. To apply (root):
+#   cp ops/hotel-worker.service /etc/systemd/system/
 #   systemctl daemon-reload
 #   systemctl start hotel-worker.service      # one manual pass first
 #   journalctl -u hotel-worker.service -n 5   # expect a worker_run_finished line
-#   systemctl enable --now hotel-worker.timer
-#
-# Same environment file and working tree as hotel-agent.service, so
-# DATABASE_URL is the same value. No restart of hotel-agent is involved.
 
 [Unit]
 Description=Hotel Sales Agent worker (one pass: release expired holds)
@@ -18,12 +24,14 @@ Wants=network-online.target
 
 [Service]
 Type=oneshot
+User=hotel-worker
+Group=hotel-worker
 WorkingDirectory=/srv/hotel-admin/app
-EnvironmentFile=/etc/hotel-admin/agent.env
+EnvironmentFile=/etc/hotel-admin/worker.env
 # The venv's interpreter, not `uv run`: uv would re-check the lockfile and
 # environment on every one of the ~1,440 daily passes, and could write to
 # the tree the live agent runs from.
-ExecStart=/srv/hotel-admin/app/.venv/bin/python -m services.worker
+ExecStart=/opt/hotel/venv/bin/python -m services.worker
 # A oneshot unit has no start timeout by default; without this a hung pass
 # would block every later one. Kept under the timer's one-minute cadence.
 TimeoutStartSec=50
@@ -31,6 +39,6 @@ Environment=PYTHONDONTWRITEBYTECODE=1
 NoNewPrivileges=yes
 PrivateTmp=yes
 ProtectSystem=strict
-ProtectHome=read-only
+ProtectHome=yes
 StandardOutput=journal
 StandardError=journal

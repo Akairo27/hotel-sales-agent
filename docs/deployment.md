@@ -31,9 +31,11 @@ hotel-worker.timer ──► hotel-worker.service   تمريرة كل دقيقة
 /srv/hotel-admin/app/                استنساخ المستودع
 /etc/hotel-admin/admin.env           الأسرار، root:root 0600، يقرؤه systemd
 /etc/hotel-admin/build.env           NEXT_PUBLIC_* فقط، root:root 0644
-/etc/hotel-admin/agent.env           أسرار الوكيل والـ worker (منها DATABASE_URL)، root:root 0600
+/etc/hotel-admin/agent.env           أسرار الوكيل (منها DATABASE_URL)، root:root 0600؛ ويقرؤه الـ worker أيضاً حتى التحويل
+/etc/hotel-admin/worker.env          سر الـ worker (DATABASE_URL بدور hotel_worker)، root:root 0600 — بعد التحويل
+/opt/hotel/python  و  /opt/hotel/venv   بايثون ٣٫١٤ وبيئته الافتراضية خارج /root — بعد التحويل
 /etc/systemd/system/hotel-admin.service
-/etc/systemd/system/hotel-agent.service     (نسخة في ops/hotel-agent.service)
+/etc/systemd/system/hotel-agent.service     (الحالة المستهدفة في ops/hotel-agent.service)
 /etc/systemd/system/hotel-worker.service    و hotel-worker.timer (نسخ في ops/)
 /etc/nginx/sites-available/hotel-admin
 /etc/nginx/conf.d/hotel-admin-limits.conf
@@ -51,15 +53,25 @@ systemd هو الحاجز الوحيد** الذي يمنع كشف Next.js مبا
 
 ### الوكيل والـ worker
 
-- `ops/hotel-agent.service` نسخة من الوحدة المثبَّتة فعلياً على الخادم. لا
-  سر فيها ولا في أي ملف تعديل جانبي (`drop-in`): مصدر البيئة الوحيد هو مسار
-  `EnvironmentFile`. تعمل اليوم **بالجذر** (`User=` غير مضبوط) عبر `uv run`
-  من `/root/.local/bin/uv`؛ الانتقال إلى مستخدم غير جذر مخطَّط في تغيير
-  منفصل. **إعادة تشغيل `hotel-agent` لا تتم إلا بتأكيد صاحب القرار.**
-- `ops/hotel-worker.service` و`ops/hotel-worker.timer` مثبَّتان بتاريخ
+- **الحالة المستهدفة والحالة الفعلية.** `ops/hotel-agent.service` و
+  `ops/hotel-worker.service` في المستودع هما **الحالة المستهدفة** للتحويل إلى
+  مستخدمين غير جذر (`docs/plans/role-fix.md`): مستخدم مخصص لكل خدمة
+  (`hotel-agent` و`hotel-worker`)، وبيئة بايثون ٣٫١٤ خارج `/root` في
+  `/opt/hotel/venv`، وتشديد الوحدة. **الخادم لا يشغّلهما بعد.** ما زالت وحدتاه
+  المثبَّتتان تعملان **بالجذر**: الوكيل عبر `uv run` من `/root/.local/bin/uv`،
+  والـ worker من `.venv` داخل المستودع وبملف `agent.env`. لا تُثبَّت النسختان
+  الجديدتان قبل توفر متطلباتهما (تسردها ترويسة كل ملف). كل خطوة على الخادم
+  تُعرض على صاحب القرار قبل تنفيذها، و**إعادة تشغيل `hotel-agent` لا تتم إلا
+  بتأكيده.**
+- لا سر في أي من الوحدتين ولا في أي ملف تعديل جانبي (`drop-in`): مصدر
+  البيئة الوحيد هو مسار `EnvironmentFile`، وsystemd يقرؤه بالجذر قبل التحوّل
+  إلى مستخدم الخدمة (وهذا ما يجعل `admin.env` بصلاحية `0600 root:root` مع
+  أن اللوحة تعمل بـ`www-data`). لذلك تبقى ملفات البيئة `0600 root:root` ولا
+  يُجعل أيٌّ منها مقروءاً لمجموعة.
+- `ops/hotel-worker.timer` والوحدة الحالية للـ worker مثبَّتان منذ
   2026-09-24 بعد تمريرة يدوية ناجحة (خرج الرمز ٠ وسطر `worker_run_finished` في
-  السجل). يعملان بالجذر كالوكيل. خطوات التثبيت في ترويسة ملف الخدمة. الـ
-  worker يقرأ الشجرة في كل تمريرة فلا يحتاج إعادة تشغيل عند تحديثها.
+  السجل). الـ worker يقرأ الشجرة في كل تمريرة فلا يحتاج إعادة تشغيل عند
+  تحديثها.
 - فشل التمريرة يظهر في `systemctl --failed` وفي السجل فقط: لا تنبيه.
 
 ---
@@ -84,11 +96,18 @@ systemd هو الحاجز الوحيد** الذي يمنع كشف Next.js مبا
    قراءة ملف إعداد أن التغيير أُعمِل. مثال حي: تحقّق `Restart=always`
    الفعلي كان بقتل العملية حقاً (`systemctl kill -s SIGKILL`) ومراقبة
    السجل، لا بالاكتفاء بقراءة الوحدة.
-5. **هوية تشغيل الخدمة `www-data`** — موجودة افتراضياً في أوبنتو، فلا
-   إنشاء مستخدم جديد يخالف قيد "لا تعديل SSH ولا مستخدمين". أي عملية
+5. **هوية تشغيل لوحة الإدارة `www-data`** — موجودة افتراضياً في أوبنتو، فلا
+   إنشاء مستخدم جديد للوحة يخالف قيد "لا تعديل SSH ولا مستخدمين". أي عملية
    تلمس `/srv/hotel-admin/app` (بناء، `git pull`) تُنفَّذ بهذا المستخدم
    عبر `su -s /bin/bash www-data -c '...'`، **لا `sudo`** — الأخير محظور
    حرفياً في `.claude/settings.json` لهذا المستودع.
+   **استثناء واحد مرفوع (2026-09-25):** يجوز إنشاء حسابَي خدمة مخصصَين،
+   `hotel-agent` و`hotel-worker`، للوكيل والـ worker **وحدهما**؛ لا حساب آخر،
+   ولا تعديل على SSH. **السبب:** عملية اللوحة (Next.js) تواجه الإنترنت، فلو
+   شاركت معرّف المستخدم نفسه مع الوكيل لأمكنها قراءة بيئة عمليته
+   (`/proc/<pid>/environ`) وفيها اعتماد قاعدة البيانات ومفتاح النموذج ورمز
+   واتساب؛ وفصل المعرّفين يمنع ذلك. الحسابان بلا صدفة دخول (`nologin`) وبلا
+   مجلد منزل.
 
 ---
 

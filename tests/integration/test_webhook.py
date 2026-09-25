@@ -364,14 +364,37 @@ class _FailingWhatsAppSender:
         raise self.exc
 
 
-@pytest.fixture
+@contextlib.contextmanager
+def _agent_connection(dsn: str) -> Iterator[psycopg.Connection[Any]]:
+    """A fresh autocommit connection as hotel_agent, closed on exit — the same
+    shape as the real get_db_connection, but as the least-privilege role the
+    webhook process connects as in production (migration 0027) instead of the
+    test's privileged connection."""
+    conn = psycopg.connect(dsn, autocommit=True)
+    try:
+        yield conn
+    finally:
+        conn.close()
+
+
+@pytest.fixture(params=["privileged", "hotel_agent"])
 def webhook_client(
-    db_conn: psycopg.Connection[Any], monkeypatch: pytest.MonkeyPatch
+    request: pytest.FixtureRequest,
+    db_conn: psycopg.Connection[Any],
+    monkeypatch: pytest.MonkeyPatch,
 ) -> Iterator[TestClient]:
-    """Wires the real app to the test's own Postgres connection and a
-    fixed webhook secret, via plain monkeypatch — this module never uses
-    FastAPI's dependency_overrides, so this is the same mechanism the
-    module itself is tested with everywhere else in this repo.
+    """Wires the real app to a Postgres connection and a fixed webhook
+    secret, via plain monkeypatch — this module never uses FastAPI's
+    dependency_overrides, so this is the same mechanism the module itself is
+    tested with everywhere else in this repo.
+
+    Every test in this module runs twice. "privileged" hands the app the
+    test's own full-privilege connection (how the whole module ran before
+    migration 0027). "hotel_agent" hands it a fresh connection as the
+    least-privilege role the webhook process really connects as, while
+    seeding and assertions stay on the privileged db_conn — so any SQL the
+    agent runs that its grants or RLS policies do not allow fails here, in
+    CI, instead of on the first customer turn.
 
     Also wires a default, always-succeeding, no-network WhatsApp sender
     (_FakeWhatsAppSender) — unlike get_llm_settings/get_model_transport
@@ -387,9 +410,15 @@ def webhook_client(
             verify_token=_VERIFY_TOKEN, app_secret=_APP_SECRET
         ),
     )
-    monkeypatch.setattr(
-        webhook_module, "get_db_connection", lambda: _nullcontext(db_conn)
-    )
+    if request.param == "hotel_agent":
+        agent_url: str = request.getfixturevalue("agent_database_url")
+        monkeypatch.setattr(
+            webhook_module, "get_db_connection", lambda: _agent_connection(agent_url)
+        )
+    else:
+        monkeypatch.setattr(
+            webhook_module, "get_db_connection", lambda: _nullcontext(db_conn)
+        )
     monkeypatch.setattr(
         webhook_module, "get_whatsapp_send_settings", lambda: _TEST_WHATSAPP_SETTINGS
     )
