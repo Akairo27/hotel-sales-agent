@@ -1,9 +1,11 @@
 # Plan: dedicated database roles and non-root services (role-fix)
 
-**Status: approved by the owner on 2026-09-25 as written. The repository changes are in PR #58 (draft while in progress).**
+**Status (2026-09-26): approved by the owner on 2026-09-25 as written. PR #58 is merged, migration 0027 is applied to `hotel-sales-agent-dev`, and both services connect through their own roles (`hotel_agent`, `hotel_worker`). The non-root OS-user move (section 8) is NOT done: both services still run as root.**
 Written 2026-09-24. This file contains no secrets: only role names, variable names and paths.
 
-**The gates in this plan still apply and are not relaxed by the approval:** the final SQL of migration 0027 is shown to the owner before it is applied, and it is applied only on the owner's explicit go-ahead at that moment; every host-level step is shown before it is run; the assistant creates no credential and touches no `.env`; nothing is restarted without the owner's confirmation. As of this update, **migration 0027 has not been applied to any database and no host-level step has been run.**
+**The gates in this plan applied throughout and were not relaxed by the approval:** the final SQL of migration 0027 was shown to the owner and applied only on the owner's explicit go-ahead at that moment; every host-level step was shown before it was run; the assistant created no credential and touched no `.env`; nothing was restarted without the owner's confirmation.
+
+**Done (2026-09-25 to 2026-09-26):** migration 0027 applied and verified against the manifest; the owner set both passwords and created `worker.env`; the worker was switched to `worker.env` through an interim systemd drop-in; `hotel-agent` was restarted, on the owner's confirmation, with the `hotel_agent` URL. A real WhatsApp message was processed, and a write probe as `hotel_agent` (always rolled back) passed and left no rows. **Not done:** section 8, and the recommended clean-up in section 7 step 7 is only partly done (see there).
 
 ## 1. Decisions on record (owner, 2026-09-24)
 
@@ -81,9 +83,10 @@ Written 2026-09-24. This file contains no secrets: only role names, variable nam
 4. Before any restart, the assistant can read each new URL in a subshell without printing it and run read-only checks (current role, attributes, privileges against the manifest, `SHOW statement_timeout`).
 5. The host-level steps in section 8 run, each shown to the owner first.
 6. The `hotel-agent` restart needs the owner's explicit confirmation.
-7. Recommended afterwards: remove the three unused `SUPABASE_*` variables from `agent.env`, and rotate the `postgres` password.
+7. Afterwards: the three unused `SUPABASE_*` variables were removed from `agent.env` on 2026-09-26 (they leave the running agent's environment at its next restart). The owner deferred rotating the `postgres` password; it is on the pre-production checklist at the end of `docs/deployment.md`.
 
-**Order:** database roles first, then the units, so the OS-user change and the role change land together.
+**Order as planned:** database roles first, then the units, so the OS-user change and the role change land together.
+**Order as executed (owner's choice, 2026-09-26):** the database roles were cut over first, using an interim drop-in for the worker (`/etc/systemd/system/hotel-worker.service.d/10-worker-env.conf`), and the agent's `DATABASE_URL` changed in place. The OS-user move in section 8 is a separate, later cutover.
 
 ## 8. Draft host-level steps for the non-root move (NOT RUN)
 
@@ -94,7 +97,7 @@ Every step is unexecuted and is shown to the owner first. Nothing touches the ru
 3. **A new venv outside `/root` and outside the repo:** `uv venv /opt/hotel/venv --python <that python>`, then from the repo `VIRTUAL_ENV=/opt/hotel/venv uv sync --frozen --active` (`uv venv [PATH] --python`, `uv sync --active` and `--frozen` are verified in the help output; `--no-dev` to be checked at that step). The current `/srv/hotel-admin/app/.venv` and `/root/.local/bin/uv` stay in place, so the running agent is unaffected.
 4. **Env files:** `agent.env` stays as is (`0600 root:root`); the owner creates `worker.env` (`0600 root:root`).
 5. **Unit changes (in the PR, applied later):**
-   - `hotel-worker.service`: `User=hotel-worker`, `Group=hotel-worker`, `EnvironmentFile=/etc/hotel-admin/worker.env`, `ExecStart=/opt/hotel/venv/bin/python -m services.worker`.
+   - `hotel-worker.service`: `User=hotel-worker`, `Group=hotel-worker`, `EnvironmentFile=/etc/hotel-admin/worker.env`, `ExecStart=/opt/hotel/venv/bin/python -m services.worker`. The interim drop-in `hotel-worker.service.d/10-worker-env.conf` (installed 2026-09-26) is removed in the same step, because this unit already names `worker.env`.
    - `hotel-agent.service`: `User=hotel-agent`, `Group=hotel-agent`, `ExecStart=/opt/hotel/venv/bin/uvicorn services.agent.main:app --host 127.0.0.1 --port 8000` (no `uv run`), with the same hardening as the worker (`NoNewPrivileges`, `PrivateTmp`, `ProtectSystem=strict`, `ProtectHome=yes`, `PYTHONDONTWRITEBYTECODE=1`).
    - The repo tree is already world-readable, so both users can read the code.
 6. **Test the worker first:** apply the new worker unit, `systemctl daemon-reload`, `systemctl start hotel-worker.service`, read the journal, and check the process owner with `ps`.
@@ -110,8 +113,12 @@ There is no Postgres on this host, so the database tests run in CI only. Settled
 - **Identity columns need no sequence privilege:** the whole webhook suite and the worker pass run as the roles, and the manifest test proves neither role holds any sequence privilege.
 - **Every agent code path works under the grants:** the webhook integration suite runs a second time with the app connected as `hotel_agent`, and passes.
 
-Still unverified (needs the first real connection to the hosted database):
+Settled on the first real connections to the hosted database (2026-09-26):
 
-- The custom-role pooler username `<role>.<project-ref>`: confirm on the first connection.
-- The role-level `statement_timeout` taking effect through the pooler (`SHOW statement_timeout` as each role).
+- The custom-role pooler username `<role>.<project-ref>` is accepted by the pooler for both roles (session mode, port 5432).
+- The role-level `statement_timeout` survives the pooler: `SHOW statement_timeout` returns 10 s as `hotel_agent` and 30 s as `hotel_worker`.
+- The agent's quote insert, escalation insert and the refused `UPDATE`, `DELETE` and `TRUNCATE` on `quotes` work as designed on the live database (a probe that was always rolled back).
+
+Still unverified:
+
 - The `--no-dev` flag and the venv placement in section 8, step 3.
