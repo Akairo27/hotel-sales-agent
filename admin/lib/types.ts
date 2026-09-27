@@ -3,7 +3,13 @@
 // typescript` is run against the applied schema — that command needs a
 // linked Supabase project and network access neither of which this
 // session's permissions allow, so this is not yet auto-generated.
-import type { BedConfiguration, HotelAmenity } from "@/lib/hotelDetails";
+import type {
+  BedConfiguration,
+  HotelAmenity,
+  HotelCity,
+  HotelZone,
+  IsoWeekday,
+} from "@/lib/hotelDetails";
 
 export type AppRole = "admin" | "sales";
 
@@ -42,6 +48,10 @@ export interface Hotel extends HotelRef {
   address_text: string | null;
   check_in_time: string | null;
   check_out_time: string | null;
+  city: HotelCity | null;
+  zone: HotelZone | null;
+  district_name: string | null;
+  weekend_days: IsoWeekday[];
   is_active: boolean;
 }
 

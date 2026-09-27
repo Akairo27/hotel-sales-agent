@@ -41,6 +41,21 @@ describe("translateConstraintError", () => {
     ).toBe("الحد الأدنى المسموح لا يمكن أن يكون سالباً.");
   });
 
+  it.each([
+    ["hotels_city_valid", "المدينة"],
+    ["hotels_zone_valid", "المنطقة"],
+    ["hotels_zone_matches_city", "المنطقة"],
+    ["hotels_weekend_days_valid", "العطلة"],
+    ["hotels_district_name_valid", "الحي"],
+  ])("maps the hotel location constraint %s to an Arabic message about the field", (name, field) => {
+    const translated = translateConstraintError(
+      `new row for relation "hotels" violates check constraint "${name}"`,
+    );
+    expect(translated).toContain(field);
+    expect(translated).not.toBe("تعذر الحفظ — تحقق من صحة القيم المدخلة.");
+    expect(translated).not.toContain("violates");
+  });
+
   it("falls back to the generic message for an unrecognized constraint name", () => {
     const raw = 'violates check constraint "some_future_constraint_nobody_mapped_yet"';
     expect(translateConstraintError(raw)).toBe("تعذر الحفظ — تحقق من صحة القيم المدخلة.");

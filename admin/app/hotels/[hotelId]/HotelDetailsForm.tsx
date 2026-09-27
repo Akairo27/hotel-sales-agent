@@ -1,9 +1,17 @@
 import type { Hotel } from "@/lib/types";
 import {
   AMENITY_LABELS,
+  CITY_LABELS,
   HOTEL_AMENITIES,
+  HOTEL_CITIES,
+  HOTEL_ZONES,
+  MAX_DISTRICT_NAME_LENGTH,
   MAX_STAR_RATING,
   MIN_STAR_RATING,
+  WEEKDAY_DISPLAY_ORDER,
+  WEEKDAY_LABELS,
+  ZONE_LABELS,
+  zoneBelongsToCity,
   type HotelAmenity,
 } from "@/lib/hotelDetails";
 import {
@@ -18,6 +26,7 @@ import {
   LABEL,
   LEGEND,
   SECTION_TITLE,
+  SELECT,
 } from "@/lib/ui";
 import { updateHotelDetails } from "./actions";
 
@@ -42,6 +51,7 @@ export function HotelDetailsForm({
 
   const saveThisHotelsDetails = updateHotelDetails.bind(null, hotel.id);
   const selected = new Set(selectedAmenities);
+  const weekendDays = new Set<number>(hotel.weekend_days);
 
   return (
     <section className={CARD}>
@@ -94,6 +104,92 @@ export function HotelDetailsForm({
             className={`${INPUT} mt-1 w-full`}
           />
         </div>
+
+        <fieldset className={`${FIELDSET} mt-6`}>
+          <legend className={LEGEND}>الموقع</legend>
+          <div className="flex flex-wrap gap-4">
+            <div className="min-w-40 flex-1">
+              <label htmlFor="city" className={LABEL}>
+                المدينة
+              </label>
+              <select
+                id="city"
+                name="city"
+                defaultValue={hotel.city ?? ""}
+                className={`${SELECT} mt-1 w-full`}
+              >
+                <option value="">غير محدد</option>
+                {HOTEL_CITIES.map((city) => (
+                  <option key={city} value={city}>
+                    {CITY_LABELS[city]}
+                  </option>
+                ))}
+              </select>
+            </div>
+            <div className="min-w-40 flex-1">
+              <label htmlFor="zone" className={LABEL}>
+                المنطقة
+              </label>
+              <select
+                id="zone"
+                name="zone"
+                defaultValue={hotel.zone ?? ""}
+                className={`${SELECT} mt-1 w-full`}
+              >
+                <option value="">غير محدد</option>
+                {HOTEL_CITIES.map((city) => (
+                  <optgroup key={city} label={CITY_LABELS[city]}>
+                    {HOTEL_ZONES.filter((zone) => zoneBelongsToCity(zone, city)).map(
+                      (zone) => (
+                        <option key={zone} value={zone}>
+                          {ZONE_LABELS[zone]}
+                        </option>
+                      ),
+                    )}
+                  </optgroup>
+                ))}
+              </select>
+            </div>
+          </div>
+          <div className="mt-4">
+            <label htmlFor="district_name" className={LABEL}>
+              الحي أو الشارع
+            </label>
+            <input
+              id="district_name"
+              name="district_name"
+              maxLength={MAX_DISTRICT_NAME_LENGTH}
+              defaultValue={hotel.district_name ?? ""}
+              className={`${INPUT} mt-1 w-full`}
+            />
+          </div>
+          <p className={`${HINT} mt-2`}>
+            اختياري. المنطقة يجب أن تتبع المدينة المختارة. اسم الحي اسم علم يُعرض كما
+            هو ولا يُستعمل تعليمةً، وطوله حتى {MAX_DISTRICT_NAME_LENGTH} حرفاً.
+          </p>
+        </fieldset>
+
+        <fieldset className={`${FIELDSET} mt-6`}>
+          <legend className={LEGEND}>العطلة الأسبوعية</legend>
+          <p className={HINT}>
+            الأيام التي تُعدّ عطلة أسبوعية لهذا الفندق. الافتراضي الجمعة والسبت، ويلزم
+            اختيار يوم واحد على الأقل.
+          </p>
+          <div className="mt-3 flex flex-wrap gap-2">
+            {WEEKDAY_DISPLAY_ORDER.map((day) => (
+              <label key={day} className={CHECKBOX_LABEL}>
+                <input
+                  type="checkbox"
+                  name="weekend_days"
+                  value={day}
+                  defaultChecked={weekendDays.has(day)}
+                  className={CHECKBOX}
+                />
+                {WEEKDAY_LABELS[day]}
+              </label>
+            ))}
+          </div>
+        </fieldset>
 
         <fieldset className={`${FIELDSET} mt-6`}>
           <legend className={LEGEND}>أوقات الدخول والخروج</legend>
@@ -187,6 +283,13 @@ function DetailRow({ label, value }: { label: string; value: string }) {
 
 const NOT_RECORDED = "—";
 
+function weekendDaysLabel(weekendDays: readonly number[]): string {
+  const names = WEEKDAY_DISPLAY_ORDER.filter((day) => weekendDays.includes(day)).map(
+    (day) => WEEKDAY_LABELS[day],
+  );
+  return names.length === 0 ? NOT_RECORDED : names.join("، ");
+}
+
 // Sales can read a hotel's profile but not change it (migration 0014's
 // split), so the read-only view is a description list, not a disabled
 // form — a form nobody can submit reads as broken rather than as
@@ -215,6 +318,16 @@ function HotelDetailsSummary({
           value={hotel.star_rating === null ? NOT_RECORDED : `${hotel.star_rating} نجوم`}
         />
         <DetailRow label="العنوان" value={hotel.address_text ?? NOT_RECORDED} />
+        <DetailRow
+          label="المدينة"
+          value={hotel.city === null ? NOT_RECORDED : CITY_LABELS[hotel.city]}
+        />
+        <DetailRow
+          label="المنطقة"
+          value={hotel.zone === null ? NOT_RECORDED : ZONE_LABELS[hotel.zone]}
+        />
+        <DetailRow label="الحي أو الشارع" value={hotel.district_name ?? NOT_RECORDED} />
+        <DetailRow label="العطلة الأسبوعية" value={weekendDaysLabel(hotel.weekend_days)} />
         <DetailRow label="وقت الدخول" value={hotel.check_in_time ?? NOT_RECORDED} />
         <DetailRow label="وقت الخروج" value={hotel.check_out_time ?? NOT_RECORDED} />
         <DetailRow
