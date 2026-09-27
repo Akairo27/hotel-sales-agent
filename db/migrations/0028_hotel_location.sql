@@ -31,13 +31,23 @@ CHECK (city IS NULL OR city IN ('makkah', 'madinah')),
 -- rejected explicitly rather than left to how `<@` treats NULL, an empty
 -- array is allowed (a hotel with no weekend days), and a multi-dimensional
 -- array is not.
+--
+-- The dimension check is a CASE, not an AND, on purpose: Postgres does not
+-- promise to evaluate the terms of an AND left to right, and array_position
+-- raises an error (not a false result) on a multi-dimensional array, so an
+-- AND let that error surface instead of a clean constraint violation. A
+-- CASE evaluates its branches in order.
 ADD COLUMN weekend_days smallint[] NOT NULL DEFAULT '{5,6}'
 CONSTRAINT hotels_weekend_days_valid
 CHECK (
-    weekend_days <@ ARRAY[1, 2, 3, 4, 5, 6, 7]::smallint[]
-    AND array_position(weekend_days, NULL) IS NULL
-    AND cardinality(weekend_days) <= 7
-    AND (array_ndims(weekend_days) IS NULL OR array_ndims(weekend_days) = 1)
+    CASE
+        WHEN array_ndims(weekend_days) IS NULL THEN TRUE
+        WHEN array_ndims(weekend_days) <> 1 THEN FALSE
+        ELSE
+            weekend_days <@ ARRAY[1, 2, 3, 4, 5, 6, 7]::smallint[]
+            AND array_position(weekend_days, NULL) IS NULL
+            AND cardinality(weekend_days) <= 7
+    END
 ),
 
 ADD COLUMN zone text
@@ -59,9 +69,14 @@ CHECK (
 -- as it is and never used as an instruction. A limited exception to the
 -- "no free text" rule at the top of migration 0023, approved by the owner;
 -- address_text is the precedent. The length bound is what keeps it a name.
+-- btrim is given the whitespace to strip: by default it removes spaces only,
+-- so a name made of a tab or a line break would have passed as non-blank.
 ADD COLUMN district_name text
 CONSTRAINT hotels_district_name_valid
-CHECK (district_name IS NULL OR length(btrim(district_name)) BETWEEN 1 AND 60);
+CHECK (
+    district_name IS NULL
+    OR length(btrim(district_name, E' \t\r\n')) BETWEEN 1 AND 60
+);
 
 -- The zone must belong to the hotel's city: the zone names are prefixed by
 -- their city, so the check compares that prefix. A zone without a city is

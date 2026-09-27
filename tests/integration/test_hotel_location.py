@@ -255,7 +255,15 @@ def test_district_name_accepts_a_short_name_and_null(
 
 @pytest.mark.parametrize(
     "district_name",
-    ["", "   ", "\t", "م" * (MAX_DISTRICT_NAME_LENGTH + 1)],
+    [
+        "",
+        "   ",
+        "\t",
+        "\n",
+        "\r\n",
+        " \t \n ",
+        "م" * (MAX_DISTRICT_NAME_LENGTH + 1),
+    ],
 )
 def test_district_name_rejects_blank_and_over_long_values(
     db_conn: psycopg.Connection[Any], district_name: str
