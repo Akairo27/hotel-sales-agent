@@ -25,7 +25,8 @@ export default async function HotelsPage({
     .from("hotels")
     .select(
       "id, hotel_name, distance_to_haram_meters, star_rating, address_text, " +
-        "check_in_time, check_out_time, is_active, created_at",
+        "check_in_time, check_out_time, city, zone, district_name, weekend_days, " +
+        "is_active, created_at",
     )
     .order("hotel_name")
     .overrideTypes<Hotel[], { merge: false }>();

@@ -1,13 +1,13 @@
 // Hotel and room-type attribute vocabulary and form parsing, mirroring
-// db/migrations/0023_hotel_details.sql. The database is the source of
-// truth: every bound here has a CHECK constraint behind it, and this
-// module exists so a typo is caught in the form instead of coming back as
-// a Postgres error — the same defense-in-depth split as
+// db/migrations/0023_hotel_details.sql and 0028_hotel_location.sql. The
+// database is the source of truth: every bound here has a CHECK constraint
+// behind it, and this module exists so a typo is caught in the form instead
+// of coming back as a Postgres error — the same defense-in-depth split as
 // admin/lib/priceOverrideRange.ts, not a replacement for the constraint.
 //
-// HOTEL_AMENITIES and BED_CONFIGURATIONS are asserted against that
-// migration's own CHECK lists in hotelDetails.conformance.test.ts, so the
-// two cannot drift apart silently.
+// HOTEL_AMENITIES, BED_CONFIGURATIONS, HOTEL_CITIES and HOTEL_ZONES are
+// asserted against those migrations' own CHECK lists in
+// hotelDetails.conformance.test.ts, so the two cannot drift apart silently.
 
 export const HOTEL_AMENITIES = [
   "haram_view",
@@ -58,6 +58,68 @@ export const BED_CONFIGURATION_LABELS: Record<BedConfiguration, string> = {
   triple: "ثلاثة أسرّة",
   quad: "أربعة أسرّة",
 };
+
+// Location vocabulary, mirroring db/migrations/0028_hotel_location.sql. Both
+// lists are asserted against that migration's own CHECK constraints in
+// hotelDetails.conformance.test.ts.
+export const HOTEL_CITIES = ["makkah", "madinah"] as const;
+
+export type HotelCity = (typeof HOTEL_CITIES)[number];
+
+export const CITY_LABELS: Record<HotelCity, string> = {
+  makkah: "مكة المكرمة",
+  madinah: "المدينة المنورة",
+};
+
+// Each zone name starts with its city (hotels_zone_matches_city).
+export const HOTEL_ZONES = [
+  "makkah_central",
+  "makkah_outside",
+  "madinah_central",
+  "madinah_north",
+  "madinah_west",
+  "madinah_south",
+  "madinah_outside",
+] as const;
+
+export type HotelZone = (typeof HOTEL_ZONES)[number];
+
+export const ZONE_LABELS: Record<HotelZone, string> = {
+  makkah_central: "المنطقة المركزية (حول الحرم)",
+  makkah_outside: "خارج المنطقة المركزية",
+  madinah_central: "المنطقة المركزية (حول المسجد النبوي)",
+  madinah_north: "الشمال",
+  madinah_west: "الغرب",
+  madinah_south: "الجنوب",
+  madinah_outside: "خارج المنطقة المركزية",
+};
+
+export function zoneBelongsToCity(zone: HotelZone, city: HotelCity): boolean {
+  return zone.startsWith(`${city}_`);
+}
+
+// ISO weekdays, as the database stores them: 1 is Monday, 7 is Sunday. The
+// default weekend is Friday and Saturday; the form lists the days in the
+// order the week is read in Arabic, starting on Saturday.
+export const ISO_WEEKDAYS = [1, 2, 3, 4, 5, 6, 7] as const;
+
+export type IsoWeekday = (typeof ISO_WEEKDAYS)[number];
+
+export const WEEKDAY_LABELS: Record<IsoWeekday, string> = {
+  1: "الاثنين",
+  2: "الثلاثاء",
+  3: "الأربعاء",
+  4: "الخميس",
+  5: "الجمعة",
+  6: "السبت",
+  7: "الأحد",
+};
+
+export const WEEKDAY_DISPLAY_ORDER: readonly IsoWeekday[] = [6, 7, 1, 2, 3, 4, 5];
+
+export const DEFAULT_WEEKEND_DAYS: readonly IsoWeekday[] = [5, 6];
+
+export const MAX_DISTRICT_NAME_LENGTH = 60;
 
 export const MIN_STAR_RATING = 1;
 export const MAX_STAR_RATING = 5;
@@ -158,12 +220,92 @@ export function parseBedConfiguration(
   return { valid: true, value: text as BedConfiguration };
 }
 
+export function parseCity(raw: FormDataEntryValue | null): FieldResult<HotelCity | null> {
+  const text = parseOptionalText(raw);
+  if (text === null) {
+    return { valid: true, value: null };
+  }
+  if (!(HOTEL_CITIES as readonly string[]).includes(text)) {
+    return { valid: false, message: "المدينة: قيمة غير معروفة." };
+  }
+  return { valid: true, value: text as HotelCity };
+}
+
+// The zone is validated against the city in the same call: the database
+// refuses a zone that does not belong to the hotel's city (and a zone with
+// no city at all), and saying so here names the field instead of returning
+// a constraint error.
+export function parseZone(
+  raw: FormDataEntryValue | null,
+  city: HotelCity | null,
+): FieldResult<HotelZone | null> {
+  const text = parseOptionalText(raw);
+  if (text === null) {
+    return { valid: true, value: null };
+  }
+  if (!(HOTEL_ZONES as readonly string[]).includes(text)) {
+    return { valid: false, message: "المنطقة: قيمة غير معروفة." };
+  }
+  if (city === null) {
+    return { valid: false, message: "المنطقة: اختر المدينة أولاً." };
+  }
+  if (!zoneBelongsToCity(text as HotelZone, city)) {
+    return { valid: false, message: "المنطقة: لا تتبع المدينة المختارة." };
+  }
+  return { valid: true, value: text as HotelZone };
+}
+
+// A checkbox group submits the ticked days as separate values. The database
+// would accept an empty array (a hotel with no weekend), but this form
+// never means that: an empty selection is far more likely to be a slip, so
+// it is refused here with a message rather than stored.
+export function parseWeekendDays(raw: FormDataEntryValue[]): FieldResult<IsoWeekday[]> {
+  const known = new Set<number>(ISO_WEEKDAYS);
+  const selected: IsoWeekday[] = [];
+  for (const entry of raw) {
+    const day = typeof entry === "string" && /^[1-7]$/.test(entry) ? Number(entry) : NaN;
+    if (!known.has(day)) {
+      return { valid: false, message: "أيام العطلة الأسبوعية: قيمة غير معروفة." };
+    }
+    if (selected.includes(day as IsoWeekday)) {
+      return { valid: false, message: "أيام العطلة الأسبوعية: قيمة مكررة." };
+    }
+    selected.push(day as IsoWeekday);
+  }
+  if (selected.length === 0) {
+    return { valid: false, message: "أيام العطلة الأسبوعية: اختر يوماً واحداً على الأقل." };
+  }
+  return { valid: true, value: selected.sort((a, b) => a - b) };
+}
+
+// Postgres counts characters (code points), not UTF-16 units, so the length
+// is counted the same way: an emoji is one character to both.
+export function parseDistrictName(
+  raw: FormDataEntryValue | null,
+): FieldResult<string | null> {
+  const text = parseOptionalText(raw);
+  if (text === null) {
+    return { valid: true, value: null };
+  }
+  if (Array.from(text).length > MAX_DISTRICT_NAME_LENGTH) {
+    return {
+      valid: false,
+      message: `اسم الحي: الحد الأقصى ${MAX_DISTRICT_NAME_LENGTH} حرفاً.`,
+    };
+  }
+  return { valid: true, value: text };
+}
+
 export interface HotelDetailsPatch {
   distance_to_haram_meters: number | null;
   star_rating: number | null;
   address_text: string | null;
   check_in_time: string | null;
   check_out_time: string | null;
+  city: HotelCity | null;
+  zone: HotelZone | null;
+  district_name: string | null;
+  weekend_days: IsoWeekday[];
   is_active: boolean;
 }
 
@@ -197,6 +339,26 @@ export function parseHotelDetails(
     return checkOut;
   }
 
+  const city = parseCity(formData.get("city"));
+  if (!city.valid) {
+    return city;
+  }
+
+  const zone = parseZone(formData.get("zone"), city.value);
+  if (!zone.valid) {
+    return zone;
+  }
+
+  const district = parseDistrictName(formData.get("district_name"));
+  if (!district.valid) {
+    return district;
+  }
+
+  const weekend = parseWeekendDays(formData.getAll("weekend_days"));
+  if (!weekend.valid) {
+    return weekend;
+  }
+
   const amenities = parseAmenities(formData.getAll("amenities"));
   if (!amenities.valid) {
     return amenities;
@@ -211,6 +373,10 @@ export function parseHotelDetails(
         address_text: parseOptionalText(formData.get("address_text")),
         check_in_time: checkIn.value,
         check_out_time: checkOut.value,
+        city: city.value,
+        zone: zone.value,
+        district_name: district.value,
+        weekend_days: weekend.value,
         // An unchecked checkbox submits nothing at all, so absence is
         // false — never "leave the current value alone".
         is_active: formData.get("is_active") === "on",
