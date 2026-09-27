@@ -62,6 +62,7 @@ _PUBLIC_RELATIONS = frozenset(
         "price_rules",
         "price_rules_for_dashboard",
         "quotes",
+        "room_night_availability_for_dashboard",
         "room_night_inventory",
         "room_types",
         "seasons",

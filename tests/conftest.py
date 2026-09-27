@@ -54,10 +54,20 @@ CREATE TABLE IF NOT EXISTS auth.users (
     id uuid PRIMARY KEY DEFAULT gen_random_uuid()
 );
 
+-- Matches the live auth.uid() on hotel-sales-agent-dev exactly (read from
+-- pg_proc during migration 0029's review, not assumed): request.jwt.claim.sub
+-- first, falling back to parsing request.jwt.claims (a JSON blob) — newer
+-- PostgREST versions set only the latter. The previous, flat-only version
+-- of this stub silently made every test using request.jwt.claims alone
+-- untestable, since it could never resolve an actor that way even when the
+-- real function would.
 CREATE OR REPLACE FUNCTION auth.uid() RETURNS uuid
 LANGUAGE sql STABLE
 AS $$
-    SELECT NULLIF(current_setting('request.jwt.claim.sub', true), '')::uuid
+    SELECT COALESCE(
+        NULLIF(current_setting('request.jwt.claim.sub', true), ''),
+        NULLIF(current_setting('request.jwt.claims', true), '')::jsonb ->> 'sub'
+    )::uuid
 $$;
 
 GRANT USAGE ON SCHEMA auth TO anon, authenticated, service_role;
