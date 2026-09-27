@@ -47,6 +47,12 @@ const CONSTRAINT_MESSAGES: Record<string, string> = {
   hotels_distance_to_haram_positive: "المسافة عن الحرم يجب أن تكون أكبر من صفر.",
   hotels_star_rating_valid: "التصنيف يجب أن يكون بين نجمة وخمس نجوم.",
   hotels_address_text_not_blank: "العنوان لا يمكن أن يكون فارغاً — احذفه أو اكتبه كاملاً.",
+  // db/migrations/0028_hotel_location.sql.
+  hotels_city_valid: "المدينة يجب أن تكون مكة المكرمة أو المدينة المنورة.",
+  hotels_zone_valid: "المنطقة غير معروفة.",
+  hotels_zone_matches_city: "المنطقة لا تتبع مدينة الفندق — اختر منطقة من المدينة نفسها.",
+  hotels_weekend_days_valid: "أيام العطلة الأسبوعية يجب أن تكون من الاثنين إلى الأحد فقط.",
+  hotels_district_name_valid: "اسم الحي يجب أن يكون بين ١ و٦٠ حرفاً.",
   room_types_capacity_adults_valid: "عدد الأشخاص يجب أن يكون بين ١ و٢٠.",
   room_types_size_sqm_positive: "المساحة يجب أن تكون أكبر من صفر.",
   room_types_bed_configuration_valid: "توزيع الأسرّة غير معروف.",
