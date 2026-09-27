@@ -9,9 +9,8 @@
 -- section for why. Hardening, verified by a test, not by this comment: a
 -- fixed NOLOGIN owner role scoped to exactly the columns its body uses;
 -- SET search_path = '' with every object schema-qualified (pg_catalog is
--- always searched regardless, so generate_series/unnest/now/
--- current_setting/set_config need no prefix); EXECUTE revoked from PUBLIC
--- and anon, granted only to authenticated; the actor is read via the same
+-- always searched regardless); EXECUTE revoked from PUBLIC and anon,
+-- granted only to authenticated; the actor is read via the same
 -- expression auth.uid() itself uses, not by calling it, so this role
 -- needs no privilege on schema auth at all.
 
@@ -415,14 +414,17 @@ BEGIN
 END;
 $$;
 
--- ALTER ... OWNER TO needs membership in the target role, which CREATE
--- ROLE alone does not grant. postgres on hotel-sales-agent-dev is
--- CREATEROLE but not a real superuser (confirmed live, not assumed --
--- 0016 notes the same about rolbypassrls), so it needs this bracket; a
--- real superuser (CI's local Postgres) already could, masking the gap
--- there. current_user, not a literal name. Kept until after the ACL
--- changes below too: once ownership moves, only the new owner (or an
--- inherited membership in it) can REVOKE/GRANT on the function.
+-- ALTER ... OWNER TO needs two things CREATE ROLE alone does not give
+-- (both confirmed live, not assumed, same lesson as 0016's rolbypassrls
+-- note): membership WITH SET in the target role (Supabase auto-grants
+-- postgres plain membership, but without SET, so it still can't act as
+-- the role); and CREATE on the function's schema for the new owner
+-- specifically, a hard Postgres rule for ownership transfer. Neither
+-- bites a superuser (CI), which is why this never surfaced there. Both
+-- grants are temporary, current_user not a literal name, kept through the
+-- ACL changes below too -- only the new owner can touch those once
+-- ownership moves.
+GRANT CREATE ON SCHEMA public TO allotment_entry_writer;
 GRANT allotment_entry_writer TO current_user;
 ALTER FUNCTION admin_set_allotments(bigint, bigint, date, date, integer, bigint, boolean)
 OWNER TO allotment_entry_writer;
@@ -438,6 +440,7 @@ GRANT EXECUTE ON FUNCTION admin_set_allotments(
 ) TO authenticated;
 
 REVOKE allotment_entry_writer FROM current_user;
+REVOKE CREATE ON SCHEMA public FROM allotment_entry_writer;
 
 -- ---------------------------------------------------------------------------
 -- The dashboard's read side for booked/held counts. No cost column, same
