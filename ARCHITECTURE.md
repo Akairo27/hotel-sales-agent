@@ -918,6 +918,35 @@ view:**
 الجدول الأصلي حرفياً، وهل كل عمود مالي محمي بدالة `SECURITY DEFINER`
 مربوطة بـ`auth.uid()` لا بقيمة من الطلب.
 
+### `admin_set_allotments` — الاستثناء الوحيد من `SECURITY INVOKER` (migration 0029)
+
+**القاعدة العامة في هذه اللوحة:** كل كتابة إدارية دالتها `SECURITY
+INVOKER` (الافتراضي) — سياسات RLS على الجدول نفسه هي طبقة التنفيذ
+الحقيقية (`admin_set_allotment_cost`، `admin_upsert_price_overrides`،
+`admin_upsert_price_rule`). `admin_set_allotments` وحدها `SECURITY
+DEFINER`، وهذا خروج متعمَّد عن تلك القاعدة، لا نسيان لها.
+
+**السبب:** استدعاء واحد يحتاج يكتب في `allotments` و
+`room_night_inventory` معاً — سطر لكل ليلة في المدى — ثم `audit_log`،
+ويقفل الصفوف القائمة بـ`SELECT ... FOR UPDATE` بنفس ترتيب الأقفال الذي
+يستعمله `services/inventory/operations.py` حتى يتسلسل مع أي حجز مؤقت
+يلمس نفس الليالي. منح `authenticated` صلاحية مباشرة على
+`room_night_inventory` (لتكفي سياسة RLS عادية) يعني فتح جدول لم يُفتح
+لأي شاشة إدارية من قبل — الحجز والتأكيد والإفراج هي الكاتب الوحيد له
+اليوم، ولا داعي يتغيّر ذلك لأجل شاشة إدخال الغرف. **دور مخصص بلا تسجيل
+دخول (`allotment_entry_writer`)** يملك بالضبط الأعمدة التي تحتاجها
+الدالة على أربعة جداول (`hotels`، `room_types` قراءة فقط للتحقق من
+الزوج؛ `allotments` و`room_night_inventory` كتابة)، محمي بـ`search_path`
+فارغ وكل استدعاء بداخله مؤهَّل بالمخطط، هو ما يعوّض غياب طبقة RLS
+الحقيقية على مستوى الجدول لهذا المسار تحديداً — التفويض (إداري ومعه
+`can_view_cost`) يُتحقق منه صراحة داخل جسم الدالة، لا بسياسة.
+
+**لا صلاحية جديدة لـ`authenticated`:** الصلاحية الوحيدة الجديدة له هي
+`EXECUTE` على `admin_set_allotments` نفسها وقراءة
+`room_night_availability_for_dashboard`؛ لا منح مباشر جديد على أي جدول،
+فلا حاجة لسياسة `FOR SELECT` مقرونة (القاعدة ١١) لأن لا سياسة جديدة على
+`authenticated` أصلاً هنا.
+
 ---
 
 ## ٩. التكامل مع أنظمة العميل
