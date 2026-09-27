@@ -65,6 +65,10 @@ _OWNER_MANIFEST: dict[str, dict[str, tuple[str, ...]]] = {
     },
 }
 _OWNER_EXECUTABLE_FUNCTIONS = {
+    # The owner of a function always implicitly has EXECUTE on it,
+    # regardless of any explicit grant — confirmed against real Postgres,
+    # not assumed.
+    "admin_set_allotments",
     "current_app_role",
     "current_user_can_view_cost",
     "allotment_entry_riyadh_date",
@@ -114,7 +118,9 @@ def test_search_path_is_empty(db_conn: psycopg.Connection[Any]) -> None:
     row = db_conn.execute(
         "SELECT proconfig FROM pg_proc WHERE proname = 'admin_set_allotments'"
     ).fetchone()
-    assert row == (["search_path="],)
+    # Postgres stores SET search_path = '' as the quoted empty string, not
+    # a bare trailing "=" (confirmed against real Postgres, not assumed).
+    assert row == (['search_path=""'],)
 
 
 def test_decoy_object_in_callers_search_path_is_ignored(

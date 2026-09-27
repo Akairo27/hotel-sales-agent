@@ -21,6 +21,8 @@ import psycopg
 import pytest
 from psycopg import sql
 
+from tests.integration._seed import seed_actor
+
 pytestmark = pytest.mark.usefixtures("db_conn")
 
 _STILL_FULLY_LOCKED_TABLES = ("quotes", "room_night_inventory")
@@ -41,6 +43,10 @@ def _seed_user(conn: psycopg.Connection[Any], *, role: str, can_view_cost: bool)
 def _seed_allotment(
     conn: psycopg.Connection[Any], *, cost_per_night: int = 15000
 ) -> int:
+    # Migration 0029's audit trigger on allotments now fires on INSERT
+    # too, not just UPDATE, and rejects a write with no app.actor_id set,
+    # same as price_rules' and price_overrides'.
+    seed_actor(conn)
     hotel_row = conn.execute(
         "INSERT INTO hotels (hotel_name) VALUES ('Test Hotel') RETURNING id"
     ).fetchone()

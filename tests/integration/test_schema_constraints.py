@@ -54,7 +54,14 @@ def _returning_id(
 
 def _seed_single_room_night(conn: psycopg.Connection[Any]) -> int:
     """Inserts one hotel/room-type/allotment with a single-room night and
-    returns the allotment id."""
+    returns the allotment id.
+
+    Seeds a fresh actor first (see seed_actor): migration 0029's audit
+    trigger on allotments now fires on INSERT too, not just UPDATE, and
+    rejects a write with no app.actor_id set, same as price_rules' and
+    price_overrides'.
+    """
+    seed_actor(conn)
     hotel_id = _returning_id(
         conn, "INSERT INTO hotels (hotel_name) VALUES ('Test Hotel') RETURNING id"
     )

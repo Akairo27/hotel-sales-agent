@@ -101,14 +101,10 @@ USING (true)
 WITH CHECK (true);
 
 -- ---------------------------------------------------------------------------
--- Audit (D6): total_rooms changes are audited the same way cost_per_night
--- already is (migration 0016), and both now cover INSERT too, not just
--- UPDATE -- opening a night at a given cost and room count is itself worth
--- a record, the same as later changing either one. CREATE OR REPLACE on
--- allotments_audit_trigger() and a DROP + re-CREATE of the trigger that
--- used it: migration 0016's own file is untouched (migrations are
--- forward-only, CLAUDE.md section 7), this migration only replaces the
--- database objects that one created.
+-- Audit (D6): total_rooms is now audited like cost_per_night (0016), both
+-- covering INSERT too, not just UPDATE. CREATE OR REPLACE plus a DROP +
+-- re-CREATE of the trigger that used it -- 0016's file stays untouched
+-- (forward-only migrations); this one only replaces the objects it made.
 -- ---------------------------------------------------------------------------
 
 CREATE OR REPLACE FUNCTION allotments_audit_trigger() RETURNS trigger
@@ -164,8 +160,11 @@ EXECUTE FUNCTION allotments_audit_trigger();
 
 -- Room-count audit rows are not cost and must stay visible to an admin
 -- without cost visibility (D6); the full USING clause is repeated because
--- ALTER POLICY replaces it wholesale, the same shape migration 0019 used
--- to widen this same policy for price_rules' two non-cost columns.
+-- ALTER POLICY replaces it wholesale, not appends -- carrying forward
+-- every entry 0019 AND 0022 already added (read from both files, not
+-- assumed from 0019 alone: overwriting based on a stale baseline would
+-- have silently dropped 0022's three price_overrides columns from the
+-- allow-list).
 ALTER POLICY audit_log_select_admin_only ON audit_log
 USING (
     current_app_role() = 'admin'
@@ -176,6 +175,9 @@ USING (
             ('app_users', 'can_view_cost'),
             ('price_rules', 'demand_curve'),
             ('price_rules', 'is_active'),
+            ('price_overrides', 'ask_price_override'),
+            ('price_overrides', 'min_allowed_override'),
+            ('price_overrides', 'expires_at'),
             ('allotments', 'total_rooms')
         )
     )
