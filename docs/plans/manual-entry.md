@@ -1,6 +1,6 @@
 # Plan: manual rate and room entry
 
-**Status (2026-09-27): approved by the owner with the decisions in section 1. Two PRs: PR-1 (hotel location fields, migration 0028) is being built; PR-2 (allotment entry, migration 0029) follows.** Nothing in this plan is applied to any database. This file contains no secrets.
+**Status (2026-09-27): approved by the owner with the decisions in section 1. Two PRs: PR-1 (hotel location fields, migration 0028) is written and open as PR #63, not merged and not applied; PR-2 (allotment entry, migration 0029) follows.** Nothing in this plan is applied to any database. This file contains no secrets.
 
 **The gates still apply and are not relaxed by the approval:** every migration is shown to the owner in full before it is applied, and is applied to `hotel-sales-agent-dev` only on the owner's explicit go-ahead at that moment; the exact audit and RLS change in PR-2 is shown as SQL before it is applied; nothing here restarts a service; there is no change in `pricing/`.
 
@@ -34,7 +34,7 @@ Additive only; no rename, no data rewrite beyond the column default.
 - `COMMENT ON COLUMN` for the four columns, and for `distance_to_haram_meters`: its reference point depends on the city (Masjid al-Haram for Makkah, Al-Masjid an-Nabawi for Madinah).
 - No grant, no policy: `hotels` already grants `authenticated` table-level SELECT, INSERT and UPDATE with admin-only write policies (migration 0014). The backend roles have no privilege on `hotels`, so the agent and the worker cannot see the new columns.
 
-Hotel form (`/hotels/[hotelId]`): a city select; a zone select filtered by city; a district name field (at most 60 characters); seven weekend-day checkboxes (default Friday and Saturday). Optional fields. Server-side validation mirrors the CHECKs, with a conformance test in the style of `hotelDetails.conformance.test.ts`.
+Hotel form (`/hotels/[hotelId]`): a city select; a zone select (the seven zones grouped under their two cities, no client-side script; the server action and the database enforce the pairing); a district name field (at most 60 characters); seven weekend-day checkboxes (default Friday and Saturday). City, zone and district name are optional. **The form requires at least one weekend day, although the database allows an empty array** (a hotel with no weekend): an empty selection is far more likely to be a slip. Server-side validation mirrors the CHECKs, with a conformance test in the style of `hotelDetails.conformance.test.ts`. Built in PR #63.
 
 ## 4. PR-2: migration 0029_allotment_entry.sql
 
