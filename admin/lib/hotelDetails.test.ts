@@ -15,6 +15,7 @@ import {
   parseRoomTypeDetails,
   parseWeekendDays,
   parseZone,
+  ZONE_LABELS,
   zoneBelongsToCity,
 } from "@/lib/hotelDetails";
 
@@ -403,5 +404,22 @@ describe("parseDistrictName", () => {
     const astralAtTheLimit = "\u{1F3E8}".repeat(MAX_DISTRICT_NAME_LENGTH);
     expect(parseDistrictName(astralAtTheLimit).valid).toBe(true);
     expect(parseDistrictName(astralAtTheLimit + "\u{1F3E8}").valid).toBe(false);
+  });
+});
+
+describe("ZONE_LABELS", () => {
+  it("words the three Madinah directional zones as full zone names, as the owner asked", () => {
+    // A bare "الشمال" does not say north of what, so each direction reads as
+    // a zone: the owner's wording of 2026-09-27.
+    expect(ZONE_LABELS.madinah_north).toBe("المنطقة الشمالية");
+    expect(ZONE_LABELS.madinah_west).toBe("المنطقة الغربية");
+    expect(ZONE_LABELS.madinah_south).toBe("المنطقة الجنوبية");
+  });
+
+  it("leaves the other four zone labels as they were", () => {
+    expect(ZONE_LABELS.makkah_central).toBe("المنطقة المركزية (حول الحرم)");
+    expect(ZONE_LABELS.makkah_outside).toBe("خارج المنطقة المركزية");
+    expect(ZONE_LABELS.madinah_central).toBe("المنطقة المركزية (حول المسجد النبوي)");
+    expect(ZONE_LABELS.madinah_outside).toBe("خارج المنطقة المركزية");
   });
 });

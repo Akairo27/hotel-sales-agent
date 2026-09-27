@@ -88,9 +88,9 @@ export const ZONE_LABELS: Record<HotelZone, string> = {
   makkah_central: "المنطقة المركزية (حول الحرم)",
   makkah_outside: "خارج المنطقة المركزية",
   madinah_central: "المنطقة المركزية (حول المسجد النبوي)",
-  madinah_north: "الشمال",
-  madinah_west: "الغرب",
-  madinah_south: "الجنوب",
+  madinah_north: "المنطقة الشمالية",
+  madinah_west: "المنطقة الغربية",
+  madinah_south: "المنطقة الجنوبية",
   madinah_outside: "خارج المنطقة المركزية",
 };
 
