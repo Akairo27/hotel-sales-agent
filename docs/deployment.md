@@ -34,11 +34,10 @@ hotel-worker.timer ──► hotel-worker.service   تمريرة كل دقيقة
 /etc/hotel-admin/build.env           NEXT_PUBLIC_* فقط، root:root 0644
 /etc/hotel-admin/agent.env           أسرار الوكيل (منها DATABASE_URL بدور hotel_agent)، root:root 0600
 /etc/hotel-admin/worker.env          سر الـ worker (DATABASE_URL بدور hotel_worker)، root:root 0600
-/opt/hotel/python  و  /opt/hotel/venv   بايثون ٣٫١٤ وبيئته الافتراضية خارج /root — بعد التحويل
+/opt/hotel/python  و  /opt/hotel/venv   بايثون ٣٫١٤ وبيئته الافتراضية للوكيل والـ worker، root:root، قراءة فقط لهما
 /etc/systemd/system/hotel-admin.service
-/etc/systemd/system/hotel-agent.service     (الحالة المستهدفة في ops/hotel-agent.service)
-/etc/systemd/system/hotel-worker.service    و hotel-worker.timer (نسخ في ops/)
-/etc/systemd/system/hotel-worker.service.d/10-worker-env.conf   مؤقت: يوجّه الـ worker إلى worker.env حتى التحويل
+/etc/systemd/system/hotel-agent.service     User=hotel-agent (نسخة في ops/hotel-agent.service)
+/etc/systemd/system/hotel-worker.service    User=hotel-worker، و hotel-worker.timer (نسخ في ops/)
 /etc/nginx/sites-available/hotel-admin
 /etc/nginx/conf.d/hotel-admin-limits.conf
 /etc/letsencrypt/live/149.104.71.71/
@@ -59,41 +58,68 @@ systemd هو الحاجز الوحيد** الذي يمنع كشف Next.js مبا
 
 ### الوكيل والـ worker
 
-- **الحالة المستهدفة والحالة الفعلية.** `ops/hotel-agent.service` و
-  `ops/hotel-worker.service` في المستودع هما **الحالة المستهدفة** للتحويل إلى
-  مستخدمين غير جذر (`docs/plans/role-fix.md`): مستخدم مخصص لكل خدمة
-  (`hotel-agent` و`hotel-worker`)، وبيئة بايثون ٣٫١٤ خارج `/root` في
-  `/opt/hotel/venv`، وتشديد الوحدة. **الخادم لا يشغّلهما بعد.** ما زالت وحدتاه
-  المثبَّتتان تعملان **بالجذر**: الوكيل عبر `uv run` من `/root/.local/bin/uv`،
-  والـ worker من `.venv` داخل المستودع وبملف `worker.env` عبر ملف التعديل
-  الجانبي المؤقت `10-worker-env.conf` (يُحذف عند تثبيت وحدة الـ worker
-  المستهدفة لأنها تسمّي `worker.env` أصلاً). لا تُثبَّت النسختان
-  الجديدتان قبل توفر متطلباتهما (تسردها ترويسة كل ملف). كل خطوة على الخادم
-  تُعرض على صاحب القرار قبل تنفيذها، و**إعادة تشغيل `hotel-agent` لا تتم إلا
-  بتأكيده.**
+- **الحالة الفعلية (2026-09-27): الوكيل والـ worker يعملان بمستخدمين غير
+  جذر.** الـ worker بمستخدم `hotel-worker` (uid 995) والوكيل بمستخدم
+  `hotel-agent` (uid 996)، وكلاهما من `/opt/hotel/venv`، بوحدتَي
+  `ops/hotel-agent.service` و`ops/hotel-worker.service` مثبَّتتين كما هما
+  (`NoNewPrivileges` و`PrivateTmp` و`ProtectSystem=strict` و`ProtectHome=yes`).
+  ثبت المستخدم من ثلاثة مصادر: حقل `_UID` في سجل العملية نفسها، و`ps`،
+  و`NoNewPrivs: 1` في `/proc/<pid>/status`. عولجت بعد التحويل رسالة واتساب
+  حقيقية (`processed`) فثبت أن الاتصال الخارجي يعمل تحت التشديد. كل خطوة على
+  الخادم تُعرض على صاحب القرار قبل تنفيذها، و**إعادة تشغيل `hotel-agent` لا
+  تتم إلا بتأكيده.**
+- **بقايا الإعداد القديم، محتفَظ بها حتى 2026-10-04.** نسخة الوحدة القديمة
+  للوكيل `/root/hotel-agent.service.before`، و`.venv` داخل المستودع، ومفسّر
+  بايثون تحت `/root/.local/share/uv/python`. لا تستعملها الخدمات الآن؛ بقاؤها
+  أسبوعاً هو طريق الرجوع (استعادة الوحدة القديمة ثم `daemon-reload` وإعادة
+  تشغيل بتأكيد المالك، وتحتاج إلى `.venv` القديمة و`/root/.local/bin/uv`).
+  يُحذف بعد ذلك التاريخ إن لم يقع خطأ ما عدا `uv`، فيبقى وينتقل إلى موقع نظام
+  — بند في «قائمة ما قبل الإنتاج».
 - **دورا قاعدة البيانات: الحالة الفعلية (2026-09-26).** ميقريشن 0027 مطبَّق على
-  `hotel-sales-agent-dev`. الـ worker يتصل بدور `hotel_worker` (بعد التحويل عبر
-  ملف التعديل الجانبي)، والوكيل بدور `hotel_agent` (بعد إعادة تشغيله بتأكيد
-  المالك). لا شيء في التطبيق يتصل بدور `postgres` بعد الآن؛ ظهر ذلك في
+  `hotel-sales-agent-dev`. الـ worker يتصل بدور `hotel_worker` عبر `worker.env`،
+  والوكيل بدور `hotel_agent`. لا شيء في التطبيق يتصل بدور `postgres` بعد الآن؛ ظهر ذلك في
   `pg_stat_activity`: اتصال خامل واحد لكل من الدورين عبر Supavisor، ولا اتصال
   تطبيقي بـ`postgres`. جُرِّبت رسالة واتساب حقيقية، ثم كتابة تجريبية بدور
   `hotel_agent` أُلغيت كلها بـ`ROLLBACK` (تشمل إدراج `quote`، ومحاولات
   `UPDATE` و`DELETE` و`TRUNCATE` على `quotes` رُفضت جميعاً)، ولم يبقَ أي صف
-  منها. **ما لم يتم بعد:** الانتقال إلى مستخدمي نظام التشغيل غير الجذر، وهو
-  عملية تحويل مستقلة.
+  منها.
 - المتغيرات `SUPABASE_URL` و`SUPABASE_ANON_KEY` و`SUPABASE_SERVICE_ROLE_KEY`
-  أُزيلت من ملف `agent.env` (لا يقرؤها أي كود للوكيل)؛ وتزول من بيئة العملية
-  الجارية عند إعادة التشغيل التالية للوكيل. `SUPABASE_SERVICE_ROLE_KEY` يبقى
+  أُزيلت من ملف `agent.env` (لا يقرؤها أي كود للوكيل)، وزالت من بيئة عملية
+  الوكيل بإعادة تشغيله في 2026-09-27. `SUPABASE_SERVICE_ROLE_KEY` يبقى
   في `admin.env` لأن اللوحة تقرؤه.
+- **كيف بُنيت بيئة الوكيل والـ worker (2026-09-27)، للمرجع وإعادة البناء.**
+  (١) الحسابان: `useradd --system --user-group --no-create-home --home-dir
+  /nonexistent --shell /usr/sbin/nologin hotel-agent`، والأمر نفسه لـ`hotel-worker`.
+  (٢) المفسّر: نُسخ المجلد `cpython-3.14.7-linux-x86_64-gnu` الذي كان الوكيل يعمل
+  عليه (`cp -a`) إلى `/opt/hotel/python/` ليكون الملف التنفيذي مطابقاً تماماً لما
+  كان يعمل؛ على جهاز نظيف يُستعمل `uv python install --install-dir
+  /opt/hotel/python 3.14` (الراية موثَّقة في `--help` ولم تُجرَّب على هذا الخادم).
+  (٣) البيئة الافتراضية: `uv venv /opt/hotel/venv --no-project --python
+  /opt/hotel/python/cpython-3.14.7-linux-x86_64-gnu/bin/python3.14
+  --no-python-downloads`، ثم من داخل المستودع
+  `VIRTUAL_ENV=/opt/hotel/venv uv sync --frozen --active --no-dev
+  --no-python-downloads --link-mode copy --offline`. رُكّبت ٣٣ حزمة تشغيل بلا
+  أدوات التطوير، بالإصدارات نفسها في `.venv` القديمة؛ و`--offline` لأن كاش `uv`
+  عند الجذر كان يحوي القطع (بلا كاش تُحذف الراية). ينشئ `uv` الملف
+  `/opt/hotel/venv/.lock` بصلاحية `666`، فيُصحَّح: `chmod 0644`.
+  `package = false` في `pyproject.toml` تعني أن شيئاً لا يُبنى داخل المستودع.
+  (٤) الوحدتان: `cp ops/hotel-worker.service ops/hotel-agent.service
+  /etc/systemd/system/` ثم `systemctl daemon-reload`؛ يُجرَّب الـ worker أولاً
+  (تمريرة يدوية ثم المؤقّت)، ثم يُعاد تشغيل الوكيل بتأكيد المالك. لإثبات
+  مستخدم العملية: `journalctl _SYSTEMD_UNIT=<الوحدة> -n 1 -o verbose` وحقل `_UID`
+  (لا `-u`، فآخر سطر فيه رسالة systemd نفسها وهي دائماً للجذر). تحديث الحزم لاحقاً
+  يعني إعادة `uv sync` إلى `/opt/hotel/venv` ثم إعادة تشغيل الخدمتين؛ ويحتاج `uv`.
 - لا سر في أي من الوحدتين ولا في أي ملف تعديل جانبي (`drop-in`): مصدر
   البيئة الوحيد هو مسار `EnvironmentFile`، وsystemd يقرؤه بالجذر قبل التحوّل
   إلى مستخدم الخدمة (وهذا ما يجعل `admin.env` بصلاحية `0600 root:root` مع
   أن اللوحة تعمل بـ`www-data`). لذلك تبقى ملفات البيئة `0600 root:root` ولا
   يُجعل أيٌّ منها مقروءاً لمجموعة.
-- `ops/hotel-worker.timer` والوحدة الحالية للـ worker مثبَّتان منذ
-  2026-09-24 بعد تمريرة يدوية ناجحة (خرج الرمز ٠ وسطر `worker_run_finished` في
-  السجل). الـ worker يقرأ الشجرة في كل تمريرة فلا يحتاج إعادة تشغيل عند
-  تحديثها.
+- `ops/hotel-worker.timer` مثبَّت منذ 2026-09-24 بعد تمريرة يدوية ناجحة (خرج
+  الرمز ٠ وسطر `worker_run_finished` في السجل)، ولم يتغيّر. وحدة الـ worker
+  استُبدلت بالنسخة المستهدفة في 2026-09-27 بعد إيقاف المؤقّت، وحُذف ملف التعديل
+  الجانبي المؤقت `10-worker-env.conf` لأن الوحدة تسمّي `worker.env` أصلاً، ثم
+  تمريرة يدوية ناجحة فمؤقّت (٥ تمريرات متتالية بلا خطأ). الـ worker يقرأ الشجرة
+  في كل تمريرة فلا يحتاج إعادة تشغيل عند تحديثها.
 - فشل التمريرة يظهر في `systemctl --failed` وفي السجل فقط: لا تنبيه.
 
 ---
@@ -129,7 +155,8 @@ systemd هو الحاجز الوحيد** الذي يمنع كشف Next.js مبا
    شاركت معرّف المستخدم نفسه مع الوكيل لأمكنها قراءة بيئة عمليته
    (`/proc/<pid>/environ`) وفيها اعتماد قاعدة البيانات ومفتاح النموذج ورمز
    واتساب؛ وفصل المعرّفين يمنع ذلك. الحسابان بلا صدفة دخول (`nologin`) وبلا
-   مجلد منزل.
+   مجلد منزل. أُنشئ الحسابان في 2026-09-27 (`hotel-agent` uid 996،
+   و`hotel-worker` uid 995) وكلمتا مرورهما مقفلتان.
 
 ---
 
@@ -521,8 +548,9 @@ build` ← `systemctl restart hotel-admin`، الثلاثة الأولى بمس�
 
 ## قائمة ما قبل الإنتاج
 
-بنود أجّلها المالك (2026-09-26): النشر تجريبي ولا عملاء حقيقيين، فلا تنفيذ لأي
-منها حتى يقرّر المالك موعده. تُراجَع كلها قبل أول عميل حقيقي.
+بنود أجّلها المالك (2026-09-26 و2026-09-27): النشر تجريبي ولا عملاء حقيقيين، فلا
+تنفيذ لأي منها حتى يقرّر المالك موعده (عدا حذف الإعداد القديم فلا يُنفَّذ قبل
+2026-10-04). تُراجَع كلها قبل أول عميل حقيقي.
 
 - [ ] **تدوير كلمة مرور الدور `postgres`.** تعرّض سطر `DATABASE_URL` القديم
   (وفيه كلمة مرور `postgres`) بتاريخ 2026-09-26؛ ولم يتعرّض بقية `agent.env`.
@@ -533,6 +561,23 @@ build` ← `systemctl restart hotel-admin`، الثلاثة الأولى بمس�
   قيمته من الخادم، وترويسة سير العمل تصفه بمشروع Supabase حقيقي لم تُطبَّق
   عليه ميقريشنات. **بعد التدوير:** تمريرة الـ worker التالية ناجحة، ورسالة
   اختبار عبر الوكيل تُعالَج.
+- [ ] **حذف الإعداد القديم بالجذر بعد 2026-10-04 إن لم يقع خطأ.** الوكيل
+  والـ worker يعملان بمستخدمين غير جذر منذ 2026-09-27، ويُحتفَظ أسبوعاً بما
+  يلزم للرجوع. بعد التاريخ يُحذف: نسخة الوحدة القديمة
+  `/root/hotel-agent.service.before`، و`.venv` القديمة داخل
+  `/srv/hotel-admin/app`، ومفسّر بايثون القديم تحت
+  `/root/.local/share/uv/python`. **`uv` يبقى:** هو الأداة التي بُنيت بها
+  `/opt/hotel/venv` وتُحدَّث بها الحزم، وكاشه `/root/.cache/uv` يبقى أيضاً
+  فتظلّ `--offline` تعمل. الخطة عند ذلك: **نقل `uv` إلى موقع نظام**
+  (مثلاً `/usr/local/bin`، وهو فارغ اليوم) بدل حذفه، ثم إبقاؤه أداة تحديث
+  الحزم: `install -m 0755 /root/.local/bin/uv /usr/local/bin/uv`، ثم
+  `/usr/local/bin/uv --version`، ثم إعادة تجربة الجافّة (`--dry-run`) للمزامنة
+  إلى `/opt/hotel/venv` بالمسار الجديد فلا يظهر شيء للتثبيت، وبعدها يُزال
+  النسخ القديم من `/root/.local/bin`. (`uvx` بجانبه لا يستعمله المستودع.)
+  لم تُفحص بعد النقل قدرة `uv self update`؛ تحديث `uv` نفسه قرار مستقل.
+  **قبل الحذف:** تحقق أن `ExecStart` في وحدتَي الوكيل والـ worker يشير إلى
+  `/opt/hotel/venv` وحده، وأن آخر ٧ أيام بلا خطأ في `systemctl --failed`
+  وسجل الوكيل.
 - [ ] **مراقبة الشهادة.** شهادة الـ IP قصيرة العمر (نحو ٦ أيام) ولا تنبيه عند
   فشل التجديد؛ انظر النقطة الحرجة ٢.
 - [ ] **حدّ معدّل على `/webhook/` في nginx.** لا `limit_req` عليه اليوم

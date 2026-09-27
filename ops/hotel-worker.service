@@ -1,21 +1,26 @@
 # One worker pass (services/worker/runner.py): release expired holds.
 # Started by hotel-worker.timer every minute; not enabled on its own.
 #
-# TARGET STATE of the non-root move described in docs/plans/role-fix.md. The
-# host does NOT run this version yet: it runs the previous unit (as root,
-# from the repo's own .venv, with agent.env). Do not install this file until
-# its prerequisites exist, or every pass will fail to start:
+# INSTALLED on the trial host since 2026-09-27, as described in
+# docs/plans/role-fix.md (it replaced the previous unit, which ran as root
+# from the repo's own .venv with agent.env; the interim drop-in that pointed
+# it at worker.env was removed). Prerequisites, all met on the trial host and
+# needed to rebuild it (the commands are in docs/deployment.md, section
+# "الوكيل والـ worker"); without them every pass fails to start:
 #   - the system user and group hotel-worker,
 #   - Python 3.14 and the venv at /opt/hotel/venv,
 #   - /etc/hotel-admin/worker.env (0600 root:root) holding the hotel_worker
 #     DATABASE_URL, created by the owner (the value is never written to the
 #     repository). systemd reads it as root before dropping privileges, so it
 #     does not need to be readable by the service user.
-# Each host step is shown to the owner before it is run. To apply (root):
+# Each host step is shown to the owner before it is run. To apply a change
+# (root):
 #   cp ops/hotel-worker.service /etc/systemd/system/
 #   systemctl daemon-reload
 #   systemctl start hotel-worker.service      # one manual pass first
 #   journalctl -u hotel-worker.service -n 5   # expect a worker_run_finished line
+# Check the process user with
+# `journalctl _SYSTEMD_UNIT=hotel-worker.service -n 1 -o verbose` (field _UID).
 
 [Unit]
 Description=Hotel Sales Agent worker (one pass: release expired holds)

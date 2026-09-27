@@ -1,11 +1,11 @@
 # Plan: dedicated database roles and non-root services (role-fix)
 
-**Status (2026-09-26): approved by the owner on 2026-09-25 as written. PR #58 is merged, migration 0027 is applied to `hotel-sales-agent-dev`, and both services connect through their own roles (`hotel_agent`, `hotel_worker`). The non-root OS-user move (section 8) is NOT done: both services still run as root.**
+**Status (2026-09-27): approved by the owner on 2026-09-25 as written, and executed. PR #58 is merged, migration 0027 is applied to `hotel-sales-agent-dev`, both services connect through their own roles (`hotel_agent`, `hotel_worker`), and the non-root OS-user move (section 8) was done on 2026-09-27: the agent runs as `hotel-agent` and the worker as `hotel-worker`, both from `/opt/hotel/venv`. The old root-run setup is kept until 2026-10-04 as the rollback path.**
 Written 2026-09-24. This file contains no secrets: only role names, variable names and paths.
 
 **The gates in this plan applied throughout and were not relaxed by the approval:** the final SQL of migration 0027 was shown to the owner and applied only on the owner's explicit go-ahead at that moment; every host-level step was shown before it was run; the assistant created no credential and touched no `.env`; nothing was restarted without the owner's confirmation.
 
-**Done (2026-09-25 to 2026-09-26):** migration 0027 applied and verified against the manifest; the owner set both passwords and created `worker.env`; the worker was switched to `worker.env` through an interim systemd drop-in; `hotel-agent` was restarted, on the owner's confirmation, with the `hotel_agent` URL. A real WhatsApp message was processed, and a write probe as `hotel_agent` (always rolled back) passed and left no rows. **Not done:** section 8, and the recommended clean-up in section 7 step 7 is only partly done (see there).
+**Done (2026-09-25 to 2026-09-27):** migration 0027 applied and verified against the manifest; the owner set both passwords and created `worker.env`; the worker was switched to `worker.env` through an interim systemd drop-in; `hotel-agent` was restarted, on the owner's confirmation, with the `hotel_agent` URL. A real WhatsApp message was processed, and a write probe as `hotel_agent` (always rolled back) passed and left no rows. On 2026-09-27 section 8 was executed: the two service accounts, the interpreter and venv under `/opt/hotel`, both target units (the interim drop-in removed), the worker first and then the agent (restarted on the owner's confirmation), and a second real WhatsApp message processed under the hardened unit. **Not done:** removing the old root-run setup (kept until 2026-10-04) and rotating the `postgres` password; both are on the pre-production checklist at the end of `docs/deployment.md`.
 
 ## 1. Decisions on record (owner, 2026-09-24)
 
@@ -83,18 +83,20 @@ Written 2026-09-24. This file contains no secrets: only role names, variable nam
 4. Before any restart, the assistant can read each new URL in a subshell without printing it and run read-only checks (current role, attributes, privileges against the manifest, `SHOW statement_timeout`).
 5. The host-level steps in section 8 run, each shown to the owner first.
 6. The `hotel-agent` restart needs the owner's explicit confirmation.
-7. Afterwards: the three unused `SUPABASE_*` variables were removed from `agent.env` on 2026-09-26 (they leave the running agent's environment at its next restart). The owner deferred rotating the `postgres` password; it is on the pre-production checklist at the end of `docs/deployment.md`.
+7. Afterwards: the three unused `SUPABASE_*` variables were removed from `agent.env` on 2026-09-26, and left the agent's environment at its restart on 2026-09-27. The owner deferred rotating the `postgres` password; it is on the pre-production checklist at the end of `docs/deployment.md`.
 
 **Order as planned:** database roles first, then the units, so the OS-user change and the role change land together.
-**Order as executed (owner's choice, 2026-09-26):** the database roles were cut over first, using an interim drop-in for the worker (`/etc/systemd/system/hotel-worker.service.d/10-worker-env.conf`), and the agent's `DATABASE_URL` changed in place. The OS-user move in section 8 is a separate, later cutover.
+**Order as executed (owner's choice, 2026-09-26):** the database roles were cut over first, using an interim drop-in for the worker (`/etc/systemd/system/hotel-worker.service.d/10-worker-env.conf`), and the agent's `DATABASE_URL` changed in place. The OS-user move in section 8 was a separate, later cutover, executed on 2026-09-27.
 
-## 8. Draft host-level steps for the non-root move (NOT RUN)
+## 8. Host-level steps for the non-root move (executed 2026-09-27)
 
-Every step is unexecuted and is shown to the owner first. Nothing touches the running agent until step 7.
+Every step was shown to the owner first and run only on the owner's approval, one step at a time. The draft below is kept as written; **As executed** notes record where the run differed from it.
 
-1. **Service users:** `useradd --system --no-create-home --shell /usr/sbin/nologin hotel-agent`, and the same for `hotel-worker` (needs the docs amendment above).
-2. **Python 3.14 outside `/root`:** `uv python install --install-dir /opt/hotel/python 3.14` (the `--install-dir` flag is verified in `uv python install --help`). Directory root-owned, mode 0755. Check that a non-root user can execute it.
-3. **A new venv outside `/root` and outside the repo:** `uv venv /opt/hotel/venv --python <that python>`, then from the repo `VIRTUAL_ENV=/opt/hotel/venv uv sync --frozen --active` (`uv venv [PATH] --python`, `uv sync --active` and `--frozen` are verified in the help output; `--no-dev` to be checked at that step). The current `/srv/hotel-admin/app/.venv` and `/root/.local/bin/uv` stay in place, so the running agent is unaffected.
+**As executed, in order:** accounts; interpreter; venv (empty, dry run, then install); worker cutover (timer paused, unit installed, drop-in removed, reload, gate, one manual pass, timer resumed, five timer passes); agent cutover (unit installed and reloaded, gate, restart on the owner's confirmation, verification, a real WhatsApp message). The docs for rebuilding are in `docs/deployment.md`, section "الوكيل والـ worker".
+
+1. **Service users:** `useradd --system --no-create-home --shell /usr/sbin/nologin hotel-agent`, and the same for `hotel-worker` (needs the docs amendment above). **As executed:** with `--user-group --home-dir /nonexistent` added; uids 996 (`hotel-agent`) and 995 (`hotel-worker`), passwords locked.
+2. **Python 3.14 outside `/root`:** `uv python install --install-dir /opt/hotel/python 3.14` (the `--install-dir` flag is verified in `uv python install --help`). Directory root-owned, mode 0755. Check that a non-root user can execute it. **As executed:** the interpreter directory the agent already ran on (`cpython-3.14.7`) was copied with `cp -a` to `/opt/hotel/python/` instead, so the binary is identical and nothing was downloaded; verified by file and symlink manifest hashes and by running it as each service user. The `uv python install` route was not used on this host.
+3. **A new venv outside `/root` and outside the repo:** `uv venv /opt/hotel/venv --python <that python>`, then from the repo `VIRTUAL_ENV=/opt/hotel/venv uv sync --frozen --active` (`uv venv [PATH] --python`, `uv sync --active` and `--frozen` are verified in the help output; `--no-dev` to be checked at that step). The current `/srv/hotel-admin/app/.venv` and `/root/.local/bin/uv` stay in place, so the running agent is unaffected. **As executed:** `uv venv /opt/hotel/venv --no-project --python <that interpreter> --no-python-downloads`, then `VIRTUAL_ENV=/opt/hotel/venv uv sync --frozen --active --no-dev --no-python-downloads --link-mode copy --offline` (every flag verified in `--help`; `--offline` because root's cache held the artifacts). 33 runtime packages at the same versions as the old `.venv`. uv creates `/opt/hotel/venv/.lock` with mode 666, which was set to 0644.
 4. **Env files:** `agent.env` stays as is (`0600 root:root`); the owner creates `worker.env` (`0600 root:root`).
 5. **Unit changes (in the PR, applied later):**
    - `hotel-worker.service`: `User=hotel-worker`, `Group=hotel-worker`, `EnvironmentFile=/etc/hotel-admin/worker.env`, `ExecStart=/opt/hotel/venv/bin/python -m services.worker`. The interim drop-in `hotel-worker.service.d/10-worker-env.conf` (installed 2026-09-26) is removed in the same step, because this unit already names `worker.env`.
@@ -102,7 +104,7 @@ Every step is unexecuted and is shown to the owner first. Nothing touches the ru
    - The repo tree is already world-readable, so both users can read the code.
 6. **Test the worker first:** apply the new worker unit, `systemctl daemon-reload`, `systemctl start hotel-worker.service`, read the journal, and check the process owner with `ps`.
 7. **Agent cutover (owner's confirmation):** apply the new agent unit, `systemctl daemon-reload`, `systemctl restart hotel-agent`, verify with `systemctl show hotel-agent -p User` and `ps -o user=`.
-8. **Rollback at every step:** restore the previous unit files from `ops/` (git history), `systemctl daemon-reload`, restart. The old venv and the root-owned `uv` stay until the new setup is verified.
+8. **Rollback at every step:** restore the previous unit files from `ops/` (git history), `systemctl daemon-reload`, restart. The old venv and the root-owned `uv` stay until the new setup is verified. **As executed:** the old agent unit was saved to `/root/hotel-agent.service.before` (the installed unit is not byte-identical to any commit; it matches commit `9f75e42` apart from comments), and the old worker unit is commit `7847b7f`. The old `.venv` and the root-owned interpreter are kept until 2026-10-04 and then removed. `uv` and its cache stay: `uv` builds and updates `/opt/hotel/venv`, and at that date it is moved to a system location (for example `/usr/local/bin`) rather than deleted.
 
 ## 9. What was unverified, and what is still unverified
 
@@ -119,6 +121,9 @@ Settled on the first real connections to the hosted database (2026-09-26):
 - The role-level `statement_timeout` survives the pooler: `SHOW statement_timeout` returns 10 s as `hotel_agent` and 30 s as `hotel_worker`.
 - The agent's quote insert, escalation insert and the refused `UPDATE`, `DELETE` and `TRUNCATE` on `quotes` work as designed on the live database (a probe that was always rolled back).
 
-Still unverified:
+Settled on the non-root move (2026-09-27):
 
-- The `--no-dev` flag and the venv placement in section 8, step 3.
+- The `--no-dev` flag and the venv placement in section 8, step 3: every flag was checked against the installed `uv --help`, and the venv installs 33 runtime packages with no dev tools.
+- The hardened units (`NoNewPrivileges`, `PrivateTmp`, `ProtectSystem=strict`, `ProtectHome=yes`) do not block the agent or the worker: five timer passes ran as `hotel-worker`, and a real WhatsApp message (outbound TLS to the language-model provider and to Meta included) was processed as `hotel-agent`.
+
+Still unverified: nothing that this plan set out to verify.
