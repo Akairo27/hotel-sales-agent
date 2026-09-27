@@ -81,7 +81,14 @@ def seed_allotment_night(
     seed_allotment_nights (below), which seeds several consecutive nights
     but always starts them at reserved=held=0. Pricing tests need
     per-night occupancy control that inventory tests never have.
+
+    Seeds a fresh actor first (see seed_actor): migration 0029's audit
+    trigger on allotments now fires on INSERT too, not just UPDATE
+    (mirroring cost_per_night's own original insert-audit requirement),
+    and rejects a write with no app.actor_id set, same as price_rules'
+    and price_overrides'.
     """
+    seed_actor(conn)
     allotment_id = returning_id(
         conn,
         "INSERT INTO allotments (hotel_id, room_type_id, stay_date, total_rooms, "
@@ -240,7 +247,16 @@ def seed_allotment_nights(
     cost_per_night: int = 10_000,
 ) -> None:
     """Creates one allotment and one room_night_inventory row per night,
-    each starting with `total_rooms` capacity and zero reserved/held."""
+    each starting with `total_rooms` capacity and zero reserved/held.
+
+    Seeds a fresh actor first (see seed_actor): migration 0029's audit
+    trigger on allotments now fires on INSERT too, not just UPDATE, and
+    rejects a write with no app.actor_id set, same as price_rules' and
+    price_overrides'. One actor for the whole loop, not one per night —
+    app.actor_id is session-scoped (set_config's third argument is False),
+    so it survives across every INSERT this call makes.
+    """
+    seed_actor(conn)
     for offset in range(nights):
         night = check_in + timedelta(days=offset)
         allotment_id = returning_id(

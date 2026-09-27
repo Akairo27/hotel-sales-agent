@@ -21,7 +21,11 @@ from psycopg import sql
 
 from services.inventory.errors import InsufficientInventoryError
 from services.inventory.operations import create_hold
-from tests.integration._seed import seed_allotment_nights, seed_hotel_and_room_type
+from tests.integration._seed import (
+    seed_actor,
+    seed_allotment_nights,
+    seed_hotel_and_room_type,
+)
 
 pytestmark = pytest.mark.usefixtures("db_conn")
 
@@ -607,6 +611,7 @@ def test_repairs_an_allotment_missing_its_room_night_inventory_row(
     hotel_id, room_type_id = seed_hotel_and_room_type(db_conn)
     admin_id = _seed_user(db_conn, role="admin", can_view_cost=True)
     start = _riyadh_today(db_conn) + timedelta(days=10)
+    seed_actor(db_conn)  # a raw INSERT here needs app.actor_id set too
     db_conn.execute(
         "INSERT INTO allotments "
         "(hotel_id, room_type_id, stay_date, total_rooms, cost_per_night) "

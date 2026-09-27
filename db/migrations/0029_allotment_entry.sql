@@ -406,9 +406,17 @@ BEGIN
         NULL;
     END;
 
+    -- unnest() with more than one argument cannot carry a column
+    -- definition list (confirmed against real Postgres, not assumed) --
+    -- the fix is parallel SRFs directly in the target list instead of a
+    -- single multi-argument unnest() in the FROM clause: Postgres runs
+    -- several set-returning functions in the same SELECT list in
+    -- lockstep, which is exactly the zip these four equal-length arrays
+    -- need.
     RETURN QUERY
-    SELECT u.d, u.a, p_total_rooms, p_cost_per_night, u.r, u.h
-    FROM unnest(v_dates, v_actions, v_reserved_arr, v_held_arr) AS u(d date, a text, r integer, h integer);
+    SELECT
+        unnest(v_dates), unnest(v_actions), p_total_rooms, p_cost_per_night,
+        unnest(v_reserved_arr), unnest(v_held_arr);
 END;
 $$;
 
