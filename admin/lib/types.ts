@@ -111,6 +111,34 @@ export interface AllotmentForDashboard {
   created_at: string;
 }
 
+// Mirrors db/migrations/0029_allotment_entry.sql's
+// room_night_availability_for_dashboard VIEW — no cost column, so no
+// masking split like AllotmentForDashboard above (that migration's own
+// comment: nothing here to hide).
+export interface RoomNightAvailabilityForDashboard {
+  allotment_id: number;
+  stay_date: string;
+  total: number;
+  reserved: number;
+  held: number;
+}
+
+export type AllotmentEntryAction = "created" | "updated" | "unchanged";
+
+// One row of admin_set_allotments' RETURNS TABLE (migration 0029) —
+// column names carry the function's own out_ prefix, PostgREST returns
+// them verbatim. cost_per_night is halalas, the same integer the function
+// takes in and the audit trail stores; admin/lib/money.ts converts it to
+// and from the whole riyals the entry screen actually shows.
+export interface AdminSetAllotmentsRow {
+  out_stay_date: string;
+  out_action: AllotmentEntryAction;
+  out_total_rooms: number;
+  out_cost_per_night: number;
+  out_reserved: number;
+  out_held: number;
+}
+
 // Mirrors db/migrations/0006_price_rules.sql's jsonb band shapes, and the
 // validation admin/lib/priceRuleBands.ts enforces client-side against the
 // same shapes (see that module's own comment for the split between what
