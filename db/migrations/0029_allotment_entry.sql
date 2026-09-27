@@ -6,14 +6,14 @@
 -- One SECURITY DEFINER function, admin_set_allotments (plan section D2),
 -- not the UPDATE-then-INSERT-via-RLS-policy pattern every other admin
 -- write here uses (0016, 0018, 0021) -- see ARCHITECTURE.md's security
--- section for why. Hardening, each verified by a test, not by this
--- comment: a fixed NOLOGIN owner role scoped to exactly the columns its
--- body uses; SET search_path = '' with every object schema-qualified
--- (pg_catalog is always searched regardless, so generate_series/unnest/
--- now/current_setting/set_config need no prefix); EXECUTE revoked from
--- PUBLIC and anon, granted only to authenticated; the actor is read via
--- the same expression auth.uid() itself uses, not by calling auth.uid(),
--- so the owner role needs no privilege on schema auth at all.
+-- section for why. Hardening, verified by a test, not by this comment: a
+-- fixed NOLOGIN owner role scoped to exactly the columns its body uses;
+-- SET search_path = '' with every object schema-qualified (pg_catalog is
+-- always searched regardless, so generate_series/unnest/now/
+-- current_setting/set_config need no prefix); EXECUTE revoked from PUBLIC
+-- and anon, granted only to authenticated; the actor is read via the same
+-- expression auth.uid() itself uses, not by calling it, so this role
+-- needs no privilege on schema auth at all.
 
 -- ---------------------------------------------------------------------------
 -- The dedicated owner role.
@@ -29,12 +29,10 @@ $$;
 
 GRANT USAGE ON SCHEMA public TO allotment_entry_writer;
 
--- Reference reads: the function validates that room_type_id genuinely
--- belongs to hotel_id (allotments has no composite FK tying the two
--- together -- only a plain room_type_id REFERENCES room_types(id), unlike
--- holds/quotes, which do have that composite FK against room_types(id,
--- hotel_id)). Column-scoped to exactly what the two EXISTS checks below
--- read; the owner role never sees a hotel's name or any other detail.
+-- Reference reads: the function validates room_type_id genuinely belongs
+-- to hotel_id (allotments has no composite FK tying the two, unlike
+-- holds/quotes' FK against room_types(id, hotel_id)). Scoped to exactly
+-- what the two EXISTS checks below read.
 GRANT SELECT (id) ON TABLE hotels TO allotment_entry_writer;
 GRANT SELECT (id, hotel_id) ON TABLE room_types TO allotment_entry_writer;
 
@@ -76,10 +74,9 @@ FOR UPDATE TO allotment_entry_writer
 USING (true)
 WITH CHECK (true);
 
--- room_night_inventory: reserved and held are read-only here -- they are
--- never set by this function, only by services/inventory's hold and
--- booking flow. Only `total` is ever written, and only alongside the
--- allotments row it belongs to.
+-- room_night_inventory: reserved/held are read-only here -- only
+-- services/inventory's hold/booking flow sets them. Only `total` is
+-- written, alongside its allotments row.
 GRANT SELECT (allotment_id, stay_date, total, reserved, held)
 ON TABLE room_night_inventory TO allotment_entry_writer;
 GRANT INSERT (
@@ -183,13 +180,11 @@ USING (
     )
 );
 
--- D4: a night is a calendar date at the hotel, and every hotel in this
--- schema is in Saudi Arabia -- one timezone, not computed per hotel. A
--- separate, parameterized helper (not now() inline in admin_set_allotments)
--- so the midnight boundary is testable by calling this directly with a
--- controlled instant, rather than needing to control the real system
--- clock over a network connection. Not granted to authenticated: the
--- exposed RPC always uses the real now(), never a caller-supplied one.
+-- D4: a night is a calendar date at the hotel; every hotel here is in
+-- Saudi Arabia, one timezone. A separate, parameterized helper (not
+-- now() inline) so the midnight boundary is testable with a controlled
+-- instant, not the real clock. Not granted to authenticated: the RPC
+-- always uses the real now().
 CREATE FUNCTION allotment_entry_riyadh_date(p_instant timestamptz) RETURNS date
 LANGUAGE sql
 IMMUTABLE
@@ -219,14 +214,12 @@ GRANT EXECUTE ON FUNCTION allotment_entry_riyadh_date(timestamptz) TO allotment_
 -- enforcement never run during a preview, so a preview could report
 -- success on a write the database would actually reject.
 --
--- Returns one row per night, not three totals: the plan's own dry-run
--- preview needs to show *which* nights fall into each bucket, and a
--- caller gets counts by grouping this result. Flagged for the owner's
--- review alongside this SQL, since the plan does not spell out the exact
--- return shape. RETURNS TABLE columns are prefixed out_ so they can never
--- collide with a same-named table column this function also reads
--- (plpgsql's default variable_conflict = error would refuse to run
--- otherwise).
+-- Returns one row per night, not three totals: the dry-run preview needs
+-- to show *which* nights fall into each bucket, and a caller gets counts
+-- by grouping this result (owner-approved). RETURNS TABLE columns are
+-- prefixed out_ so they can never collide with a same-named table column
+-- this function also reads (plpgsql's variable_conflict = error would
+-- refuse to run otherwise).
 CREATE FUNCTION admin_set_allotments(
     p_hotel_id bigint,
     p_room_type_id bigint,
@@ -422,6 +415,15 @@ BEGIN
 END;
 $$;
 
+-- ALTER ... OWNER TO needs membership in the target role, which CREATE
+-- ROLE alone does not grant. postgres on hotel-sales-agent-dev is
+-- CREATEROLE but not a real superuser (confirmed live, not assumed --
+-- 0016 notes the same about rolbypassrls), so it needs this bracket; a
+-- real superuser (CI's local Postgres) already could, masking the gap
+-- there. current_user, not a literal name. Kept until after the ACL
+-- changes below too: once ownership moves, only the new owner (or an
+-- inherited membership in it) can REVOKE/GRANT on the function.
+GRANT allotment_entry_writer TO current_user;
 ALTER FUNCTION admin_set_allotments(bigint, bigint, date, date, integer, bigint, boolean)
 OWNER TO allotment_entry_writer;
 
@@ -435,12 +437,13 @@ GRANT EXECUTE ON FUNCTION admin_set_allotments(
     bigint, bigint, date, date, integer, bigint, boolean
 ) TO authenticated;
 
+REVOKE allotment_entry_writer FROM current_user;
+
 -- ---------------------------------------------------------------------------
 -- The dashboard's read side for booked/held counts. No cost column, same
--- masking-by-absence reasoning as price_overrides (0021): there is
--- nothing here to hide behind current_user_can_view_cost(), so the grant
--- is unconditional and the gate is only the row-visibility one every
--- other *_for_dashboard view already uses.
+-- masking-by-absence reasoning as price_overrides (0021): nothing here to
+-- hide, so the grant is unconditional and the gate is the usual
+-- row-visibility one every other *_for_dashboard view uses.
 -- ---------------------------------------------------------------------------
 
 CREATE VIEW room_night_availability_for_dashboard AS
