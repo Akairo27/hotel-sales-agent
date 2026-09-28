@@ -40,6 +40,7 @@ died," not a growing list of exception-specific cases to remember.
 
 from __future__ import annotations
 
+import time
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
@@ -49,7 +50,12 @@ import psycopg
 from lib.hijri import to_hijri
 from services.agent.llm.caps import check_token_spend_caps
 from services.agent.llm.client import ModelTransport
-from services.agent.llm.config import MAX_TOOL_ITERATIONS, MESSAGE_WINDOW, LlmSettings
+from services.agent.llm.config import (
+    MAX_TOOL_ITERATIONS,
+    MESSAGE_WINDOW,
+    TURN_BUDGET_SECONDS,
+    LlmSettings,
+)
 from services.agent.llm.context import (
     build_contents,
     load_conversation_state,
@@ -159,6 +165,11 @@ async def generate_reply(
             _gemini_response_to_model_response).
         ToolLoopLimitError: the model kept calling tools past
             MAX_TOOL_ITERATIONS without producing a final reply.
+        TurnBudgetExceededError: this turn's shared time budget
+            (config.TURN_BUDGET_SECONDS, across every model-call attempt
+            and retry in every tool-calling iteration) ran out before the
+            transport could start a new attempt — see
+            services.agent.llm.client's per-attempt budget check.
         ModelUnavailableError: the model transport failed.
         UnknownToolError, InvalidToolArgumentsError: see dispatch.py.
         Any exception services.pricing.compute_quote raises for a genuine
@@ -191,6 +202,12 @@ async def generate_reply(
     tool_calls: list[ToolCallRecord] = []
     quote_ids: list[int] = []
     usage = UsageTotals.zero()
+    # This turn's shared time budget, computed once and passed unchanged
+    # to every transport.generate() call below, including later
+    # tool-calling iterations -- client.py checks the remaining time
+    # against this same deadline before every model-call attempt, so the
+    # budget is spent across the whole turn, never reset per iteration.
+    deadline = time.monotonic() + TURN_BUDGET_SECONDS
     # This turn's own resolved-id guard (dispatch.py's module docstring):
     # every (hotel_id, room_type_id) pair search_hotels has actually
     # returned so far in this turn, across every tool-calling iteration
@@ -208,7 +225,7 @@ async def generate_reply(
                 usage_so_far=usage,
             )
             response = await transport.generate(
-                turns=turns, system_instruction=system_instruction
+                turns=turns, system_instruction=system_instruction, deadline=deadline
             )
             usage = usage + UsageTotals.from_model_usage(response.usage)
 

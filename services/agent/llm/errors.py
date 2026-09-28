@@ -120,6 +120,25 @@ class ToolLoopLimitError(LlmError):
     """
 
 
+class TurnBudgetExceededError(LlmError):
+    """Raised when a turn's total time budget across every model-call
+    attempt and retry (config.TURN_BUDGET_SECONDS) is exhausted before a
+    new attempt can start.
+
+    services.agent.llm.client checks the remaining budget before every
+    attempt inside its own retry loop — the initial call and every retry,
+    not just the first — so a turn that has already spent most of its
+    budget on earlier, slower calls cannot still burn a full 30-second
+    attempt (or a retry's backoff) it has no time left for. Carries the
+    turn's usage-so-far via attach_usage_so_far/read_usage_so_far (below),
+    the same as TokenSpendCapExceededError, since one or more real model
+    calls typically already happened before the budget ran out.
+
+    The caller is expected to open a human escalation instead of calling
+    generate_reply again for this conversation.
+    """
+
+
 class TokenSpendCapExceededError(LlmError):
     """Raised when a conversation's total token usage — committed usage
     from token_usage plus usage_so_far from the current turn's own model

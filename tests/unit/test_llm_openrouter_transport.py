@@ -15,6 +15,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import time
 from collections.abc import Callable
 from typing import Any, cast
 
@@ -30,6 +31,7 @@ from services.agent.llm.client import (
 from services.agent.llm.errors import (
     LlmConfigurationError,
     ModelUnavailableError,
+    TurnBudgetExceededError,
     UsageUnavailableError,
 )
 from services.agent.llm.model_types import (
@@ -48,6 +50,11 @@ _PROVIDERS = ("provider-a", "provider-b")
 _MODEL = "vendor/model-1"
 _SECRET_BODY_TEXT = "do-not-leak-this-provider-error-detail"
 
+# Far enough out that _attempt_timeout_seconds never trims it down to
+# less than the transport's own timeout_ms in a test not specifically
+# about the turn budget -- those tests (below) pass their own deadline.
+_FAR_FUTURE_DEADLINE = time.monotonic() + 3600
+
 Handler = Callable[[httpx.Request], httpx.Response]
 
 
@@ -64,11 +71,14 @@ def _make_transport(handler: Handler) -> OpenRouterTransport:
 def _generate(
     transport: OpenRouterTransport,
     turns: list[Turn] | None = None,
+    *,
+    deadline: float = _FAR_FUTURE_DEADLINE,
 ) -> ModelResponse:
     return asyncio.run(
         transport.generate(
             turns=turns if turns is not None else [UserTurn("hi")],
             system_instruction="be helpful",
+            deadline=deadline,
         )
     )
 
@@ -601,3 +611,67 @@ def test_a_malformed_200_body_is_retried_then_reported_as_unavailable(
         _generate(_make_transport(handler))
 
     assert len(requests) == 3
+
+
+# --- turn budget --------------------------------------------------------
+
+
+def test_a_deadline_already_past_raises_turn_budget_exceeded_with_no_request() -> None:
+    """The budget check runs before the first attempt too, not only before
+    a retry -- a turn that arrives already out of budget (an earlier
+    tool-calling iteration spent it all) must never even open a
+    connection."""
+    handler, requests = _sequence([_ok()])
+
+    with pytest.raises(TurnBudgetExceededError):
+        _generate(_make_transport(handler), deadline=time.monotonic() - 1)
+
+    assert requests == []
+
+
+def test_the_deadline_running_out_between_attempts_stops_further_retries(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A transient failure is normally retried (see the retries section
+    above) -- but if the turn's shared budget runs out during the first
+    attempt's own wait, the second attempt must never start, even though
+    the failure itself was retryable."""
+    _disable_retry_backoff(monkeypatch)
+    handler, requests = _sequence([_error_response(503), _ok()])
+    calls = {"n": 0}
+
+    def _handler_with_delay(request: httpx.Request) -> httpx.Response:
+        calls["n"] += 1
+        if calls["n"] == 1:
+            time.sleep(0.1)
+        return handler(request)
+
+    transport = OpenRouterTransport(
+        model=_MODEL,
+        api_key=_API_KEY,
+        providers=_PROVIDERS,
+        timeout_ms=10_000,
+        http_transport=httpx.MockTransport(_handler_with_delay),
+    )
+    deadline = time.monotonic() + 0.05
+
+    with pytest.raises(TurnBudgetExceededError):
+        _generate(transport, deadline=deadline)
+
+    assert len(requests) == 1
+
+
+def test_the_attempt_timeout_is_capped_by_the_remaining_budget() -> None:
+    """min(timeout_ms, remaining budget): a turn with only a little budget
+    left must not get the full timeout_ms for its next attempt -- proven
+    directly against the pure helper client.py's transports both share,
+    since observing the exact timeout httpx actually used would require
+    reaching into its internals rather than this module's own contract."""
+    from services.agent.llm.client import _attempt_timeout_seconds
+
+    assert _attempt_timeout_seconds(
+        deadline=time.monotonic() + 5, max_attempt_timeout_ms=30_000
+    ) == pytest.approx(5, abs=0.1)
+    assert _attempt_timeout_seconds(
+        deadline=time.monotonic() + 3600, max_attempt_timeout_ms=30_000
+    ) == pytest.approx(30, abs=0.1)
