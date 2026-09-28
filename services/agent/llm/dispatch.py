@@ -48,6 +48,18 @@ get_quote only (see tools.py's module docstring for why
 search_alternatives, the third tool PLAN.md's المرحلة ٤ names, is not
 declared yet), so the caller crashing the turn is more honest than
 inventing a way to paper over it here.
+
+search_hotels (added 2026-09-28, after an incident where the model
+guessed a hotel_id that did not exist) is the id-resolution tool this
+module was missing: dispatch_tool now also tracks, per turn, every
+(hotel_id, room_type_id) pair search_hotels has actually returned
+(`resolved_stays`, threaded in by conversation.py, mutated in place — not
+persisted, since D2 in the plan this shipped from scopes enforcement to
+one turn only), and dispatch_check_availability/dispatch_get_quote both
+reject any pair that is not in it. This is enforcement, not just a
+prompt instruction: the model can be told not to guess, but only this
+check actually stops it from succeeding anyway, including a pair a
+customer states directly as a number.
 """
 
 from __future__ import annotations
@@ -61,6 +73,7 @@ from typing import Any, cast
 import psycopg
 
 from lib.money import format_halalas_as_sar
+from services.agent.hotel_profile import is_hotel_profile_complete
 from services.agent.llm.errors import InvalidToolArgumentsError, UnknownToolError
 from services.inventory.operations import check_availability
 from services.pricing.compute import Quote, compute_quote
@@ -68,8 +81,19 @@ from services.pricing.errors import AllotmentNotFoundError
 
 logger = logging.getLogger(__name__)
 
+SEARCH_HOTELS_TOOL = "search_hotels"
 CHECK_AVAILABILITY_TOOL = "check_availability"
 GET_QUOTE_TOOL = "get_quote"
+
+# A resolved (hotel_id, room_type_id) pair, as search_hotels actually
+# returned it — the unit dispatch_tool's turn-scoped guard tracks.
+ResolvedStay = tuple[int, int]
+
+# A hotel a customer could plausibly be shown at all: bounds a query
+# against a pathological filter (or lack of one) matching most of the
+# table, and gives the model something concrete to tell the customer
+# ("narrow your search") instead of a silently truncated list.
+MAX_SEARCH_HOTELS_RESULTS = 10
 
 # The exact key set a logged tool call's result_summary may ever contain,
 # per tool — hand-built the same way QUOTE_RESULT_KEYS is, and for the same
@@ -78,8 +102,79 @@ GET_QUOTE_TOOL = "get_quote"
 # QUOTE_RESULT_KEYS itself (no total_price_display, no nights) — this log
 # has no need to duplicate the customer-facing price, only quote_id, which
 # CLAUDE.md rule 8 asks to log for traceability.
+SEARCH_HOTELS_LOG_SUMMARY_KEYS = frozenset({"result_count", "truncated"})
 CHECK_AVAILABILITY_LOG_SUMMARY_KEYS = frozenset({"available"})
 GET_QUOTE_LOG_SUMMARY_KEYS = frozenset({"priced", "quote_id"})
+
+# search_hotels' own result whitelist, the same hand-built discipline as
+# QUOTE_RESULT_KEYS: no cost column exists on hotels or room_types at all,
+# but the fields below are still built one by one rather than as a row
+# spread, so a column added to either table later cannot reach the model
+# just by existing.
+SEARCH_HOTELS_RESULT_KEYS = frozenset({"hotels", "truncated"})
+HOTEL_RESULT_KEYS = frozenset(
+    {
+        "hotel_id",
+        "hotel_name",
+        "city",
+        "zone",
+        "district_name",
+        "star_rating",
+        "distance_to_haram_meters",
+        "room_types",
+    }
+)
+ROOM_TYPE_RESULT_KEYS = frozenset(
+    {"room_type_id", "room_type_name", "capacity_adults", "bed_configuration"}
+)
+
+# Arabic name-matching normalization: collapses spelling variants a
+# customer's own typing is likely to produce (alef with/without hamza,
+# taa marbuta vs. haa, alef maksura vs. yaa) and strips tashkeel
+# diacritics, applied to both hotel_name and the customer's search term,
+# at query time, in the database — see _SEARCH_HOTELS_QUERY's own
+# translate() calls. Plain translate(), not a new Postgres extension
+# (neither unaccent nor pg_trgm is installed on this project): every
+# mapping here is exactly one character to at most one character, passed
+# in as the bound %(norm_from)s/%(norm_to)s parameters, never
+# interpolated into the query text.
+#
+# Built via chr(), not string literals: a literal Arabic character here
+# is exactly what RUF001 (ambiguous-unicode-character) exists to flag on
+# an isolated single-letter string (this file's ordinary Arabic prose
+# elsewhere is long enough that ruff never flags it), and, unlike an
+# escape sequence, ruff's own formatter cannot silently rewrite a chr()
+# call back into a raw glyph. Named by their Unicode character name, not
+# transliterated, so each mapping is checkable against the Unicode
+# standard directly.
+_ALEF_HAMZA_ABOVE = chr(0x0623)  # ARABIC LETTER ALEF WITH HAMZA ABOVE
+_ALEF_HAMZA_BELOW = chr(0x0625)  # ARABIC LETTER ALEF WITH HAMZA BELOW
+_ALEF_MADDA_ABOVE = chr(0x0622)  # ARABIC LETTER ALEF WITH MADDA ABOVE
+_ALEF_WASLA = chr(0x0671)  # ARABIC LETTER ALEF WASLA
+_BARE_ALEF = chr(0x0627)  # ARABIC LETTER ALEF
+_TAA_MARBUTA = chr(0x0629)  # ARABIC LETTER TEH MARBUTA
+_HAA = chr(0x0647)  # ARABIC LETTER HEH
+_ALEF_MAKSURA = chr(0x0649)  # ARABIC LETTER ALEF MAKSURA
+_YAA = chr(0x064A)  # ARABIC LETTER YEH
+_TASHKEEL = (
+    chr(0x064B)  # ARABIC FATHATAN
+    + chr(0x064C)  # ARABIC DAMMATAN
+    + chr(0x064D)  # ARABIC KASRATAN
+    + chr(0x064E)  # ARABIC FATHA
+    + chr(0x064F)  # ARABIC DAMMA
+    + chr(0x0650)  # ARABIC KASRA
+    + chr(0x0651)  # ARABIC SHADDA
+    + chr(0x0652)  # ARABIC SUKUN
+    + chr(0x0670)  # ARABIC LETTER SUPERSCRIPT ALEF
+)  # deleted, not mapped
+
+_ALEF_VARIANTS = _ALEF_HAMZA_ABOVE + _ALEF_HAMZA_BELOW + _ALEF_MADDA_ABOVE + _ALEF_WASLA
+_NORMALIZE_FROM = _ALEF_VARIANTS + _TAA_MARBUTA + _ALEF_MAKSURA + _TASHKEEL
+# Shorter than _NORMALIZE_FROM on purpose: translate() deletes any
+# trailing `from` characters with no corresponding `to` character, which
+# is exactly what _TASHKEEL above needs (removed, not replaced).
+_NORMALIZE_TO = (_BARE_ALEF * len(_ALEF_VARIANTS)) + _HAA + _YAA
+
 
 # The exact key set quote_to_tool_result may ever produce — the
 # enforcement point tests/unit/test_llm_dispatch.py checks rule 2
@@ -159,6 +254,221 @@ def parse_stay_args(args: dict[str, Any]) -> StayArgs:
     if stay.rooms <= 0:
         raise InvalidToolArgumentsError("rooms must be positive")
     return stay
+
+
+_VALID_CITIES = frozenset({"makkah", "madinah"})
+_VALID_ZONES = frozenset(
+    {
+        "makkah_central",
+        "makkah_outside",
+        "madinah_central",
+        "madinah_north",
+        "madinah_west",
+        "madinah_south",
+        "madinah_outside",
+    }
+)
+
+
+@dataclass(frozen=True)
+class SearchHotelsArgs:
+    """Parsed, validated search_hotels arguments — every field optional
+    except that at least one must be present (parse_search_hotels_args)."""
+
+    hotel_name: str | None
+    city: str | None
+    zone: str | None
+    min_star_rating: int | None
+    max_star_rating: int | None
+
+
+def _require_optional_str_in(
+    args: dict[str, Any], key: str, valid: frozenset[str]
+) -> str | None:
+    value = args.get(key)
+    if value is None:
+        return None
+    if not isinstance(value, str) or value not in valid:
+        raise InvalidToolArgumentsError(
+            f"{key} must be one of {sorted(valid)}, got {value!r}"
+        )
+    return value
+
+
+def _require_optional_star_rating(args: dict[str, Any], key: str) -> int | None:
+    value = args.get(key)
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise InvalidToolArgumentsError(f"{key} must be an integer, got {value!r}")
+    if not 1 <= value <= 5:
+        raise InvalidToolArgumentsError(f"{key} must be between 1 and 5, got {value!r}")
+    return value
+
+
+def parse_search_hotels_args(args: dict[str, Any]) -> SearchHotelsArgs:
+    """Validates search_hotels' arguments.
+
+    Raises:
+        InvalidToolArgumentsError: a field has the wrong type or an
+            invalid value, no field at all was given, or min_star_rating
+            exceeds max_star_rating.
+    """
+    hotel_name = args.get("hotel_name")
+    if hotel_name is not None and not isinstance(hotel_name, str):
+        raise InvalidToolArgumentsError(
+            f"hotel_name must be a string, got {hotel_name!r}"
+        )
+    search = SearchHotelsArgs(
+        hotel_name=hotel_name,
+        city=_require_optional_str_in(args, "city", _VALID_CITIES),
+        zone=_require_optional_str_in(args, "zone", _VALID_ZONES),
+        min_star_rating=_require_optional_star_rating(args, "min_star_rating"),
+        max_star_rating=_require_optional_star_rating(args, "max_star_rating"),
+    )
+    if all(
+        value is None
+        for value in (
+            search.hotel_name,
+            search.city,
+            search.zone,
+            search.min_star_rating,
+            search.max_star_rating,
+        )
+    ):
+        raise InvalidToolArgumentsError("search_hotels requires at least one filter")
+    if (
+        search.min_star_rating is not None
+        and search.max_star_rating is not None
+        and search.min_star_rating > search.max_star_rating
+    ):
+        raise InvalidToolArgumentsError(
+            "min_star_rating must not exceed max_star_rating"
+        )
+    return search
+
+
+def _room_types_by_hotel_id(
+    conn: psycopg.Connection[Any], hotel_ids: list[int]
+) -> dict[int, list[dict[str, Any]]]:
+    rows = conn.execute(
+        "SELECT hotel_id, id, room_type_name, capacity_adults, bed_configuration "
+        "FROM room_types WHERE hotel_id = ANY(%(hotel_ids)s) ORDER BY hotel_id, id",
+        {"hotel_ids": hotel_ids},
+    ).fetchall()
+    by_hotel: dict[int, list[dict[str, Any]]] = {hotel_id: [] for hotel_id in hotel_ids}
+    for (
+        hotel_id,
+        room_type_id,
+        room_type_name,
+        capacity_adults,
+        bed_configuration,
+    ) in rows:
+        by_hotel[hotel_id].append(
+            {
+                "room_type_id": room_type_id,
+                "room_type_name": room_type_name,
+                "capacity_adults": capacity_adults,
+                "bed_configuration": bed_configuration,
+            }
+        )
+    return by_hotel
+
+
+_SEARCH_HOTELS_QUERY = (
+    "SELECT id, hotel_name, city, zone, district_name, star_rating, "
+    "distance_to_haram_meters, address_text FROM hotels "
+    "WHERE is_active "
+    "AND ("
+    "    %(hotel_name)s::text IS NULL "
+    "    OR translate(lower(hotel_name), %(norm_from)s::text, %(norm_to)s::text) LIKE "
+    "       '%%' || translate(lower(%(hotel_name)s::text), %(norm_from)s::text, "
+    "       %(norm_to)s::text) || '%%'"
+    ") "
+    "AND (%(city)s::text IS NULL OR city = %(city)s::text) "
+    "AND (%(zone)s::text IS NULL OR zone = %(zone)s::text) "
+    "AND (%(min_star_rating)s::smallint IS NULL "
+    "     OR star_rating >= %(min_star_rating)s::smallint) "
+    "AND (%(max_star_rating)s::smallint IS NULL "
+    "     OR star_rating <= %(max_star_rating)s::smallint) "
+    "ORDER BY id"
+)
+
+
+@dataclass(frozen=True)
+class _HotelRow:
+    """One row of _SEARCH_HOTELS_QUERY, named so the row-to-result mapping
+    below reads as field names, not tuple positions."""
+
+    hotel_id: int
+    hotel_name: str
+    city: str | None
+    zone: str | None
+    district_name: str | None
+    star_rating: int | None
+    distance_to_haram_meters: int | None
+    address_text: str | None
+
+
+def _hotel_result(row: _HotelRow, room_types: list[dict[str, Any]]) -> dict[str, Any]:
+    return {
+        "hotel_id": row.hotel_id,
+        "hotel_name": row.hotel_name,
+        "city": row.city,
+        "zone": row.zone,
+        "district_name": row.district_name,
+        "star_rating": row.star_rating,
+        "distance_to_haram_meters": row.distance_to_haram_meters,
+        "room_types": room_types,
+    }
+
+
+def dispatch_search_hotels(
+    conn: psycopg.Connection[Any], args: dict[str, Any]
+) -> dict[str, Any]:
+    """Executes search_hotels: resolves what a customer said about a hotel
+    or room type into real ids and structured, cost-free facts. Only
+    active hotels with a complete profile
+    (services.agent.hotel_profile.is_hotel_profile_complete) are ever
+    returned — an incomplete profile gives the model no honest basis to
+    describe a hotel, the gate ARCHITECTURE.md §4 asks every
+    customer-facing tool to apply. Two or more matching hotels are all
+    returned, never narrowed to one — see tools.py's description of this
+    tool for why (the incident this tool exists to prevent).
+    """
+    search = parse_search_hotels_args(args)
+    rows = conn.execute(
+        _SEARCH_HOTELS_QUERY,
+        {
+            "hotel_name": search.hotel_name,
+            "city": search.city,
+            "zone": search.zone,
+            "min_star_rating": search.min_star_rating,
+            "max_star_rating": search.max_star_rating,
+            "norm_from": _NORMALIZE_FROM,
+            "norm_to": _NORMALIZE_TO,
+        },
+    ).fetchall()
+
+    hotel_rows = [_HotelRow(*row) for row in rows]
+    complete_hotels = [
+        row
+        for row in hotel_rows
+        if is_hotel_profile_complete(
+            distance_to_haram_meters=row.distance_to_haram_meters,
+            star_rating=row.star_rating,
+            address_text=row.address_text,
+            city=row.city,
+            zone=row.zone,
+        )
+    ]
+    truncated = len(complete_hotels) > MAX_SEARCH_HOTELS_RESULTS
+    kept = complete_hotels[:MAX_SEARCH_HOTELS_RESULTS]
+
+    kept_hotel_ids = [row.hotel_id for row in kept]
+    room_types_by_hotel_id = _room_types_by_hotel_id(conn, kept_hotel_ids)
+    hotels = [_hotel_result(row, room_types_by_hotel_id[row.hotel_id]) for row in kept]
+    return {"hotels": hotels, "truncated": truncated}
 
 
 def quote_to_tool_result(quote: Quote) -> dict[str, Any]:
@@ -275,12 +585,29 @@ def dispatch_get_quote(
     return quote_to_tool_result(quote)
 
 
+def _search_hotels_log_summary(result: dict[str, Any]) -> dict[str, Any]:
+    return {"result_count": len(result["hotels"]), "truncated": result["truncated"]}
+
+
 def _check_availability_log_summary(result: dict[str, Any]) -> dict[str, Any]:
     return {"available": result["available"]}
 
 
 def _get_quote_log_summary(result: dict[str, Any]) -> dict[str, Any]:
     return {"priced": result["priced"], "quote_id": result.get("quote_id")}
+
+
+def _require_resolved_stay(stay: StayArgs, resolved_stays: set[ResolvedStay]) -> None:
+    """The turn-scoped enforcement half of the search_hotels fix (the
+    module docstring's other half): rejects a hotel_id/room_type_id pair
+    search_hotels did not actually return earlier in this same turn,
+    whether the model invented it or a customer stated it directly.
+    """
+    if (stay.hotel_id, stay.room_type_id) not in resolved_stays:
+        raise InvalidToolArgumentsError(
+            f"hotel_id={stay.hotel_id}, room_type_id={stay.room_type_id} was not "
+            "returned by search_hotels in this conversation turn"
+        )
 
 
 def _log_tool_call(
@@ -319,18 +646,42 @@ def dispatch_tool(
     now: datetime,
     customer_phone: str | None,
     conversation_id: int | None,
+    resolved_stays: set[ResolvedStay],
 ) -> dict[str, Any]:
     """Routes a model tool call by name to its handler, logging exactly one
     agent_tool_call event per call (success or failure) before returning or
     re-raising — see _log_tool_call.
 
+    `resolved_stays` is this turn's own state, owned and threaded in by the
+    caller (conversation.py) across every dispatch_tool call in the turn's
+    tool-calling loop — never persisted, never read from the database. A
+    successful search_hotels call adds every (hotel_id, room_type_id) pair
+    it returned; check_availability and get_quote both reject any pair not
+    already in it (_require_resolved_stay).
+
     Raises:
         UnknownToolError: name is not one of the tools declared in
             tools.py. Never executed silently.
-        InvalidToolArgumentsError: see the individual dispatch functions.
+        InvalidToolArgumentsError: see the individual dispatch functions,
+            and, for check_availability/get_quote, a hotel_id/room_type_id
+            pair not in `resolved_stays`.
     """
     try:
+        if name == SEARCH_HOTELS_TOOL:
+            result = dispatch_search_hotels(conn, args)
+            for hotel in result["hotels"]:
+                for room_type in hotel["room_types"]:
+                    resolved_stays.add((hotel["hotel_id"], room_type["room_type_id"]))
+            _log_tool_call(
+                conversation_id=conversation_id,
+                tool_name=name,
+                args=args,
+                result_summary=_search_hotels_log_summary(result),
+                error_type=None,
+            )
+            return result
         if name == CHECK_AVAILABILITY_TOOL:
+            _require_resolved_stay(parse_stay_args(args), resolved_stays)
             result = dispatch_check_availability(conn, args)
             _log_tool_call(
                 conversation_id=conversation_id,
@@ -341,6 +692,7 @@ def dispatch_tool(
             )
             return result
         if name == GET_QUOTE_TOOL:
+            _require_resolved_stay(parse_stay_args(args), resolved_stays)
             result = dispatch_get_quote(
                 conn,
                 args,

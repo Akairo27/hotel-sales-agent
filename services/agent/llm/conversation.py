@@ -55,7 +55,7 @@ from services.agent.llm.context import (
     load_conversation_state,
     load_recent_messages,
 )
-from services.agent.llm.dispatch import dispatch_tool
+from services.agent.llm.dispatch import ResolvedStay, dispatch_tool
 from services.agent.llm.errors import (
     ToolLoopLimitError,
     TurnCapExceededError,
@@ -191,6 +191,12 @@ async def generate_reply(
     tool_calls: list[ToolCallRecord] = []
     quote_ids: list[int] = []
     usage = UsageTotals.zero()
+    # This turn's own resolved-id guard (dispatch.py's module docstring):
+    # every (hotel_id, room_type_id) pair search_hotels has actually
+    # returned so far in this turn, across every tool-calling iteration
+    # below. Never persisted past this call — a fresh, empty set every
+    # turn, by design (D2 in the plan this shipped from).
+    resolved_stays: set[ResolvedStay] = set()
 
     try:
         for _ in range(MAX_TOOL_ITERATIONS):
@@ -226,6 +232,7 @@ async def generate_reply(
                     now=now,
                     customer_phone=state.customer_phone,
                     conversation_id=state.id,
+                    resolved_stays=resolved_stays,
                 )
                 tool_calls.append(
                     ToolCallRecord(name=call.name, args=call.args, result=result)

@@ -139,7 +139,7 @@ _JSON_SCHEMA_TYPE_TO_GEMINI: dict[str, types.Type] = {
 }
 
 _KNOWN_JSON_SCHEMA_KEYS = frozenset(
-    {"type", "properties", "required", "description", "minimum"}
+    {"type", "properties", "required", "description", "minimum", "maximum", "enum"}
 )
 
 
@@ -181,11 +181,10 @@ def _json_schema_to_gemini_schema(schema: dict[str, object]) -> types.Schema:
     plain-JSON-Schema parameters into Gemini's own types.Schema tree.
 
     Scoped to exactly what tools.py uses today (object/string/integer/
-    number/boolean; properties/required/description/minimum) -- raises
-    rather than silently drop a field or a type this translator does not
-    yet handle, so a future tools.py addition (an array-typed property,
-    an enum, ...) fails loudly here instead of reaching Gemini silently
-    wrong.
+    number/boolean; properties/required/description/minimum/maximum/enum)
+    -- raises rather than silently drop a field or a type this translator
+    does not yet handle, so a future tools.py addition fails loudly here
+    instead of reaching Gemini silently wrong.
 
     Raises:
         NotImplementedError: schema uses a key or a "type" value this
@@ -220,6 +219,8 @@ def _json_schema_to_gemini_schema(schema: dict[str, object]) -> types.Schema:
             schema.get("description"), field="description"
         ),
         minimum=_expect_optional_number(schema.get("minimum"), field="minimum"),
+        maximum=_expect_optional_number(schema.get("maximum"), field="maximum"),
+        enum=_expect_optional_str_list(schema.get("enum"), field="enum"),
         required=_expect_optional_str_list(schema.get("required"), field="required"),
         properties=nested_properties,
     )

@@ -47,7 +47,6 @@ _COLUMNS_BEFORE_THIS_MIGRATION = (
     "check_out_time",
     "is_active",
 )
-_BACKEND_ROLES = ("hotel_agent", "hotel_worker")
 
 
 def _seed_hotel(conn: psycopg.Connection[Any], **columns: Any) -> int:
@@ -354,15 +353,48 @@ def test_sales_can_read_but_not_change_the_location_columns(
     assert _read_location(db_conn, hotel_id)[:2] == ("makkah", "makkah_central")
 
 
-@pytest.mark.parametrize("role", _BACKEND_ROLES)
 @pytest.mark.parametrize("column", _LOCATION_COLUMNS)
-def test_the_backend_roles_cannot_read_the_new_columns(
-    db_conn: psycopg.Connection[Any], role: str, column: str
+def test_hotel_worker_cannot_read_the_new_columns(
+    db_conn: psycopg.Connection[Any], column: str
 ) -> None:
-    """The agent and the worker have no privilege on hotels at all (migration
-    0027), so nothing added to that table can reach them."""
+    """hotel_worker has no privilege on hotels at all (migration 0027),
+    unchanged since -- nothing added to that table can reach it."""
     row = db_conn.execute(
-        "SELECT has_column_privilege(%s, 'public.hotels', %s, 'SELECT')",
-        (role, column),
+        "SELECT has_column_privilege('hotel_worker', 'public.hotels', %s, 'SELECT')",
+        (column,),
+    ).fetchone()
+    assert row == (False,)
+
+
+# Migration 0030 grants hotel_agent exactly these three of the four
+# _LOCATION_COLUMNS, column-scoped -- not weekend_days, which
+# search_hotels never reads. Deliberately narrower than a full-table
+# grant: hotels is expected to grow columns (a per-hotel FAREAST meal
+# price, contract/supplier details) this role must never see automatically
+# just by being added.
+_LOCATION_COLUMNS_HOTEL_AGENT_CAN_READ = ("city", "zone", "district_name")
+
+
+@pytest.mark.parametrize("column", _LOCATION_COLUMNS_HOTEL_AGENT_CAN_READ)
+def test_hotel_agent_can_read_the_new_location_columns_search_hotels_uses(
+    db_conn: psycopg.Connection[Any], column: str
+) -> None:
+    """hotel_agent gained column-scoped SELECT on hotels in migration 0030
+    -- exactly what search_hotels (services/agent/llm/dispatch.py) reads,
+    not the whole table."""
+    row = db_conn.execute(
+        "SELECT has_column_privilege('hotel_agent', 'public.hotels', %s, 'SELECT')",
+        (column,),
+    ).fetchone()
+    assert row == (True,)
+
+
+def test_hotel_agent_cannot_read_weekend_days(db_conn: psycopg.Connection[Any]) -> None:
+    """search_hotels never reads weekend_days, so migration 0030's
+    column-scoped grant deliberately leaves it out -- unlike the other
+    three _LOCATION_COLUMNS."""
+    row = db_conn.execute(
+        "SELECT has_column_privilege('hotel_agent', 'public.hotels', "
+        "'weekend_days', 'SELECT')"
     ).fetchone()
     assert row == (False,)
