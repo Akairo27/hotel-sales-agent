@@ -29,6 +29,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from services.agent import webhook as webhook_module
+from services.agent.llm import dispatch as dispatch_module
 from services.agent.llm.caps import record_token_usage
 from services.agent.llm.client import ModelTransport
 from services.agent.llm.config import MAX_TOOL_ITERATIONS, LlmSettings
@@ -1892,23 +1893,13 @@ def test_receive_message_records_partial_usage_for_a_missing_price_rule_chain(
     assert "IncompletePriceRuleChainError" in error_records[0].exc_text
 
 
-def test_receive_message_records_partial_usage_for_a_fully_booked_night(
-    webhook_client: TestClient,
-    monkeypatch: pytest.MonkeyPatch,
+def _seed_fully_booked_priceable_night(
     db_conn: psycopg.Connection[Any],
-    caplog: pytest.LogCaptureFixture,
-) -> None:
-    """The second pricing exception: NoMatchingBandError. A demand_curve's
-    occupancy_bands top band is conventionally {"min": 0, "max": 1} --
-    but lookup_band_value's range check is [min, max), so occupancy
-    exactly 1.0 (a night reserved to full capacity) falls outside every
-    band despite the config satisfying migration 0006's "full coverage"
-    CHECK constraint. dispatch_get_quote only checks that an allotment
-    row exists for the requested dates (services/agent/llm/dispatch.py's
-    _allotment_covers_every_night), not whether the night still has room
-    left -- a real customer can ask for a quote on a night that just
-    became fully booked, so this is a genuine, reachable path, not a
-    contrived one."""
+) -> tuple[int, int]:
+    """Everything get_quote needs to price 2030-01-10 -- searchable hotel,
+    room type, season, price rule -- except a free room: reserved == total,
+    so occupancy resolves to exactly 1.0, one past the flat_demand_curve()
+    occupancy band's exclusive upper bound of 1."""
     hotel_id = seed_hotel(
         db_conn,
         hotel_name=_SEARCHABLE_HOTEL_NAME,
@@ -1930,11 +1921,8 @@ def test_receive_message_records_partial_usage_for_a_fully_booked_night(
         priority=0,
         is_default=True,
     )
-    stay_date = date(2030, 1, 10)
-    # reserved == total: occupancy resolves to exactly 1.0, one past the
-    # flat_demand_curve() occupancy band's exclusive upper bound of 1.
     seed_allotment_night(
-        db_conn, hotel_id, room_type_id, stay_date, total_rooms=5, reserved=5
+        db_conn, hotel_id, room_type_id, date(2030, 1, 10), total_rooms=5, reserved=5
     )
     seed_price_rule(
         db_conn,
@@ -1943,6 +1931,90 @@ def test_receive_message_records_partial_usage_for_a_fully_booked_night(
         min_profit_by_lead_time=flat_min_profit(1_000),
         demand_curve=flat_demand_curve(),
     )
+    return hotel_id, room_type_id
+
+
+def test_receive_message_answers_normally_for_a_fully_booked_night(
+    webhook_client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+    db_conn: psycopg.Connection[Any],
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A night booked to full capacity used to fail the whole turn with
+    NoMatchingBandError (the test below) -- the customer got nothing.
+    dispatch_get_quote's availability gate now declines it as an ordinary
+    unpriced result before any price is computed, the model's next call
+    answers, and that reply is delivered. No `quotes` row is written."""
+    hotel_id, room_type_id = _seed_fully_booked_priceable_night(db_conn)
+    _set_llm_settings(monkeypatch, _settings())
+    reply_text = "Sorry, that room is not available for those dates."
+    transport = _ScriptedTransport(
+        [
+            _search_hotels_prefix_call(),
+            _function_call_response(
+                "get_quote",
+                {
+                    "hotel_id": hotel_id,
+                    "room_type_id": room_type_id,
+                    "check_in": "2030-01-10",
+                    "check_out": "2030-01-11",
+                    "rooms": 1,
+                },
+                prompt_tokens=25,
+                candidates_tokens=5,
+            ),
+            _text_response(reply_text, prompt_tokens=25, candidates_tokens=5),
+        ]
+    )
+    _set_transport(monkeypatch, transport)
+    sender = _FakeWhatsAppSender()
+    _set_whatsapp_sender(monkeypatch, sender)
+    caplog.set_level(logging.ERROR, logger="services.agent.webhook")
+    payload = _whatsapp_payload(
+        wa_id=_WA_ID, message_id="wamid.fully-booked-answered", body="hello"
+    )
+
+    response = _post(
+        webhook_client, payload, signature=_sign(json.dumps(payload).encode())
+    )
+
+    assert response.status_code == 200
+    assert len(transport.calls) == 3
+    assert sender.calls == [(_WA_ID, reply_text)]
+    usage_row = db_conn.execute(
+        "SELECT prompt_tokens, candidates_tokens, total_tokens FROM token_usage "
+        "WHERE customer_phone = %s",
+        (_PHONE,),
+    ).fetchone()
+    assert usage_row == (75, 15, 90)
+    assert [r for r in caplog.records if r.levelno == logging.ERROR] == []
+    quote_count = db_conn.execute("SELECT count(*) FROM quotes").fetchone()
+    assert quote_count == (0,)
+
+
+def test_receive_message_records_partial_usage_when_the_last_room_is_taken_mid_turn(
+    webhook_client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+    db_conn: psycopg.Connection[Any],
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The second pricing exception: NoMatchingBandError. A demand_curve's
+    occupancy_bands top band is conventionally {"min": 0, "max": 1} --
+    but lookup_band_value's range check is [min, max), so occupancy
+    exactly 1.0 (a night booked to full capacity) falls outside every
+    band despite the config satisfying migration 0006's "full coverage"
+    CHECK constraint. dispatch_get_quote's availability gate now declines
+    a fully booked night before compute_quote runs
+    (test_receive_message_answers_normally_for_a_fully_booked_night), so
+    this path is reachable only when the last room is taken between the
+    gate's read and compute_quote's own occupancy read -- a narrow race.
+    Simulated here by making the gate report availability over data that
+    is in fact fully booked, so the webhook-level contract for a pricing
+    exception (partial usage recorded, turn_failed logged with its
+    traceback) stays covered even though the ordinary fully-booked path no
+    longer reaches it."""
+    monkeypatch.setattr(dispatch_module, "check_availability", lambda *_a, **_k: True)
+    hotel_id, room_type_id = _seed_fully_booked_priceable_night(db_conn)
     _set_llm_settings(monkeypatch, _settings())
     transport = _ScriptedTransport(
         [

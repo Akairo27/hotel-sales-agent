@@ -141,9 +141,12 @@ CHECK_AVAILABILITY = ToolDeclaration(
 GET_QUOTE = ToolDeclaration(
     name="get_quote",
     description=(
-        "Prices a stay and returns the price to quote the customer. The "
-        "returned price is already final and already formatted — never "
-        "recompute, convert, or round it yourself."
+        "Prices a stay and returns the price to quote the customer. It "
+        "checks availability itself: if the requested rooms are not free "
+        "for every night, or the dates have no inventory, it returns "
+        "priced=false with a reason and no price — never quote a price in "
+        "that case. The returned price is already final and already "
+        "formatted — never recompute, convert, or round it yourself."
     ),
     parameters=_stay_parameters(),
 )
