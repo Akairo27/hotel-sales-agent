@@ -264,6 +264,8 @@ describe("missingHotelProfileFields", () => {
         distance_to_haram_meters: 450,
         star_rating: 4,
         address_text: "شارع إبراهيم الخليل",
+        city: "makkah",
+        zone: "makkah_central",
       }),
     ).toEqual([]);
   });
@@ -274,8 +276,10 @@ describe("missingHotelProfileFields", () => {
         distance_to_haram_meters: null,
         star_rating: null,
         address_text: null,
+        city: null,
+        zone: null,
       }),
-    ).toEqual(["المسافة عن الحرم", "التصنيف", "العنوان"]);
+    ).toEqual(["المسافة عن الحرم", "التصنيف", "العنوان", "المدينة", "المنطقة"]);
   });
 
   it("does not treat a zero-distance as missing", () => {
@@ -286,8 +290,34 @@ describe("missingHotelProfileFields", () => {
         distance_to_haram_meters: 0,
         star_rating: 4,
         address_text: "x",
+        city: "makkah",
+        zone: "makkah_central",
       }),
     ).toEqual([]);
+  });
+
+  it("names a missing city on its own", () => {
+    expect(
+      missingHotelProfileFields({
+        distance_to_haram_meters: 450,
+        star_rating: 4,
+        address_text: "شارع إبراهيم الخليل",
+        city: null,
+        zone: "makkah_central",
+      }),
+    ).toEqual(["المدينة"]);
+  });
+
+  it("names a missing zone on its own", () => {
+    expect(
+      missingHotelProfileFields({
+        distance_to_haram_meters: 450,
+        star_rating: 4,
+        address_text: "شارع إبراهيم الخليل",
+        city: "makkah",
+        zone: null,
+      }),
+    ).toEqual(["المنطقة"]);
   });
 });
 

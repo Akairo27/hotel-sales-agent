@@ -133,6 +133,12 @@ _MANIFEST: dict[str, dict[str, dict[str, tuple[str, ...] | str]]] = {
         "seasons": {"SELECT": _ALL},
         "price_rules": {"SELECT": _ALL},
         "price_overrides": {"SELECT": _ALL},
+        # Migration 0030: search_hotels (services/agent/llm/dispatch.py)
+        # needs to read the full hotel/room-type profile, including
+        # address_text, for the completeness check -- neither table has a
+        # cost column, so this is a simpler case than allotments above.
+        "hotels": {"SELECT": _ALL},
+        "room_types": {"SELECT": _ALL},
     },
     "hotel_worker": {
         "holds": {"SELECT": _ALL, "UPDATE": ("released_at",)},

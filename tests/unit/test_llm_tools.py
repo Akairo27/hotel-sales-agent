@@ -1,9 +1,25 @@
 from __future__ import annotations
 
-from services.agent.llm.dispatch import CHECK_AVAILABILITY_TOOL, GET_QUOTE_TOOL
-from services.agent.llm.tools import AGENT_TOOLS, CHECK_AVAILABILITY, GET_QUOTE
+from services.agent.llm.dispatch import (
+    CHECK_AVAILABILITY_TOOL,
+    GET_QUOTE_TOOL,
+    SEARCH_HOTELS_TOOL,
+)
+from services.agent.llm.tools import (
+    AGENT_TOOLS,
+    CHECK_AVAILABILITY,
+    GET_QUOTE,
+    SEARCH_HOTELS,
+)
 
 _EXPECTED_STAY_ARGS = {"hotel_id", "room_type_id", "check_in", "check_out", "rooms"}
+_EXPECTED_SEARCH_HOTELS_ARGS = {
+    "hotel_name",
+    "city",
+    "zone",
+    "min_star_rating",
+    "max_star_rating",
+}
 
 
 def test_check_availability_name_matches_dispatch_routing() -> None:
@@ -12,6 +28,10 @@ def test_check_availability_name_matches_dispatch_routing() -> None:
 
 def test_get_quote_name_matches_dispatch_routing() -> None:
     assert GET_QUOTE.name == GET_QUOTE_TOOL
+
+
+def test_search_hotels_name_matches_dispatch_routing() -> None:
+    assert SEARCH_HOTELS.name == SEARCH_HOTELS_TOOL
 
 
 def test_check_availability_required_args_match_what_dispatch_parses() -> None:
@@ -26,10 +46,35 @@ def test_get_quote_required_args_match_what_dispatch_parses() -> None:
     assert set(GET_QUOTE.parameters["properties"].keys()) == _EXPECTED_STAY_ARGS
 
 
-def test_agent_tools_declares_exactly_the_two_read_only_tools() -> None:
+def test_search_hotels_declares_every_filter_and_requires_none_individually() -> None:
+    # "At least one filter" is a dispatch.py validation (InvalidToolArgumentsError),
+    # the same way check_out > check_in is -- not expressible as plain JSON
+    # Schema "required", so the schema itself requires nothing.
+    assert set(SEARCH_HOTELS.parameters["properties"].keys()) == (
+        _EXPECTED_SEARCH_HOTELS_ARGS
+    )
+    assert SEARCH_HOTELS.parameters["required"] == []
+
+
+def test_search_hotels_city_and_zone_are_closed_lists() -> None:
+    properties = SEARCH_HOTELS.parameters["properties"]
+    assert set(properties["city"]["enum"]) == {"makkah", "madinah"}
+    assert set(properties["zone"]["enum"]) == {
+        "makkah_central",
+        "makkah_outside",
+        "madinah_central",
+        "madinah_north",
+        "madinah_west",
+        "madinah_south",
+        "madinah_outside",
+    }
+
+
+def test_agent_tools_declares_exactly_the_three_read_only_tools() -> None:
     """PLAN.md's المرحلة ٤ scopes the agent to check_availability and
-    get_quote in this PR — search_alternatives has no implementation
-    anywhere in the repo yet (see dispatch.py's module docstring) and
-    must not be declared until it does."""
+    get_quote; search_hotels is the prerequisite id-resolution tool added
+    alongside them (2026-09-28). search_alternatives has no implementation
+    anywhere in the repo yet (see dispatch.py's module docstring) and must
+    not be declared until it does."""
     names = {declaration.name for declaration in AGENT_TOOLS}
-    assert names == {CHECK_AVAILABILITY_TOOL, GET_QUOTE_TOOL}
+    assert names == {SEARCH_HOTELS_TOOL, CHECK_AVAILABILITY_TOOL, GET_QUOTE_TOOL}

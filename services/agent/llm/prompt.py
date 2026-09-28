@@ -110,6 +110,35 @@ PROMPT_RULES: tuple[PromptRule, ...] = (
         english_digest="613a18c22bfd86d1c1fe24cfcb8bc7da84bf68c3401b1cd32b08de90abc5e433",
     ),
     PromptRule(
+        key="search_before_resolving_a_hotel",
+        english=(
+            "Before calling check_availability or get_quote, you must "
+            "first call search_hotels to resolve any hotel or room type "
+            "the customer named into a real id — never invent or guess a "
+            "hotel_id or room_type_id, including one a customer states "
+            "directly as a number. If search_hotels returns more than one "
+            "hotel, ask the customer which one they mean before calling "
+            "any other tool. If it returns none, tell the customer and "
+            "ask them to confirm the name. Call search_hotels again in a "
+            "later turn if you need availability or a price and are not "
+            "certain you already have the right id from this "
+            "conversation."
+        ),
+        arabic=(
+            "قبل استدعاء check_availability أو get_quote، يجب عليك أولاً "
+            "استدعاء search_hotels لتحديد الفندق أو نوع الغرفة الذي "
+            "ذكره العميل عبر رقمه الحقيقي — يمنع عليك اختلاق أو تخمين "
+            "hotel_id أو room_type_id، حتى لو ذكره العميل بنفسه كرقم. "
+            "إذا أعاد search_hotels أكثر من فندق، اسأل العميل عن أيهما "
+            "يقصد قبل استدعاء أي أداة أخرى. وإذا لم يُعِد أي نتيجة، "
+            "أخبر العميل واطلب منه تأكيد الاسم. استدعِ search_hotels "
+            "مرة أخرى في دورة لاحقة إذا احتجت التحقق من التوفر أو السعر "
+            "ولم تكن متأكداً أن لديك الرقم الصحيح بالفعل من هذه "
+            "المحادثة."
+        ),
+        english_digest="d86c9a14a30ff99340d73f5a01412ace2ca2f900105b88b9d8b93b6d7406a893",
+    ),
+    PromptRule(
         key="no_price_computation",
         english=(
             "You must never calculate, estimate, convert, round, or total "

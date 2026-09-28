@@ -431,11 +431,16 @@ export function parseRoomTypeDetails(
 // Not a DB constraint: the columns are nullable so the migration could run
 // against rows that predate them (see 0023's comment). This is what the
 // dashboard flags instead, so an incomplete hotel is visible rather than
-// silently unsellable.
+// silently unsellable. city/zone added alongside distance/star/address
+// (2026-09-28): search_hotels (services/agent) cannot compare proximity
+// for a customer without them, so a hotel missing either is now just as
+// unofferable as one missing its distance or star rating.
 export function missingHotelProfileFields(hotel: {
   distance_to_haram_meters: number | null;
   star_rating: number | null;
   address_text: string | null;
+  city: string | null;
+  zone: string | null;
 }): string[] {
   const missing: string[] = [];
   if (hotel.distance_to_haram_meters === null) {
@@ -446,6 +451,12 @@ export function missingHotelProfileFields(hotel: {
   }
   if (hotel.address_text === null) {
     missing.push("العنوان");
+  }
+  if (hotel.city === null) {
+    missing.push("المدينة");
+  }
+  if (hotel.zone === null) {
+    missing.push("المنطقة");
   }
   return missing;
 }

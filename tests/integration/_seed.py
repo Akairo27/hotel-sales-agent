@@ -35,6 +35,55 @@ def seed_hotel_and_room_type(conn: psycopg.Connection[Any]) -> tuple[int, int]:
     return hotel_id, room_type_id
 
 
+def seed_hotel(
+    conn: psycopg.Connection[Any],
+    *,
+    hotel_name: str = "Test Hotel",
+    city: str | None = None,
+    zone: str | None = None,
+    district_name: str | None = None,
+    star_rating: int | None = None,
+    distance_to_haram_meters: int | None = None,
+    address_text: str | None = None,
+    is_active: bool = True,
+) -> int:
+    """A hotel with every profile column search_hotels (services.agent.
+    llm.dispatch) reads, all optional and defaulting to NULL/None so a
+    caller can seed a deliberately incomplete profile."""
+    return returning_id(
+        conn,
+        "INSERT INTO hotels (hotel_name, city, zone, district_name, star_rating, "
+        "distance_to_haram_meters, address_text, is_active) "
+        "VALUES (%s, %s, %s, %s, %s, %s, %s, %s) RETURNING id",
+        (
+            hotel_name,
+            city,
+            zone,
+            district_name,
+            star_rating,
+            distance_to_haram_meters,
+            address_text,
+            is_active,
+        ),
+    )
+
+
+def seed_room_type(
+    conn: psycopg.Connection[Any],
+    hotel_id: int,
+    *,
+    room_type_name: str = "Standard",
+    capacity_adults: int | None = None,
+    bed_configuration: str | None = None,
+) -> int:
+    return returning_id(
+        conn,
+        "INSERT INTO room_types (hotel_id, room_type_name, capacity_adults, "
+        "bed_configuration) VALUES (%s, %s, %s, %s) RETURNING id",
+        (hotel_id, room_type_name, capacity_adults, bed_configuration),
+    )
+
+
 def seed_season(
     conn: psycopg.Connection[Any],
     *,

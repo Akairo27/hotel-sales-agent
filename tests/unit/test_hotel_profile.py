@@ -14,12 +14,16 @@ class _ProfileFields(TypedDict):
     distance_to_haram_meters: int | None
     star_rating: int | None
     address_text: str | None
+    city: str | None
+    zone: str | None
 
 
 _COMPLETE: _ProfileFields = {
     "distance_to_haram_meters": 350,
     "star_rating": 4,
     "address_text": "العزيزية، مكة المكرمة",
+    "city": "makkah",
+    "zone": "makkah_central",
 }
 
 
@@ -49,25 +53,41 @@ def test_missing_address_is_reported() -> None:
     assert is_hotel_profile_complete(**fields) is False
 
 
+def test_missing_city_is_reported() -> None:
+    fields: _ProfileFields = {**_COMPLETE, "city": None}
+    assert missing_hotel_profile_fields(**fields) == ["city"]
+    assert is_hotel_profile_complete(**fields) is False
+
+
+def test_missing_zone_is_reported() -> None:
+    fields: _ProfileFields = {**_COMPLETE, "zone": None}
+    assert missing_hotel_profile_fields(**fields) == ["zone"]
+    assert is_hotel_profile_complete(**fields) is False
+
+
 def test_all_fields_missing_reports_all_in_declared_order() -> None:
     fields: _ProfileFields = {
         "distance_to_haram_meters": None,
         "star_rating": None,
         "address_text": None,
+        "city": None,
+        "zone": None,
     }
     assert missing_hotel_profile_fields(**fields) == [
         "distance_to_haram_meters",
         "star_rating",
         "address_text",
+        "city",
+        "zone",
     ]
     assert is_hotel_profile_complete(**fields) is False
 
 
 def test_check_in_and_check_out_times_are_not_required() -> None:
     # ARCHITECTURE.md §4 / admin/lib/hotelDetails.ts's missingHotelProfileFields
-    # only checks distance, star rating, and address — check-in/check-out
-    # times are nullable and never block completeness. This test exists so a
-    # future "widen the gate" change is a deliberate decision, not a
-    # copy-paste accident that silently starts blocking hotels that were
-    # previously fine.
+    # only checks distance, star rating, address, city and zone — check-in/
+    # check-out times are nullable and never block completeness. This test
+    # exists so a future "widen the gate" change is a deliberate decision,
+    # not a copy-paste accident that silently starts blocking hotels that
+    # were previously fine.
     assert is_hotel_profile_complete(**_COMPLETE) is True

@@ -216,6 +216,7 @@ def test_dispatch_tool_logs_get_quote_result_with_no_cost_fields(
         now=_NOW,
         customer_phone="+966500000001",
         conversation_id=conversation_id,
+        resolved_stays={(hotel_id, room_type_id)},
     )
 
     records = [json.loads(r.getMessage()) for r in caplog.records]
@@ -254,6 +255,7 @@ def test_dispatch_tool_logs_check_availability_result(
         now=_NOW,
         customer_phone=None,
         conversation_id=None,
+        resolved_stays={(hotel_id, room_type_id)},
     )
 
     records = [json.loads(r.getMessage()) for r in caplog.records]

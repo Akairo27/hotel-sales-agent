@@ -23,12 +23,17 @@ from services.agent.llm.dispatch import (
     GET_QUOTE_LOG_SUMMARY_KEYS,
     NIGHT_RESULT_KEYS,
     QUOTE_RESULT_KEYS,
+    SEARCH_HOTELS_LOG_SUMMARY_KEYS,
+    StayArgs,
     _check_availability_log_summary,
     _get_quote_log_summary,
     _log_tool_call,
+    _require_resolved_stay,
+    _search_hotels_log_summary,
     dispatch_check_availability,
     dispatch_get_quote,
     dispatch_tool,
+    parse_search_hotels_args,
     quote_to_tool_result,
 )
 from services.agent.llm.errors import InvalidToolArgumentsError, UnknownToolError
@@ -92,6 +97,37 @@ def test_dispatch_tool_raises_on_unknown_tool_name_without_touching_conn() -> No
             now=_UNUSED_NOW,
             customer_phone=None,
             conversation_id=None,
+            resolved_stays=set(),
+        )
+
+
+def test_dispatch_tool_rejects_an_unresolved_check_availability_stay() -> None:
+    """The regression test for the incident this whole feature exists to
+    prevent: a hotel_id/room_type_id pair search_hotels never returned
+    this turn must be rejected before ever reaching the database, model
+    guess or customer-stated number alike."""
+    with pytest.raises(InvalidToolArgumentsError, match="was not returned"):
+        dispatch_tool(
+            _NOT_A_CONNECTION,
+            "check_availability",
+            _VALID_ARGS,
+            now=_UNUSED_NOW,
+            customer_phone=None,
+            conversation_id=None,
+            resolved_stays=set(),
+        )
+
+
+def test_dispatch_tool_rejects_an_unresolved_get_quote_stay() -> None:
+    with pytest.raises(InvalidToolArgumentsError, match="was not returned"):
+        dispatch_tool(
+            _NOT_A_CONNECTION,
+            "get_quote",
+            _VALID_ARGS,
+            now=_UNUSED_NOW,
+            customer_phone=None,
+            conversation_id=None,
+            resolved_stays=set(),
         )
 
 
@@ -213,6 +249,7 @@ def test_dispatch_tool_logs_and_reraises_invalid_tool_arguments_error(
             now=_UNUSED_NOW,
             customer_phone=None,
             conversation_id=7,
+            resolved_stays=set(),
         )
 
     records = [json.loads(r.getMessage()) for r in caplog.records]
@@ -239,6 +276,7 @@ def test_dispatch_tool_logs_and_reraises_unknown_tool_error(
             now=_UNUSED_NOW,
             customer_phone=None,
             conversation_id=None,
+            resolved_stays=set(),
         )
 
     records = [json.loads(r.getMessage()) for r in caplog.records]
@@ -260,6 +298,7 @@ def test_logging_code_never_references_a_floor_or_cost_field_by_name() -> None:
         inspect.getsource(func)
         for func in (
             _log_tool_call,
+            _search_hotels_log_summary,
             _check_availability_log_summary,
             _get_quote_log_summary,
             dispatch_module.dispatch_tool,
@@ -267,3 +306,82 @@ def test_logging_code_never_references_a_floor_or_cost_field_by_name() -> None:
     )
     for forbidden in ("cost_per_night", "min_allowed", "target_margin", "min_profit"):
         assert forbidden not in logging_source
+
+
+@pytest.mark.parametrize(
+    ("mutation", "match"),
+    [
+        ({"city": "narnia"}, "city"),
+        ({"zone": "makkah_north"}, "zone"),
+        ({"min_star_rating": 0}, "min_star_rating"),
+        ({"min_star_rating": 6}, "min_star_rating"),
+        ({"min_star_rating": "four"}, "min_star_rating"),
+        ({"max_star_rating": 0}, "max_star_rating"),
+        ({"hotel_name": 5}, "hotel_name"),
+    ],
+)
+def test_parse_search_hotels_args_rejects_bad_values(
+    mutation: dict[str, Any], match: str
+) -> None:
+    with pytest.raises(InvalidToolArgumentsError, match=match):
+        parse_search_hotels_args({"hotel_name": "test", **mutation})
+
+
+def test_parse_search_hotels_args_requires_at_least_one_filter() -> None:
+    with pytest.raises(InvalidToolArgumentsError, match="at least one filter"):
+        parse_search_hotels_args({})
+
+
+def test_parse_search_hotels_args_rejects_min_above_max_star_rating() -> None:
+    with pytest.raises(InvalidToolArgumentsError, match="min_star_rating"):
+        parse_search_hotels_args({"min_star_rating": 4, "max_star_rating": 3})
+
+
+def test_parse_search_hotels_args_accepts_a_single_filter() -> None:
+    search = parse_search_hotels_args({"city": "makkah"})
+    assert search.city == "makkah"
+    assert search.hotel_name is None
+    assert search.min_star_rating is None
+    assert search.max_star_rating is None
+
+
+def test_search_hotels_log_summary_contains_only_the_whitelisted_keys() -> None:
+    result = {
+        "hotels": [
+            {"hotel_id": 1, "room_types": []},
+            {"hotel_id": 2, "room_types": []},
+        ],
+        "truncated": False,
+    }
+    summary = _search_hotels_log_summary(result)
+    assert summary.keys() == SEARCH_HOTELS_LOG_SUMMARY_KEYS
+    assert summary == {"result_count": 2, "truncated": False}
+
+
+def test_require_resolved_stay_accepts_a_resolved_pair() -> None:
+    stay = StayArgs(
+        hotel_id=1,
+        room_type_id=2,
+        check_in=date(2026, 9, 1),
+        check_out=date(2026, 9, 3),
+        rooms=1,
+    )
+    _require_resolved_stay(stay, {(1, 2)})  # must not raise
+
+
+def test_require_resolved_stay_rejects_an_unresolved_pair() -> None:
+    stay = StayArgs(
+        hotel_id=1,
+        room_type_id=2,
+        check_in=date(2026, 9, 1),
+        check_out=date(2026, 9, 3),
+        rooms=1,
+    )
+    with pytest.raises(
+        InvalidToolArgumentsError, match="was not returned by search_hotels"
+    ):
+        _require_resolved_stay(stay, {(1, 3)})  # right hotel, wrong room type
+    with pytest.raises(
+        InvalidToolArgumentsError, match="was not returned by search_hotels"
+    ):
+        _require_resolved_stay(stay, set())

@@ -1,14 +1,20 @@
 """The versioned, reviewed tool-calling contract — CLAUDE.md §9: "Tool
 definitions live in one file, versioned, and reviewed."
 
-Only two tools exist here: check_availability and get_quote. PLAN.md's
-المرحلة ٤ (WhatsApp channel, read-only) scopes the agent to exactly three
-tools — check_availability, get_quote, search_alternatives — and
-search_alternatives has no underlying implementation anywhere in the
-repository yet, so it is not declared here. Adding it, or any other tool,
-is a new entry in this file and a new case in dispatch.py — never an
-inline capability added elsewhere, and never without asking first
-(CLAUDE.md rule 10: "Adding a new tool the LLM can call").
+Three tools exist here: search_hotels, check_availability and get_quote.
+PLAN.md's المرحلة ٤ (WhatsApp channel, read-only) scopes the agent to
+exactly three tools — check_availability, get_quote, search_alternatives —
+but search_hotels is a distinct, prerequisite capability those three names
+never covered: resolving a hotel/room type the customer named into the
+numeric ids check_availability and get_quote require. Added 2026-09-28
+after an incident where the model, given no way to do that resolution,
+guessed ids that did not exist. search_alternatives itself ("alternative
+hotels for the same dates", per ARCHITECTURE.md's tool table) still has no
+implementation anywhere in the repository, so it is still not declared
+here. Adding a tool is a new entry in this file and a new case in
+dispatch.py — never an inline capability added elsewhere, and never
+without asking first (CLAUDE.md rule 10: "Adding a new tool the LLM can
+call").
 
 Declarations only: this module never executes anything. See dispatch.py.
 
@@ -21,6 +27,72 @@ whichever provider's wire format a transport actually needs.
 from __future__ import annotations
 
 from services.agent.llm.model_types import ToolDeclaration
+
+# Mirrors the closed lists migration 0028 enforces on hotels.city/hotels.zone
+# (db/migrations/0028_hotel_location.sql) — kept as a plain tuple here rather
+# than imported from anywhere, the same way this file never imports a SQL
+# string: a tool schema is reviewed prose, not generated from the schema it
+# describes.
+_CITIES = ("makkah", "madinah")
+_ZONES = (
+    "makkah_central",
+    "makkah_outside",
+    "madinah_central",
+    "madinah_north",
+    "madinah_west",
+    "madinah_south",
+    "madinah_outside",
+)
+
+SEARCH_HOTELS = ToolDeclaration(
+    name="search_hotels",
+    description=(
+        "Looks up real hotels and room types by name, city, zone and/or "
+        "star rating. Always call this before check_availability or "
+        "get_quote to resolve a hotel or room type the customer named — "
+        "never invent or guess a hotel_id or room_type_id, including one "
+        "the customer states directly as a number. If more than one hotel "
+        "is returned, ask the customer which one they mean before calling "
+        "any other tool. Returns no price and no cost."
+    ),
+    parameters={
+        "type": "object",
+        "properties": {
+            "hotel_name": {
+                "type": "string",
+                "description": (
+                    "All or part of the hotel's name, as the customer said it."
+                ),
+            },
+            "city": {
+                "type": "string",
+                "enum": list(_CITIES),
+                "description": "Restrict to hotels in this city.",
+            },
+            "zone": {
+                "type": "string",
+                "enum": list(_ZONES),
+                "description": "Restrict to hotels in this zone.",
+            },
+            "min_star_rating": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 5,
+                "description": "Restrict to hotels rated at least this many stars.",
+            },
+            "max_star_rating": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 5,
+                "description": (
+                    "Restrict to hotels rated at most this many stars. "
+                    '"Economy" means 3 stars and below.'
+                ),
+            },
+        },
+        "required": [],
+    },
+)
 
 _DATE_DESCRIPTION = "An ISO 8601 date (YYYY-MM-DD)."
 
@@ -76,4 +148,8 @@ GET_QUOTE = ToolDeclaration(
     parameters=_stay_parameters(),
 )
 
-AGENT_TOOLS: tuple[ToolDeclaration, ...] = (CHECK_AVAILABILITY, GET_QUOTE)
+AGENT_TOOLS: tuple[ToolDeclaration, ...] = (
+    SEARCH_HOTELS,
+    CHECK_AVAILABILITY,
+    GET_QUOTE,
+)

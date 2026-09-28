@@ -25,7 +25,11 @@ import pytest
 from google.genai import errors, types
 
 from services.agent.llm import client as client_module
-from services.agent.llm.client import GeminiTransport, _retry_delay_seconds
+from services.agent.llm.client import (
+    GeminiTransport,
+    _json_schema_to_gemini_schema,
+    _retry_delay_seconds,
+)
 from services.agent.llm.config import LlmSettings
 from services.agent.llm.errors import ModelUnavailableError, UsageUnavailableError
 from services.agent.llm.model_types import (
@@ -115,6 +119,28 @@ def _patch_sdk_call_with_sequence(
 
     monkeypatch.setattr(transport._client.aio.models, "generate_content", _next)
     return calls
+
+
+def test_json_schema_to_gemini_schema_translates_enum_and_maximum() -> None:
+    """search_hotels (tools.py) is the first tool to use either key --
+    added here alongside it, since the translator's own docstring says an
+    unhandled key must fail loudly rather than reach Gemini silently
+    wrong, and a fix proven only by that one tool declaration succeeding
+    is not the same as a test of the translation itself."""
+    schema = _json_schema_to_gemini_schema(
+        {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 5,
+        }
+    )
+    assert schema.minimum == 1
+    assert schema.maximum == 5
+
+    enum_schema = _json_schema_to_gemini_schema(
+        {"type": "string", "enum": ["makkah", "madinah"]}
+    )
+    assert enum_schema.enum == ["makkah", "madinah"]
 
 
 def test_generate_wraps_api_error_as_model_unavailable(
