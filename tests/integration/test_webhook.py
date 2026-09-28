@@ -581,6 +581,37 @@ def test_receive_message_with_valid_signature_processes_and_records_usage(
     assert usage_row == (50, 10, 60)
 
 
+def test_receive_message_converts_markdown_bold_before_sending(
+    webhook_client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+    db_conn: psycopg.Connection[Any],
+) -> None:
+    """to_whatsapp_formatting runs on the model's reply before it reaches
+    the customer (services/agent/webhook.py's _process_turn) -- proven
+    end to end through the real endpoint here, not just at the unit level
+    (tests/unit/test_whatsapp_send.py). The stored outbound message body
+    is also the converted text, not the model's raw Markdown."""
+    _set_llm_settings(monkeypatch, _settings())
+    transport = _ScriptedTransport([_text_response("Sure, **no problem** at all")])
+    _set_transport(monkeypatch, transport)
+    sender = _FakeWhatsAppSender()
+    _set_whatsapp_sender(monkeypatch, sender)
+    payload = _whatsapp_payload(wa_id=_WA_ID, message_id="wamid.1", body="hello")
+
+    response = _post(
+        webhook_client, payload, signature=_sign(json.dumps(payload).encode())
+    )
+
+    assert response.status_code == 200
+    assert sender.calls[0][1] == "Sure, *no problem* at all"
+    row = db_conn.execute(
+        "SELECT body FROM messages "
+        "WHERE customer_phone = %s AND direction = 'outbound'",
+        (_PHONE,),
+    ).fetchone()
+    assert row == ("Sure, *no problem* at all",)
+
+
 def _text_response(
     text: str, *, prompt_tokens: int = 50, candidates_tokens: int = 10
 ) -> ModelResponse:

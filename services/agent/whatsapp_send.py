@@ -12,6 +12,7 @@ not verified the way client.py's Gemini model pin is.
 from __future__ import annotations
 
 import os
+import re
 from dataclasses import dataclass
 from typing import Any, Protocol
 
@@ -81,6 +82,31 @@ def load_whatsapp_send_settings() -> WhatsAppSendSettings:
         access_token=access_token,
         timeout_ms=_DEFAULT_TIMEOUT_MS,
     )
+
+
+# Markdown's bold/strikethrough double the marker WhatsApp's own syntax
+# uses single (**bold** vs *bold*, ~~strike~~ vs ~strike~) -- a customer
+# reading a reply with the Markdown form sees literal asterisks/tildes,
+# not formatted text. Markdown's italic (_word_) already matches
+# WhatsApp's own, so there is nothing to convert there. `.+?` is
+# non-greedy so "**a** and **b**" converts as two spans, not one
+# swallowing everything between the first "**" and the last.
+_MARKDOWN_BOLD_RE = re.compile(r"\*\*(.+?)\*\*")
+_MARKDOWN_STRIKETHROUGH_RE = re.compile(r"~~(.+?)~~")
+
+
+def to_whatsapp_formatting(text: str) -> str:
+    """Converts Markdown-style bold and strikethrough spans into
+    WhatsApp's own single-marker syntax.
+
+    A deterministic, code-level conversion rather than relying on the
+    prompt alone (services/agent/llm/prompt.py's whatsapp_formatting rule
+    is a second, best-effort line of defense, not the only one) -- a
+    model reply that slips back into Markdown still reaches the customer
+    correctly formatted.
+    """
+    converted = _MARKDOWN_BOLD_RE.sub(r"*\1*", text)
+    return _MARKDOWN_STRIKETHROUGH_RE.sub(r"~\1~", converted)
 
 
 def _graph_api_error_detail(body: object) -> str | None:
