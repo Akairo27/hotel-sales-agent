@@ -25,6 +25,7 @@ from services.agent.llm.model_types import (
     Turn,
 )
 from tests.eval_model_candidates import (
+    SEEDED_HOTEL_NAME,
     EvalConfigurationError,
     require_only_seeded_hotels,
     run_scenario,
@@ -78,6 +79,24 @@ def _call_tool(name: str, check_in: str, check_out: str) -> Step:
     )
 
 
+def _search_hotels_step() -> Step:
+    """Every scripted scenario below now has to resolve the seeded hotel
+    (SEEDED_HOTEL_NAME, ids 1/1 -- seed_eval_database's only hotel) via
+    search_hotels before its first check_availability/get_quote call, to
+    satisfy dispatch_tool's resolved-stays guard (services/agent/llm/
+    dispatch.py)."""
+    return lambda _turns: ModelTurn(
+        text=None,
+        tool_calls=(
+            ToolCall(
+                id="call_0",
+                name="search_hotels",
+                args={"hotel_name": SEEDED_HOTEL_NAME},
+            ),
+        ),
+    )
+
+
 def _say(text: str) -> Step:
     return lambda _turns: ModelTurn(text=text, tool_calls=())
 
@@ -104,6 +123,7 @@ def test_a_correct_price_answer_passes_every_check(
 ) -> None:
     transport = _ScriptedTransport(
         [
+            _search_hotels_step(),
             _call_tool("get_quote", "2026-10-05", "2026-10-07"),
             _state_the_quoted_total,
         ]
@@ -116,9 +136,9 @@ def test_a_correct_price_answer_passes_every_check(
     assert result.quote_ok is True
     assert result.guard_allowed is True
     assert result.leaked is False
-    assert result.model_calls == 2
+    assert result.model_calls == 3
     assert result.retries == 0
-    assert result.total_tokens == 30
+    assert result.total_tokens == 45
 
 
 def test_an_availability_check_for_the_right_dates_passes_a_relative_date_scenario(
@@ -126,6 +146,7 @@ def test_an_availability_check_for_the_right_dates_passes_a_relative_date_scenar
 ) -> None:
     transport = _ScriptedTransport(
         [
+            _search_hotels_step(),
             _call_tool("check_availability", "2026-09-22", "2026-09-24"),
             _say("Yes, a room is available from 22 to 24 September."),
         ]
@@ -143,6 +164,7 @@ def test_a_tool_call_for_the_wrong_dates_fails_the_scenario(
 ) -> None:
     transport = _ScriptedTransport(
         [
+            _search_hotels_step(),
             _call_tool("check_availability", "2026-09-23", "2026-09-25"),
             _say("Yes, a room is available."),
         ]

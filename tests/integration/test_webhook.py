@@ -59,9 +59,10 @@ from tests.integration._seed import (
     seed_allotment_night,
     seed_allotment_nights,
     seed_conversation,
-    seed_hotel_and_room_type,
+    seed_hotel,
     seed_message,
     seed_price_rule,
+    seed_room_type,
     seed_season,
 )
 
@@ -77,7 +78,10 @@ _OTHER_WA_ID = "966500000002"
 # since no matching inventory row exists in this module's fresh test
 # schema) without raising -- used wherever a test needs a real, harmless
 # tool call purely to keep generate_reply's loop going for another
-# iteration.
+# iteration. Its ids are only ever valid because every test that uses it
+# seeds exactly one hotel/room type first (_seed_searchable_hotel) --
+# hotels/room_types are both RESTART IDENTITY-truncated before each test
+# (tests/conftest.py), so that first insert is always id 1.
 _HARMLESS_AVAILABILITY_ARGS = {
     "hotel_id": 1,
     "room_type_id": 1,
@@ -85,6 +89,47 @@ _HARMLESS_AVAILABILITY_ARGS = {
     "check_out": "2026-01-02",
     "rooms": 1,
 }
+
+_SEARCHABLE_HOTEL_NAME = "Test Hotel"
+
+# The token cost of the search_hotels call every scripted transport below
+# now has to make first, to satisfy dispatch_tool's resolved-stays guard
+# (services/agent/llm/dispatch.py) before its first check_availability/
+# get_quote call -- a fixed, named cost so each test's usage-total
+# assertions can account for it explicitly rather than by a magic number.
+_SEARCH_HOTELS_PROMPT_TOKENS = 25
+_SEARCH_HOTELS_CANDIDATES_TOKENS = 5
+
+
+def _seed_searchable_hotel(conn: psycopg.Connection[Any]) -> None:
+    """A real, active, complete-profile hotel/room type search_hotels can
+    resolve, matching _HARMLESS_AVAILABILITY_ARGS' hardcoded ids. Must be
+    the first hotels/room_types write in the calling test."""
+    hotel_id = seed_hotel(
+        conn,
+        hotel_name=_SEARCHABLE_HOTEL_NAME,
+        city="makkah",
+        zone="makkah_central",
+        star_rating=4,
+        distance_to_haram_meters=350,
+        address_text="Test address",
+    )
+    assert hotel_id == _HARMLESS_AVAILABILITY_ARGS["hotel_id"]
+    room_type_id = seed_room_type(conn, hotel_id, room_type_name="Standard")
+    assert room_type_id == _HARMLESS_AVAILABILITY_ARGS["room_type_id"]
+
+
+def _search_hotels_prefix_call() -> ModelResponse:
+    """The extra, real, billed search_hotels call every scripted
+    transport below must now make before its first check_availability/
+    get_quote call -- resolves _SEARCHABLE_HOTEL_NAME into
+    _HARMLESS_AVAILABILITY_ARGS' ids via dispatch_tool for real."""
+    return _function_call_response(
+        "search_hotels",
+        {"hotel_name": _SEARCHABLE_HOTEL_NAME},
+        prompt_tokens=_SEARCH_HOTELS_PROMPT_TOKENS,
+        candidates_tokens=_SEARCH_HOTELS_CANDIDATES_TOKENS,
+    )
 
 
 def _settings(
@@ -152,20 +197,32 @@ class _NoUsageTransport:
 
 @dataclass
 class _ToolCallingTransport:
-    """Always calls check_availability with a fixed, real-dispatched set
-    of args -- no hotel/room-type/inventory rows exist in this module's
-    fresh, truncated test schema (tests/conftest.py's db_conn fixture), so
-    dispatch_tool runs for real and returns {"available": False} rather
-    than raising, and generate_reply's tool-calling loop keeps iterating.
-    This drives several real model calls in one turn, so the mid-loop
+    """Calls search_hotels once (to satisfy dispatch_tool's resolved-stays
+    guard -- services/agent/llm/dispatch.py), then check_availability
+    repeatedly with the same real, resolved ids -- no allotment/inventory
+    rows exist in this module's fresh, truncated test schema
+    (tests/conftest.py's db_conn fixture), so dispatch_tool runs for real
+    and check_availability returns {"available": False} rather than
+    raising, and generate_reply's tool-calling loop keeps iterating. This
+    drives several real model calls in one turn, so the mid-loop
     spend-cap recheck (conversation.py) can be exercised end to end
     through the real webhook against a real, non-mocked
     check_token_spend_caps -- not just at the wiring level
     (tests/unit/test_llm_conversation.py) or the caps.py-arithmetic level
-    (tests/integration/test_llm_caps.py)."""
+    (tests/integration/test_llm_caps.py).
+
+    hotel_id/room_type_id/hotel_name must be a real, active, complete-
+    profile hotel and room type the caller already seeded (see
+    tests/integration/_seed.py's seed_hotel/seed_room_type) -- search_hotels
+    only ever resolves a real row, never these hardcoded values on their
+    own.
+    """
 
     prompt_tokens: int
     candidates_tokens: int
+    hotel_id: int
+    room_type_id: int
+    hotel_name: str
     calls: list[str] = field(default_factory=list)
 
     async def generate(
@@ -173,23 +230,26 @@ class _ToolCallingTransport:
     ) -> ModelResponse:
         del turns, system_instruction
         self.calls.append("call")
+        if len(self.calls) == 1:
+            tool_call = ToolCall(
+                id="call_1",
+                name="search_hotels",
+                args={"hotel_name": self.hotel_name},
+            )
+        else:
+            tool_call = ToolCall(
+                id=f"call_{len(self.calls)}",
+                name="check_availability",
+                args={
+                    "hotel_id": self.hotel_id,
+                    "room_type_id": self.room_type_id,
+                    "check_in": "2026-01-01",
+                    "check_out": "2026-01-02",
+                    "rooms": 1,
+                },
+            )
         return ModelResponse(
-            turn=ModelTurn(
-                text=None,
-                tool_calls=(
-                    ToolCall(
-                        id=f"call_{len(self.calls)}",
-                        name="check_availability",
-                        args={
-                            "hotel_id": 1,
-                            "room_type_id": 1,
-                            "check_in": "2026-01-01",
-                            "check_out": "2026-01-02",
-                            "rooms": 1,
-                        },
-                    ),
-                ),
-            ),
+            turn=ModelTurn(text=None, tool_calls=(tool_call,)),
             usage=ModelUsage(
                 prompt_tokens=self.prompt_tokens,
                 candidates_tokens=self.candidates_tokens,
@@ -1238,13 +1298,22 @@ def test_receive_message_records_partial_usage_when_the_cap_crosses_mid_turn(
     check_token_spend_caps, not just at the wiring level
     (tests/unit/test_llm_conversation.py) or the caps.py-arithmetic
     level (tests/integration/test_llm_caps.py)."""
-    # Each real model call reports 30 tokens. The 50-token cap is still
-    # under after 1 call (30) but crossed by the pre-check before a 3rd
-    # call would happen (60 >= 50) — so exactly 2 model calls should
-    # happen, and the recorded row should cover exactly those two.
+    # Each real model call reports 30 tokens (the first is search_hotels,
+    # resolving the id the rest of the calls use -- see
+    # _ToolCallingTransport). The 50-token cap is still under after 1 call
+    # (30) but crossed by the pre-check before a 3rd call would happen
+    # (60 >= 50) — so exactly 2 model calls should happen, and the
+    # recorded row should cover exactly those two.
+    _seed_searchable_hotel(db_conn)
     settings = _settings(max_tokens_per_conversation=50)
     _set_llm_settings(monkeypatch, settings)
-    transport = _ToolCallingTransport(prompt_tokens=25, candidates_tokens=5)
+    transport = _ToolCallingTransport(
+        prompt_tokens=25,
+        candidates_tokens=5,
+        hotel_id=1,
+        room_type_id=1,
+        hotel_name=_SEARCHABLE_HOTEL_NAME,
+    )
     _set_transport(monkeypatch, transport)
     sender = _FakeWhatsAppSender()
     _set_whatsapp_sender(monkeypatch, sender)
@@ -1284,11 +1353,20 @@ def test_receive_message_records_partial_usage_when_the_daily_cap_crosses_mid_tu
     webhook must record) that usage before escalating and sending the
     fallback."""
     # 1000 prompt tokens costs 1000 * $0.75 / 1_000_000 = $0.00075 -- two
-    # calls of 500 prompt tokens each cross that cap exactly on the
-    # pre-check before a 3rd call would happen.
+    # calls of 500 prompt tokens each (the first is search_hotels,
+    # resolving the id the rest of the calls use -- see
+    # _ToolCallingTransport) cross that cap exactly on the pre-check
+    # before a 3rd call would happen.
+    _seed_searchable_hotel(db_conn)
     settings = _settings(max_spend_per_day_usd=Decimal("0.00075"))
     _set_llm_settings(monkeypatch, settings)
-    transport = _ToolCallingTransport(prompt_tokens=500, candidates_tokens=0)
+    transport = _ToolCallingTransport(
+        prompt_tokens=500,
+        candidates_tokens=0,
+        hotel_id=1,
+        room_type_id=1,
+        hotel_name=_SEARCHABLE_HOTEL_NAME,
+    )
     _set_transport(monkeypatch, transport)
     sender = _FakeWhatsAppSender()
     _set_whatsapp_sender(monkeypatch, sender)
@@ -1323,25 +1401,27 @@ def test_receive_message_records_partial_usage_when_usage_is_unavailable_mid_tur
     db_conn: psycopg.Connection[Any],
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    """UsageUnavailableError raised on the *second* real model call in a
-    turn is the gap the structural fix closes: the first call's usage was
-    already known, sitting in generate_reply's own accumulator, before
-    the second call's response came back unusable. Unlike the
+    """UsageUnavailableError raised on the model call right after the
+    turn's real tool calls is the gap the structural fix closes: those
+    earlier calls' usage was already known, sitting in generate_reply's
+    own accumulator, before this response came back unusable. Unlike the
     single-call case (test_receive_message_returns_200_and_logs_when_
-    usage_is_unavailable above), that first call's usage must now be
-    recorded, not silently discarded."""
+    usage_is_unavailable above), that earlier usage must now be recorded,
+    not silently discarded."""
+    _seed_searchable_hotel(db_conn)
     _set_llm_settings(monkeypatch, _settings())
     # What a real GeminiTransport raises for a response with no usable
     # usage data (see tests/unit/test_llm_client.py for that translation-
     # level proof, and _NoUsageTransport's own docstring above) -- the
     # provider-neutral ModelResponse cannot represent "no usage" at all,
-    # so the second scripted call raises directly instead of returning
-    # an unusable response object.
+    # so the third scripted call raises directly instead of returning an
+    # unusable response object.
     unusable_response = UsageUnavailableError(
         "model response carried no usage_metadata"
     )
     transport = _ScriptedTransport(
         [
+            _search_hotels_prefix_call(),
             _function_call_response(
                 "check_availability",
                 _HARMLESS_AVAILABILITY_ARGS,
@@ -1363,7 +1443,7 @@ def test_receive_message_records_partial_usage_when_usage_is_unavailable_mid_tur
 
     assert response.status_code == 200
     assert response.json() == {"status": "accepted"}
-    assert len(transport.calls) == 2
+    assert len(transport.calls) == 3
     conversation_row = db_conn.execute(
         "SELECT id FROM conversations WHERE customer_phone = %s", (_PHONE,)
     ).fetchone()
@@ -1373,7 +1453,7 @@ def test_receive_message_records_partial_usage_when_usage_is_unavailable_mid_tur
         "WHERE customer_phone = %s",
         (_PHONE,),
     ).fetchone()
-    assert usage_row == (25, 5, 30)
+    assert usage_row == (50, 10, 60)
     error_records = [r for r in caplog.records if r.levelno == logging.ERROR]
     assert len(error_records) == 1
     logged = json.loads(error_records[0].getMessage())
@@ -1394,10 +1474,12 @@ def test_receive_message_escalates_and_sends_fallback_when_the_transport_fails_m
     CLAUDE.md §9 caps get: a customer left silent by a transient model
     failure is the same bad outcome as one left silent by a cap, so this
     escalates and sends the fallback rather than just logging
-    "turn_failed". The first call's real usage must still be recorded."""
+    "turn_failed". The earlier calls' real usage must still be recorded."""
+    _seed_searchable_hotel(db_conn)
     _set_llm_settings(monkeypatch, _settings())
     transport = _ScriptedTransport(
         [
+            _search_hotels_prefix_call(),
             _function_call_response(
                 "check_availability",
                 _HARMLESS_AVAILABILITY_ARGS,
@@ -1421,7 +1503,7 @@ def test_receive_message_escalates_and_sends_fallback_when_the_transport_fails_m
 
     assert response.status_code == 200
     assert response.json() == {"status": "accepted"}
-    assert len(transport.calls) == 2
+    assert len(transport.calls) == 3
     conversation_row = db_conn.execute(
         "SELECT id FROM conversations WHERE customer_phone = %s", (_PHONE,)
     ).fetchone()
@@ -1431,7 +1513,7 @@ def test_receive_message_escalates_and_sends_fallback_when_the_transport_fails_m
         "WHERE customer_phone = %s",
         (_PHONE,),
     ).fetchone()
-    assert usage_row == (25, 5, 30)
+    assert usage_row == (50, 10, 60)
     assert len(sender.calls) == 1
     assert sender.calls[0][1] == OUTPUT_GUARD_FALLBACK_MESSAGE
     escalation_row = db_conn.execute(
@@ -1624,19 +1706,33 @@ def test_receive_message_records_full_usage_when_the_tool_loop_limit_is_exceeded
     already-paid-for model calls counts against CLAUDE.md §9's turn cap
     even though it never produced a sendable reply -- see
     caps.increment_turn_count's own docstring for why delivery is not
-    the event that matters."""
+    the event that matters. The first call is search_hotels, resolving
+    the id every later call reuses -- it still counts as one of the
+    MAX_TOOL_ITERATIONS iterations, so the loop still exhausts after
+    exactly that many calls."""
+    _seed_searchable_hotel(db_conn)
     _set_llm_settings(monkeypatch, _settings())
-    transport = _ScriptedTransport(
-        [
-            _function_call_response(
-                "check_availability",
-                _HARMLESS_AVAILABILITY_ARGS,
-                prompt_tokens=10,
-                candidates_tokens=2,
-            )
-            for _ in range(MAX_TOOL_ITERATIONS)
-        ]
+    # Every call costs 10/2 tokens here, including the first (search_hotels)
+    # one -- unlike _search_hotels_prefix_call's fixed 25/5, so the uniform
+    # per-call arithmetic below (10 * MAX_TOOL_ITERATIONS, ...) still holds.
+    script: list[ModelResponse | BaseException] = [
+        _function_call_response(
+            "search_hotels",
+            {"hotel_name": _SEARCHABLE_HOTEL_NAME},
+            prompt_tokens=10,
+            candidates_tokens=2,
+        )
+    ]
+    script.extend(
+        _function_call_response(
+            "check_availability",
+            _HARMLESS_AVAILABILITY_ARGS,
+            prompt_tokens=10,
+            candidates_tokens=2,
+        )
+        for _ in range(MAX_TOOL_ITERATIONS - 1)
     )
+    transport = _ScriptedTransport(script)
     _set_transport(monkeypatch, transport)
     caplog.set_level(logging.ERROR, logger="services.agent.webhook")
     payload = _whatsapp_payload(
@@ -1690,7 +1786,16 @@ def test_receive_message_records_partial_usage_for_a_missing_price_rule_chain(
     reasoning is exactly the kind of thing a future change could
     invalidate for one of the three without anyone noticing, if only one
     of them had a test."""
-    hotel_id, room_type_id = seed_hotel_and_room_type(db_conn)
+    hotel_id = seed_hotel(
+        db_conn,
+        hotel_name=_SEARCHABLE_HOTEL_NAME,
+        city="makkah",
+        zone="makkah_central",
+        star_rating=4,
+        distance_to_haram_meters=350,
+        address_text="Test address",
+    )
+    room_type_id = seed_room_type(db_conn, hotel_id, room_type_name="Standard")
     seed_season(
         db_conn,
         season_name="Default",
@@ -1712,6 +1817,7 @@ def test_receive_message_records_partial_usage_for_a_missing_price_rule_chain(
     _set_llm_settings(monkeypatch, _settings())
     transport = _ScriptedTransport(
         [
+            _search_hotels_prefix_call(),
             _function_call_response(
                 "get_quote",
                 {
@@ -1723,7 +1829,7 @@ def test_receive_message_records_partial_usage_for_a_missing_price_rule_chain(
                 },
                 prompt_tokens=25,
                 candidates_tokens=5,
-            )
+            ),
         ]
     )
     _set_transport(monkeypatch, transport)
@@ -1738,13 +1844,13 @@ def test_receive_message_records_partial_usage_for_a_missing_price_rule_chain(
 
     assert response.status_code == 200
     assert response.json() == {"status": "accepted"}
-    assert len(transport.calls) == 1
+    assert len(transport.calls) == 2
     usage_row = db_conn.execute(
         "SELECT prompt_tokens, candidates_tokens, total_tokens FROM token_usage "
         "WHERE customer_phone = %s",
         (_PHONE,),
     ).fetchone()
-    assert usage_row == (25, 5, 30)
+    assert usage_row == (50, 10, 60)
     error_records = [r for r in caplog.records if r.levelno == logging.ERROR]
     assert len(error_records) == 1
     logged = json.loads(error_records[0].getMessage())
@@ -1772,7 +1878,16 @@ def test_receive_message_records_partial_usage_for_a_fully_booked_night(
     left -- a real customer can ask for a quote on a night that just
     became fully booked, so this is a genuine, reachable path, not a
     contrived one."""
-    hotel_id, room_type_id = seed_hotel_and_room_type(db_conn)
+    hotel_id = seed_hotel(
+        db_conn,
+        hotel_name=_SEARCHABLE_HOTEL_NAME,
+        city="makkah",
+        zone="makkah_central",
+        star_rating=4,
+        distance_to_haram_meters=350,
+        address_text="Test address",
+    )
+    room_type_id = seed_room_type(db_conn, hotel_id, room_type_name="Standard")
     seed_season(
         db_conn,
         season_name="Default",
@@ -1800,6 +1915,7 @@ def test_receive_message_records_partial_usage_for_a_fully_booked_night(
     _set_llm_settings(monkeypatch, _settings())
     transport = _ScriptedTransport(
         [
+            _search_hotels_prefix_call(),
             _function_call_response(
                 "get_quote",
                 {
@@ -1811,7 +1927,7 @@ def test_receive_message_records_partial_usage_for_a_fully_booked_night(
                 },
                 prompt_tokens=25,
                 candidates_tokens=5,
-            )
+            ),
         ]
     )
     _set_transport(monkeypatch, transport)
@@ -1826,13 +1942,13 @@ def test_receive_message_records_partial_usage_for_a_fully_booked_night(
 
     assert response.status_code == 200
     assert response.json() == {"status": "accepted"}
-    assert len(transport.calls) == 1
+    assert len(transport.calls) == 2
     usage_row = db_conn.execute(
         "SELECT prompt_tokens, candidates_tokens, total_tokens FROM token_usage "
         "WHERE customer_phone = %s",
         (_PHONE,),
     ).fetchone()
-    assert usage_row == (25, 5, 30)
+    assert usage_row == (50, 10, 60)
     error_records = [r for r in caplog.records if r.levelno == logging.ERROR]
     assert len(error_records) == 1
     logged = json.loads(error_records[0].getMessage())
@@ -1854,7 +1970,16 @@ def test_receive_message_records_partial_usage_when_the_price_floor_exceeds_the_
     profit floor -- a tiny target_margin_bps against a much larger flat
     min_profit_by_lead_time, so min_allowed (cost + min_profit) ends up
     above ask (cost marked up by the margin)."""
-    hotel_id, room_type_id = seed_hotel_and_room_type(db_conn)
+    hotel_id = seed_hotel(
+        db_conn,
+        hotel_name=_SEARCHABLE_HOTEL_NAME,
+        city="makkah",
+        zone="makkah_central",
+        star_rating=4,
+        distance_to_haram_meters=350,
+        address_text="Test address",
+    )
+    room_type_id = seed_room_type(db_conn, hotel_id, room_type_name="Standard")
     seed_season(
         db_conn,
         season_name="Default",
@@ -1886,6 +2011,7 @@ def test_receive_message_records_partial_usage_when_the_price_floor_exceeds_the_
     _set_llm_settings(monkeypatch, _settings())
     transport = _ScriptedTransport(
         [
+            _search_hotels_prefix_call(),
             _function_call_response(
                 "get_quote",
                 {
@@ -1897,7 +2023,7 @@ def test_receive_message_records_partial_usage_when_the_price_floor_exceeds_the_
                 },
                 prompt_tokens=25,
                 candidates_tokens=5,
-            )
+            ),
         ]
     )
     _set_transport(monkeypatch, transport)
@@ -1912,13 +2038,13 @@ def test_receive_message_records_partial_usage_when_the_price_floor_exceeds_the_
 
     assert response.status_code == 200
     assert response.json() == {"status": "accepted"}
-    assert len(transport.calls) == 1
+    assert len(transport.calls) == 2
     usage_row = db_conn.execute(
         "SELECT prompt_tokens, candidates_tokens, total_tokens FROM token_usage "
         "WHERE customer_phone = %s",
         (_PHONE,),
     ).fetchone()
-    assert usage_row == (25, 5, 30)
+    assert usage_row == (50, 10, 60)
     error_records = [r for r in caplog.records if r.levelno == logging.ERROR]
     assert len(error_records) == 1
     logged = json.loads(error_records[0].getMessage())
@@ -1941,9 +2067,11 @@ def test_receive_message_records_partial_usage_and_logs_a_never_seen_error(
     design must not quietly swallow. Proves the structural guarantee: the
     funnel does not need to know about this exception type in advance to
     record its prior usage and log it loudly."""
+    _seed_searchable_hotel(db_conn)
     _set_llm_settings(monkeypatch, _settings())
     transport = _ScriptedTransport(
         [
+            _search_hotels_prefix_call(),
             _function_call_response(
                 "check_availability",
                 _HARMLESS_AVAILABILITY_ARGS,
@@ -1965,13 +2093,13 @@ def test_receive_message_records_partial_usage_and_logs_a_never_seen_error(
 
     assert response.status_code == 200
     assert response.json() == {"status": "accepted"}
-    assert len(transport.calls) == 2
+    assert len(transport.calls) == 3
     usage_row = db_conn.execute(
         "SELECT prompt_tokens, candidates_tokens, total_tokens FROM token_usage "
         "WHERE customer_phone = %s",
         (_PHONE,),
     ).fetchone()
-    assert usage_row == (25, 5, 30)
+    assert usage_row == (50, 10, 60)
     error_records = [r for r in caplog.records if r.levelno == logging.ERROR]
     assert len(error_records) == 1
     logged = json.loads(error_records[0].getMessage())

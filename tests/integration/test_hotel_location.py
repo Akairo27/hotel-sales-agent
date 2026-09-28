@@ -47,7 +47,6 @@ _COLUMNS_BEFORE_THIS_MIGRATION = (
     "check_out_time",
     "is_active",
 )
-_BACKEND_ROLES = ("hotel_agent", "hotel_worker")
 
 
 def _seed_hotel(conn: psycopg.Connection[Any], **columns: Any) -> int:
@@ -354,15 +353,30 @@ def test_sales_can_read_but_not_change_the_location_columns(
     assert _read_location(db_conn, hotel_id)[:2] == ("makkah", "makkah_central")
 
 
-@pytest.mark.parametrize("role", _BACKEND_ROLES)
 @pytest.mark.parametrize("column", _LOCATION_COLUMNS)
-def test_the_backend_roles_cannot_read_the_new_columns(
-    db_conn: psycopg.Connection[Any], role: str, column: str
+def test_hotel_worker_cannot_read_the_new_columns(
+    db_conn: psycopg.Connection[Any], column: str
 ) -> None:
-    """The agent and the worker have no privilege on hotels at all (migration
-    0027), so nothing added to that table can reach them."""
+    """hotel_worker has no privilege on hotels at all (migration 0027),
+    unchanged since -- nothing added to that table can reach it."""
     row = db_conn.execute(
-        "SELECT has_column_privilege(%s, 'public.hotels', %s, 'SELECT')",
-        (role, column),
+        "SELECT has_column_privilege('hotel_worker', 'public.hotels', %s, 'SELECT')",
+        (column,),
     ).fetchone()
     assert row == (False,)
+
+
+@pytest.mark.parametrize("column", _LOCATION_COLUMNS)
+def test_hotel_agent_can_read_the_new_columns(
+    db_conn: psycopg.Connection[Any], column: str
+) -> None:
+    """hotel_agent gained full-table SELECT on hotels in migration 0030
+    (search_hotels needs city/zone at minimum) -- these columns are no
+    exception, matching migration 0027's own "full grant, boundary
+    enforced in code" pattern already established for this role's other
+    reference-table reads."""
+    row = db_conn.execute(
+        "SELECT has_column_privilege('hotel_agent', 'public.hotels', %s, 'SELECT')",
+        (column,),
+    ).fetchone()
+    assert row == (True,)

@@ -75,9 +75,10 @@ from tests.integration._seed import (
     flat_min_profit,
     seed_allotment_nights,
     seed_conversation,
-    seed_hotel_and_room_type,
+    seed_hotel,
     seed_message,
     seed_price_rule,
+    seed_room_type,
     seed_season,
 )
 
@@ -189,13 +190,29 @@ def seed_eval_database(conn: psycopg.Connection[Any]) -> None:
     a default season, one wide window of inventory, and one global price
     rule -- the same shape tests/integration/test_llm_dispatch_integration.py
     prices against. The connection must be autocommit (seed_price_rule's
-    session-scoped actor setting depends on it)."""
+    session-scoped actor setting depends on it).
+
+    The hotel is seeded with a full, complete profile (city/zone/star/
+    distance/address), not the bare seed_hotel_and_room_type shape used
+    elsewhere in this test suite: search_hotels (services/agent/llm/
+    dispatch.py) only ever resolves an active hotel with a complete
+    profile, and a real scenario now has to call it before
+    check_availability/get_quote."""
     conn.execute(
         sql.SQL("TRUNCATE {tables} RESTART IDENTITY CASCADE").format(
             tables=sql.SQL(", ").join(sql.Identifier(t) for t in _TABLES_TO_TRUNCATE)
         )
     )
-    hotel_id, room_type_id = seed_hotel_and_room_type(conn)
+    hotel_id = seed_hotel(
+        conn,
+        hotel_name=SEEDED_HOTEL_NAME,
+        city="makkah",
+        zone="makkah_central",
+        star_rating=4,
+        distance_to_haram_meters=350,
+        address_text="Test address",
+    )
+    room_type_id = seed_room_type(conn, hotel_id, room_type_name="Standard")
     seed_season(
         conn,
         season_name="Default",
