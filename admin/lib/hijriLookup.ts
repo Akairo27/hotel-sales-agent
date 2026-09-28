@@ -98,3 +98,26 @@ export function toHijriDate(date: Date): HijriDate {
 export function formatHijriDate(hijri: HijriDate): string {
   return `${hijri.day} ${monthName("hijri", hijri.month)} ${hijri.year} هـ`;
 }
+
+/** The label the allotment entry preview actually renders next to each
+ * Gregorian night: toHijriDate + formatHijriDate, but an empty string
+ * instead of a thrown error when `date` falls outside the generated
+ * reference table.
+ *
+ * The 366-night entry cap keeps every real night comfortably inside the
+ * table's decades-wide range for the foreseeable future, so reaching this
+ * fallback in practice means a stale, un-regenerated table — a display-only
+ * problem, not one that should block a staff member from seeing or
+ * confirming the rest of the preview. Any other error still propagates: it
+ * would mean a genuine bug in the lookup, not an out-of-range table.
+ */
+export function hijriDateLabel(date: Date): string {
+  try {
+    return formatHijriDate(toHijriDate(date));
+  } catch (error) {
+    if (error instanceof HijriLookupOutOfRangeError) {
+      return "";
+    }
+    throw error;
+  }
+}

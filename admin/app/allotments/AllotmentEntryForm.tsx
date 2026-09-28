@@ -7,7 +7,7 @@ import {
   nightCount,
   validateAllotmentEntryRange,
 } from "@/lib/allotmentEntryRange";
-import { HijriLookupOutOfRangeError, formatHijriDate, toHijriDate } from "@/lib/hijriLookup";
+import { hijriDateLabel } from "@/lib/hijriLookup";
 import {
   ACTION_BAR,
   ALERT_ERROR,
@@ -39,23 +39,6 @@ const ACTION_LABELS: Record<AllotmentEntryPreviewNight["action"], string> = {
   updated: "تحديث",
   unchanged: "بلا تغيير",
 };
-
-// The reference table (hijriCalendarReference.json) comfortably covers this
-// screen's 366-night cap for decades either side of today — an out-of-range
-// night here would mean a stale, un-regenerated table, not a real user
-// input. Falling back to a blank cell rather than throwing keeps that
-// display-only failure from blocking the preview a staff member is trying
-// to act on.
-function hijriLabel(stayDate: string): string {
-  try {
-    return formatHijriDate(toHijriDate(new Date(`${stayDate}T00:00:00Z`)));
-  } catch (error) {
-    if (error instanceof HijriLookupOutOfRangeError) {
-      return "";
-    }
-    throw error;
-  }
-}
 
 // The screen's own write path for creating or extending allotments over a
 // date range — admin_set_allotments (migration 0029) is the only function
@@ -300,7 +283,9 @@ export function AllotmentEntryForm({ hotels, roomTypes }: AllotmentEntryFormProp
                     {previewNights.map((night) => (
                       <tr key={night.stayDate}>
                         <td className={TD}>{night.stayDate}</td>
-                        <td className={TD}>{hijriLabel(night.stayDate)}</td>
+                        <td className={TD}>
+                          {hijriDateLabel(new Date(`${night.stayDate}T00:00:00Z`))}
+                        </td>
                         <td className={TD}>{ACTION_LABELS[night.action]}</td>
                         <td className={TD}>{night.totalRooms}</td>
                         <td className={TD}>{night.costPerNightRiyals}</td>
