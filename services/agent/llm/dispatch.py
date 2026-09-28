@@ -14,6 +14,16 @@ This is where those two rules are actually enforced, not just documented:
   by hand, so a field added to NightPrice later cannot ride along into
   the model's context just by existing on the dataclass.
 
+dispatch_tool also logs one agent_tool_call event per call (CLAUDE.md §8:
+"log every price decision with its quote_id for traceability"), success or
+failure, before returning or re-raising — see _log_tool_call. Its
+result_summary is a second, separate hand-built whitelist per tool
+(CHECK_AVAILABILITY_LOG_SUMMARY_KEYS / GET_QUOTE_LOG_SUMMARY_KEYS), never a
+spread of the already-cost-free tool result: rule 2 says cost must never
+reach "a log the model can read" either, and a whitelist that only has to
+be correct once (quote_to_tool_result's) is not a whitelist a second
+consumer (this log) is protected by for free.
+
 Arguments come from the model, which can hallucinate types, omit
 required fields, or send a date range that fails the underlying
 services' own validation — all of that is InvalidToolArgumentsError, an
@@ -42,6 +52,8 @@ inventing a way to paper over it here.
 
 from __future__ import annotations
 
+import json
+import logging
 from dataclasses import dataclass
 from datetime import date, datetime
 from typing import Any, cast
@@ -54,8 +66,20 @@ from services.inventory.operations import check_availability
 from services.pricing.compute import Quote, compute_quote
 from services.pricing.errors import AllotmentNotFoundError
 
+logger = logging.getLogger(__name__)
+
 CHECK_AVAILABILITY_TOOL = "check_availability"
 GET_QUOTE_TOOL = "get_quote"
+
+# The exact key set a logged tool call's result_summary may ever contain,
+# per tool — hand-built the same way QUOTE_RESULT_KEYS is, and for the same
+# reason: a field added to Quote/NightPrice later must not ride along into
+# the journal just by existing on the dataclass. Deliberately narrower than
+# QUOTE_RESULT_KEYS itself (no total_price_display, no nights) — this log
+# has no need to duplicate the customer-facing price, only quote_id, which
+# CLAUDE.md rule 8 asks to log for traceability.
+CHECK_AVAILABILITY_LOG_SUMMARY_KEYS = frozenset({"available"})
+GET_QUOTE_LOG_SUMMARY_KEYS = frozenset({"priced", "quote_id"})
 
 # The exact key set quote_to_tool_result may ever produce — the
 # enforcement point tests/unit/test_llm_dispatch.py checks rule 2
@@ -251,6 +275,42 @@ def dispatch_get_quote(
     return quote_to_tool_result(quote)
 
 
+def _check_availability_log_summary(result: dict[str, Any]) -> dict[str, Any]:
+    return {"available": result["available"]}
+
+
+def _get_quote_log_summary(result: dict[str, Any]) -> dict[str, Any]:
+    return {"priced": result["priced"], "quote_id": result.get("quote_id")}
+
+
+def _log_tool_call(
+    *,
+    conversation_id: int | None,
+    tool_name: str,
+    args: dict[str, Any],
+    result_summary: dict[str, Any] | None,
+    error_type: str | None,
+) -> None:
+    """The one place a model tool call is logged — CLAUDE.md rule 8. Never
+    logs cost or any other floor-related pricing field: `args` is the
+    tool's own input (verified free of those by every declared tool's
+    schema in tools.py), and `result_summary` is always one of the two
+    hand-built whitelists above, never a spread of the tool's result dict.
+    """
+    logger.info(
+        json.dumps(
+            {
+                "event": "agent_tool_call",
+                "conversation_id": conversation_id,
+                "tool_name": tool_name,
+                "arguments": args,
+                "result_summary": result_summary,
+                "error_type": error_type,
+            }
+        )
+    )
+
+
 def dispatch_tool(
     conn: psycopg.Connection[Any],
     name: str,
@@ -260,21 +320,49 @@ def dispatch_tool(
     customer_phone: str | None,
     conversation_id: int | None,
 ) -> dict[str, Any]:
-    """Routes a model tool call by name to its handler.
+    """Routes a model tool call by name to its handler, logging exactly one
+    agent_tool_call event per call (success or failure) before returning or
+    re-raising — see _log_tool_call.
 
     Raises:
         UnknownToolError: name is not one of the tools declared in
             tools.py. Never executed silently.
         InvalidToolArgumentsError: see the individual dispatch functions.
     """
-    if name == CHECK_AVAILABILITY_TOOL:
-        return dispatch_check_availability(conn, args)
-    if name == GET_QUOTE_TOOL:
-        return dispatch_get_quote(
-            conn,
-            args,
-            now=now,
-            customer_phone=customer_phone,
+    try:
+        if name == CHECK_AVAILABILITY_TOOL:
+            result = dispatch_check_availability(conn, args)
+            _log_tool_call(
+                conversation_id=conversation_id,
+                tool_name=name,
+                args=args,
+                result_summary=_check_availability_log_summary(result),
+                error_type=None,
+            )
+            return result
+        if name == GET_QUOTE_TOOL:
+            result = dispatch_get_quote(
+                conn,
+                args,
+                now=now,
+                customer_phone=customer_phone,
+                conversation_id=conversation_id,
+            )
+            _log_tool_call(
+                conversation_id=conversation_id,
+                tool_name=name,
+                args=args,
+                result_summary=_get_quote_log_summary(result),
+                error_type=None,
+            )
+            return result
+        raise UnknownToolError(f"model called unknown tool {name!r}")
+    except Exception as exc:
+        _log_tool_call(
             conversation_id=conversation_id,
+            tool_name=name,
+            args=args,
+            result_summary=None,
+            error_type=type(exc).__name__,
         )
-    raise UnknownToolError(f"model called unknown tool {name!r}")
+        raise

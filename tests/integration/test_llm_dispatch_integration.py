@@ -9,6 +9,8 @@ with dispatch.py's expectations.
 
 from __future__ import annotations
 
+import json
+import logging
 from datetime import UTC, date, datetime
 from typing import Any
 
@@ -19,11 +21,13 @@ from services.agent.llm.dispatch import (
     QUOTE_RESULT_KEYS,
     dispatch_check_availability,
     dispatch_get_quote,
+    dispatch_tool,
 )
 from tests.integration._seed import (
     flat_demand_curve,
     flat_min_profit,
     seed_allotment_nights,
+    seed_conversation,
     seed_hotel_and_room_type,
     seed_price_rule,
     seed_season,
@@ -182,3 +186,78 @@ def test_check_availability_dispatch_reflects_real_inventory(
 
     args["rooms"] = 6
     assert dispatch_check_availability(db_conn, args)["available"] is False
+
+
+def test_dispatch_tool_logs_get_quote_result_with_no_cost_fields(
+    db_conn: psycopg.Connection[Any],
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The end-to-end proof for CLAUDE.md rule 2 applied to the tool-call
+    log too: a real Quote priced against real (seeded, cost-bearing)
+    allotments must still log only priced/quote_id -- never the
+    cost_per_night, target_margin_bps or min_profit_halalas that
+    compute_quote's own audit trail carries.
+    """
+    caplog.set_level(logging.INFO, logger="services.agent.llm.dispatch")
+    hotel_id, room_type_id = _seed_priceable_stay(db_conn)
+    conversation_id = seed_conversation(db_conn)
+    args = {
+        "hotel_id": hotel_id,
+        "room_type_id": room_type_id,
+        "check_in": "2026-09-10",
+        "check_out": "2026-09-12",
+        "rooms": 1,
+    }
+
+    result = dispatch_tool(
+        db_conn,
+        "get_quote",
+        args,
+        now=_NOW,
+        customer_phone="+966500000001",
+        conversation_id=conversation_id,
+    )
+
+    records = [json.loads(r.getMessage()) for r in caplog.records]
+    assert len(records) == 1
+    record = records[0]
+    assert record["event"] == "agent_tool_call"
+    assert record["conversation_id"] == conversation_id
+    assert record["tool_name"] == "get_quote"
+    assert record["arguments"] == args
+    assert record["result_summary"] == {"priced": True, "quote_id": result["quote_id"]}
+    assert record["error_type"] is None
+
+    serialized = json.dumps(record)
+    for forbidden in ("cost_per_night", "10000", "target_margin", "min_profit"):
+        assert forbidden not in serialized
+
+
+def test_dispatch_tool_logs_check_availability_result(
+    db_conn: psycopg.Connection[Any],
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    caplog.set_level(logging.INFO, logger="services.agent.llm.dispatch")
+    hotel_id, room_type_id = _seed_priceable_stay(db_conn)
+    args = {
+        "hotel_id": hotel_id,
+        "room_type_id": room_type_id,
+        "check_in": "2026-09-10",
+        "check_out": "2026-09-12",
+        "rooms": 6,
+    }
+
+    dispatch_tool(
+        db_conn,
+        "check_availability",
+        args,
+        now=_NOW,
+        customer_phone=None,
+        conversation_id=None,
+    )
+
+    records = [json.loads(r.getMessage()) for r in caplog.records]
+    assert len(records) == 1
+    assert records[0]["tool_name"] == "check_availability"
+    assert records[0]["result_summary"] == {"available": False}
+    assert records[0]["error_type"] is None
