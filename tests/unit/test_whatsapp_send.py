@@ -22,6 +22,7 @@ from services.agent.whatsapp_send import (
     WhatsAppSendSettings,
     _graph_api_error_detail,
     load_whatsapp_send_settings,
+    to_whatsapp_formatting,
 )
 
 _SETTINGS = WhatsAppSendSettings(
@@ -245,3 +246,40 @@ def test_load_whatsapp_send_settings_with_a_valid_env(
 
     assert settings.phone_number_id == "id"
     assert settings.access_token == "token"
+
+
+# --- to_whatsapp_formatting --------------------------------------------------
+
+
+def test_to_whatsapp_formatting_converts_a_bold_span() -> None:
+    assert to_whatsapp_formatting("**150 SAR**") == "*150 SAR*"
+
+
+def test_to_whatsapp_formatting_converts_a_strikethrough_span() -> None:
+    assert to_whatsapp_formatting("~~150 SAR~~") == "~150 SAR~"
+
+
+def test_to_whatsapp_formatting_converts_multiple_bold_spans_independently() -> None:
+    text = "**150 SAR** for one night, **300 SAR** for two"
+    assert to_whatsapp_formatting(text) == "*150 SAR* for one night, *300 SAR* for two"
+
+
+def test_to_whatsapp_formatting_converts_bold_and_strikethrough_together() -> None:
+    text = "was ~~200 SAR~~, now **150 SAR**"
+    assert to_whatsapp_formatting(text) == "was ~200 SAR~, now *150 SAR*"
+
+
+def test_to_whatsapp_formatting_leaves_already_correct_single_markers_unchanged() -> (
+    None
+):
+    text = "*150 SAR* and _tonight only_ and ~200 SAR~"
+    assert to_whatsapp_formatting(text) == text
+
+
+def test_to_whatsapp_formatting_leaves_plain_text_unchanged() -> None:
+    text = "Your total is 150 SAR for one night."
+    assert to_whatsapp_formatting(text) == text
+
+
+def test_to_whatsapp_formatting_leaves_an_empty_string_unchanged() -> None:
+    assert to_whatsapp_formatting("") == ""

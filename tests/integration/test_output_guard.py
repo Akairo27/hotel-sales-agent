@@ -29,6 +29,7 @@ from services.agent.output_guard.enforcement import (
     enforce_outbound_text,
 )
 from services.agent.output_guard.quotes import load_allowed_amounts
+from services.agent.whatsapp_send import to_whatsapp_formatting
 from tests.integration._seed import (
     flat_demand_curve,
     flat_min_profit,
@@ -224,6 +225,37 @@ def test_a_reply_quoting_the_real_total_passes_and_opens_no_escalation(
     assert verdict.escalation_id is None
     count = db_conn.execute("SELECT count(*) FROM escalations").fetchone()
     assert count == (0,)
+
+
+def test_a_reply_with_the_real_total_in_markdown_bold_passes_once_converted(
+    db_conn: psycopg.Connection[Any],
+) -> None:
+    """webhook.py runs to_whatsapp_formatting on a reply before the guard
+    ever sees it (services/agent/webhook.py's _process_turn) -- proving
+    the conversion happens first, not that the guard itself understands
+    Markdown: the raw amount inside "**1,350.00 SAR**" is unchanged by
+    the conversion, so it must match exactly like the plain form
+    test_a_reply_quoting_the_real_total_passes_and_opens_no_escalation
+    already proves."""
+    hotel_id, room_type_id = seed_hotel_and_room_type(db_conn)
+    conversation_id = seed_conversation(db_conn)
+    seed_quote(
+        db_conn,
+        hotel_id,
+        room_type_id,
+        conversation_id=conversation_id,
+        ask_price_total=135_000,
+        min_allowed_total=90_000,
+    )
+    formatted_text = to_whatsapp_formatting("Your total is **1,350.00 SAR**")
+    assert formatted_text == "Your total is *1,350.00 SAR*"
+
+    verdict = enforce_outbound_text(
+        db_conn, conversation_id=conversation_id, text=formatted_text
+    )
+
+    assert verdict.allowed is True
+    assert verdict.escalation_id is None
 
 
 def test_a_blocked_reply_opens_exactly_one_escalation_row(

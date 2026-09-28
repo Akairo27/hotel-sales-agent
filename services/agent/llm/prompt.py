@@ -174,6 +174,22 @@ PROMPT_RULES: tuple[PromptRule, ...] = (
         english_digest="2e3449e8453c4a7e480b345fbb27a29e18a7497d90c4e5cc41b1ca51d777f315",
     ),
     PromptRule(
+        key="whatsapp_formatting",
+        english=(
+            "Format prices and other replies for WhatsApp, not Markdown: "
+            "use a single asterisk for bold (*word*), never two "
+            "(**word**), and a single tilde for strikethrough (~word~), "
+            "never two (~~word~~)."
+        ),
+        arabic=(
+            "نسّق أسعارك وبقية ردودك بصيغة واتساب لا بصيغة Markdown: "
+            "استخدم نجمة واحدة للخط العريض (*كلمة*)، لا نجمتين "
+            "(**كلمة**)، وشرطة تلدا واحدة للشطب (~كلمة~)، لا شرطتين "
+            "(~~كلمة~~)."
+        ),
+        english_digest="39ca742f1cdd29856824556a85df1529a3e735b1a6a4ff65c1827bb16eb83b77",
+    ),
+    PromptRule(
         key="prices_are_saudi_riyals_only",
         english=(
             "Every price in this service is in Saudi riyals only. Never "

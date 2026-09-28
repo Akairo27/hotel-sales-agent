@@ -173,6 +173,7 @@ from services.agent.whatsapp_send import (
     WhatsAppSender,
     WhatsAppSendSettings,
     load_whatsapp_send_settings,
+    to_whatsapp_formatting,
 )
 
 logger = logging.getLogger(__name__)
@@ -843,11 +844,16 @@ async def _process_turn(
     _increment_turn_count_or_log_failure(conn, conversation_id=conversation_id)
 
     try:
+        # Converted before the guard check runs, not after -- the guard
+        # must validate exactly what will be sent, and a Markdown-bold
+        # span around a price (e.g. "**343.85 SAR**") must not be checked
+        # in a form the customer will never actually see.
+        formatted_text = to_whatsapp_formatting(reply.text)
         verdict = enforce_outbound_text(
-            conn, conversation_id=conversation_id, text=reply.text
+            conn, conversation_id=conversation_id, text=formatted_text
         )
         if verdict.allowed:
-            text_to_send = reply.text
+            text_to_send = formatted_text
         else:
             text_to_send = OUTPUT_GUARD_FALLBACK_MESSAGE
             fallback_verdict = enforce_outbound_text(
