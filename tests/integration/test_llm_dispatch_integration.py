@@ -23,6 +23,7 @@ from services.agent.llm.dispatch import (
     dispatch_get_quote,
     dispatch_tool,
 )
+from services.agent.llm.errors import InvalidToolArgumentsError
 from tests.integration._seed import (
     flat_demand_curve,
     flat_min_profit,
@@ -279,12 +280,15 @@ _STAY_START = date(2026, 9, 10)
 
 
 def _seed_stay_with_inventory(
-    conn: psycopg.Connection[Any], nights: list[tuple[int, int, int]]
+    conn: psycopg.Connection[Any],
+    nights: list[tuple[int, int, int]],
+    *,
+    start: date = _STAY_START,
 ) -> tuple[int, int]:
-    """A fully priceable stay starting _STAY_START, one night per
-    (total, reserved, held) entry -- everything pricing needs is in place,
-    so any unpriced result from these tests is the availability gate's
-    doing and nothing else."""
+    """A fully priceable stay starting `start` (_STAY_START unless a test
+    needs another date), one night per (total, reserved, held) entry --
+    everything pricing needs is in place, so any unpriced result from these
+    tests is the availability gate's doing and nothing else."""
     hotel_id, room_type_id = seed_hotel_and_room_type(conn)
     _seed_default_season(conn)
     for offset, (total, reserved, held) in enumerate(nights):
@@ -292,7 +296,7 @@ def _seed_stay_with_inventory(
             conn,
             hotel_id,
             room_type_id,
-            _STAY_START + timedelta(days=offset),
+            start + timedelta(days=offset),
             total_rooms=total,
             reserved=reserved,
             held=held,
@@ -308,13 +312,18 @@ def _seed_stay_with_inventory(
 
 
 def _stay_args(
-    hotel_id: int, room_type_id: int, *, nights: int, rooms: int
+    hotel_id: int,
+    room_type_id: int,
+    *,
+    nights: int,
+    rooms: int,
+    start: date = _STAY_START,
 ) -> dict[str, Any]:
     return {
         "hotel_id": hotel_id,
         "room_type_id": room_type_id,
-        "check_in": _STAY_START.isoformat(),
-        "check_out": (_STAY_START + timedelta(days=nights)).isoformat(),
+        "check_in": start.isoformat(),
+        "check_out": (start + timedelta(days=nights)).isoformat(),
         "rooms": rooms,
     }
 
@@ -410,6 +419,39 @@ def test_get_quote_dispatch_declines_when_only_one_night_of_the_stay_is_short(
     )
 
     assert result == _insufficient_availability_result(args)
+    assert _quote_row_count(db_conn) == 0
+
+
+_PAST_STAY_START = date(2026, 8, 20)  # before _NOW (2026-09-01)
+
+
+@pytest.mark.parametrize(
+    "inventory",
+    [
+        pytest.param([(5, 5, 0)], id="sold-out-night"),
+        pytest.param([(5, 0, 0)], id="free-night"),
+    ],
+)
+def test_get_quote_dispatch_rejects_a_past_check_in_whatever_the_inventory_holds(
+    db_conn: psycopg.Connection[Any], inventory: list[tuple[int, int, int]]
+) -> None:
+    """A past check_in is a date problem, never an inventory outcome: the
+    sold-out night and the free night must give the identical
+    InvalidToolArgumentsError, and neither may write a `quotes` row. The
+    sold-out case is the one that would have been reported as unpriced
+    (insufficient_availability) if the inventory checks ran before date
+    validation."""
+    hotel_id, room_type_id = _seed_stay_with_inventory(
+        db_conn, inventory, start=_PAST_STAY_START
+    )
+    args = _stay_args(hotel_id, room_type_id, nights=1, rooms=1, start=_PAST_STAY_START)
+
+    with pytest.raises(InvalidToolArgumentsError) as exc_info:
+        dispatch_get_quote(
+            db_conn, args, now=_NOW, customer_phone=None, conversation_id=None
+        )
+
+    assert str(exc_info.value) == "check_in must not be in the past"
     assert _quote_row_count(db_conn) == 0
 
 

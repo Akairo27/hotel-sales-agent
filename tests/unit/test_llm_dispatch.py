@@ -353,6 +353,56 @@ def test_dispatch_get_quote_prices_when_rooms_are_free(
     assert result["quote_id"] == 42
 
 
+def test_dispatch_get_quote_rejects_a_past_check_in_before_any_inventory_read(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Date validation runs ahead of every inventory decision: none of the
+    coverage check, the availability check or compute_quote may be reached
+    for a check_in before today (each is stubbed to fail loudly if it is)."""
+    monkeypatch.setattr(
+        dispatch_module, "_allotment_covers_every_night", _must_not_be_called
+    )
+    monkeypatch.setattr(dispatch_module, "check_availability", _must_not_be_called)
+    monkeypatch.setattr(dispatch_module, "compute_quote", _must_not_be_called)
+
+    with pytest.raises(InvalidToolArgumentsError) as exc_info:
+        dispatch_get_quote(
+            _NOT_A_CONNECTION,
+            _VALID_ARGS,  # check_in 2026-09-01
+            now=datetime(2026, 10, 1, tzinfo=UTC),
+            customer_phone=None,
+            conversation_id=None,
+        )
+
+    assert str(exc_info.value) == "check_in must not be in the past"
+
+
+def test_dispatch_get_quote_accepts_a_check_in_of_today(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The boundary of the date rule: check_in equal to now's date is not
+    in the past (strictly earlier is), so the stay goes on to be priced."""
+    monkeypatch.setattr(
+        dispatch_module, "_allotment_covers_every_night", lambda *_: True
+    )
+    monkeypatch.setattr(dispatch_module, "check_availability", lambda *_: True)
+    monkeypatch.setattr(
+        dispatch_module,
+        "compute_quote",
+        lambda *_args, **_kwargs: _quote_with_full_cost_detail(),
+    )
+
+    result = dispatch_get_quote(
+        _NOT_A_CONNECTION,
+        _VALID_ARGS,  # check_in 2026-09-01
+        now=datetime(2026, 9, 1, 23, 59, tzinfo=UTC),
+        customer_phone=None,
+        conversation_id=None,
+    )
+
+    assert result["priced"] is True
+
+
 def test_dispatch_tool_logs_and_reraises_invalid_tool_arguments_error(
     caplog: pytest.LogCaptureFixture,
 ) -> None:

@@ -56,7 +56,10 @@ free): dispatch_get_quote calls services.inventory.operations.
 check_availability -- the same read-time test the check_availability tool
 exposes -- after the allotment-coverage check and before compute_quote,
 and returns an unpriced "insufficient_availability" result when any night
-has fewer free rooms than requested. compute_quote itself never looks at
+has fewer free rooms than requested. Argument and date validation come
+first of all (a check_in in the past is always an InvalidToolArgumentsError,
+whatever the inventory holds), so no inventory decision can ever stand in
+for a date problem. compute_quote itself never looks at
 free rooms: it only turns (reserved + held) / total into a demand
 multiplier, and occupancy of exactly 1.0 (a sold-out or zero-total night
 with no active price override, which skips occupancy entirely) falls
@@ -601,6 +604,23 @@ def dispatch_check_availability(
     }
 
 
+def _require_check_in_not_past(stay: StayArgs, now: datetime) -> None:
+    """Rejects a check_in before today, ahead of every inventory read.
+
+    The same rule, the same comparison and the same message as
+    compute_quote's own validation (which stays as the backstop): without
+    this the inventory checks in dispatch_get_quote would decide a
+    past-dated stay first, so it would be reported as unpriced -- or, on a
+    night with free rooms, as an invalid argument -- depending on
+    inventory alone.
+
+    Raises:
+        InvalidToolArgumentsError: check_in is earlier than now's date.
+    """
+    if stay.check_in < now.date():
+        raise InvalidToolArgumentsError("check_in must not be in the past")
+
+
 def dispatch_get_quote(
     conn: psycopg.Connection[Any],
     args: dict[str, Any],
@@ -613,22 +633,28 @@ def dispatch_get_quote(
     (compute_quote's own responsibility), and returns the cost-free
     result the model may relay to the customer.
 
-    A stay is declined, unpriced and with no `quotes` row written, when a
-    night has no allotment or no inventory row ("no_allotment_for_dates")
-    or when any night has fewer free rooms than requested
-    ("insufficient_availability"). The second check is a read, not a lock
-    -- see this module's docstring for why it is advisory and what it
-    deliberately does not reveal.
+    The arguments are validated first, including that check_in is not in
+    the past, before any inventory is read: a bad date gets the same
+    InvalidToolArgumentsError whatever the inventory looks like, never an
+    unpriced result that would blame availability for a date problem.
+
+    A valid stay is then declined, unpriced and with no `quotes` row
+    written, when a night has no allotment or no inventory row
+    ("no_allotment_for_dates") or when any night has fewer free rooms than
+    requested ("insufficient_availability"). The second check is a read,
+    not a lock -- see this module's docstring for why it is advisory and
+    what it deliberately does not reveal.
 
     Raises:
         InvalidToolArgumentsError: the arguments fail validation
-            (parse_stay_args), or compute_quote rejects them (for example a
-            check_in in the past).
+            (parse_stay_args, or a check_in in the past), or compute_quote
+            rejects them.
         Any other services.pricing exception compute_quote raises for a
             price_rules misconfiguration -- deliberately left to propagate
             (see this module's docstring).
     """
     stay = parse_stay_args(args)
+    _require_check_in_not_past(stay, now)
     if not _allotment_covers_every_night(conn, stay):
         return _unpriced_result(stay, reason="no_allotment_for_dates")
     if not check_availability(
