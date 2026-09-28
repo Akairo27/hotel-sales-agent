@@ -34,6 +34,7 @@ from services.agent.llm.config import LlmSettings
 from services.agent.llm.errors import (
     LlmConfigurationError,
     ModelUnavailableError,
+    TurnBudgetExceededError,
     UsageUnavailableError,
 )
 from services.agent.llm.model_types import (
@@ -124,7 +125,14 @@ class ModelTransport(Protocol):
         *,
         turns: list[Turn],
         system_instruction: str,
-    ) -> ModelResponse: ...
+        deadline: float,
+    ) -> ModelResponse:
+        """deadline is an absolute time.monotonic() reading: the instant
+        this whole turn's shared time budget (config.TURN_BUDGET_SECONDS)
+        runs out, computed once by conversation.py and passed unchanged
+        to every call in the turn, including later tool-calling
+        iterations -- never a duration, and never recomputed per call."""
+        ...
 
 
 # --- JSON-Schema -> Gemini types.Schema translation ------------------------
@@ -387,6 +395,48 @@ def _retry_delay_seconds(attempt: int) -> float:
     return min(exponential + jitter, _RETRY_MAX_DELAY_SECONDS)
 
 
+def _attempt_timeout_seconds(*, deadline: float, max_attempt_timeout_ms: int) -> float:
+    """The timeout to use for the next model-call attempt, given this
+    turn's shared deadline -- shared by both transports so neither can
+    drift from the other's budget arithmetic.
+
+    Checked before every attempt (the initial call and every retry), not
+    only the first: a turn already deep into a call's own retries must
+    not start one more attempt (or wait out a retry's backoff) it has no
+    budget left for.
+
+    Raises:
+        TurnBudgetExceededError: the turn's time budget is already
+            exhausted -- deadline is at or before now.
+    """
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        raise TurnBudgetExceededError(
+            "turn's time budget was exhausted before starting a model-call attempt"
+        )
+    return min(max_attempt_timeout_ms / 1000, remaining)
+
+
+def _log_model_call_attempt(*, attempt: int, elapsed_ms: int, outcome: str) -> None:
+    """INFO for every model-call attempt, success or failure alike --
+    unlike _log_retry_attempt below (WARNING, fired only for a failed
+    attempt that will be retried), this fires unconditionally so
+    per-attempt latency is visible even when every attempt succeeds on
+    the first try. Same scoping as _log_retry_attempt: attempt number,
+    elapsed time and outcome only, never anything about the prompt or the
+    model's response."""
+    logger.info(
+        json.dumps(
+            {
+                "event": "model_call_attempt",
+                "attempt": attempt,
+                "elapsed_ms": elapsed_ms,
+                "outcome": outcome,
+            }
+        )
+    )
+
+
 def _log_retry_attempt(
     *,
     attempt: int,
@@ -447,6 +497,12 @@ class GeminiTransport:
 
     def __init__(self, settings: LlmSettings) -> None:
         self._model = settings.model
+        # The ceiling for one attempt when the turn's budget allows it in
+        # full -- generate() below overrides this per attempt with
+        # min(this, the turn's remaining budget), so this value only ever
+        # narrows, never widens, what settings.timeout_ms alone would
+        # have allowed.
+        self._max_attempt_timeout_ms = settings.timeout_ms
         self._client = genai.Client(
             api_key=settings.api_key,
             http_options=types.HttpOptions(timeout=settings.timeout_ms),
@@ -465,6 +521,7 @@ class GeminiTransport:
         *,
         turns: list[Turn],
         system_instruction: str,
+        deadline: float,
     ) -> ModelResponse:
         """Calls the model, retrying transient failures up to
         _RETRY_ATTEMPTS times with logged backoff between attempts.
@@ -472,7 +529,15 @@ class GeminiTransport:
         the one that decides whether and how a tool call is executed
         (CLAUDE.md rule 1) — the SDK must never run one on its own.
 
+        Each attempt's own timeout is min(settings.timeout_ms, time
+        remaining before deadline), checked fresh before every attempt --
+        so a call started late in the turn's budget gets a shorter
+        timeout than one started with the full budget available, and an
+        attempt is never even started once the budget is gone.
+
         Raises:
+            TurnBudgetExceededError: see _attempt_timeout_seconds --
+                raised before an attempt starts, never mid-attempt.
             ModelUnavailableError: every attempt failed on a transient
                 error, or a single attempt hit a permanent one (CLAUDE.md
                 §8: every external call has a timeout and explicit
@@ -483,7 +548,7 @@ class GeminiTransport:
                 failure.
         """
         contents = _turns_to_gemini_contents(turns)
-        config = types.GenerateContentConfig(
+        base_config = types.GenerateContentConfig(
             system_instruction=system_instruction,
             tools=list(self._gemini_tools),
             tool_config=types.ToolConfig(
@@ -498,19 +563,37 @@ class GeminiTransport:
 
         last_exc: errors.APIError | httpx.HTTPError
         for attempt in range(1, _RETRY_ATTEMPTS + 1):
+            attempt_timeout_seconds = _attempt_timeout_seconds(
+                deadline=deadline, max_attempt_timeout_ms=self._max_attempt_timeout_ms
+            )
+            config = base_config.model_copy(
+                update={
+                    "http_options": types.HttpOptions(
+                        timeout=int(attempt_timeout_seconds * 1000)
+                    )
+                }
+            )
             started = time.monotonic()
             try:
                 response = await self._client.aio.models.generate_content(
                     model=self._model, contents=contents, config=config
                 )
-                return _gemini_response_to_model_response(response)
             except (errors.APIError, httpx.HTTPError) as exc:
                 last_exc = exc
+                elapsed_ms = int((time.monotonic() - started) * 1000)
+                _log_model_call_attempt(
+                    attempt=attempt, elapsed_ms=elapsed_ms, outcome="failure"
+                )
+                if attempt == _RETRY_ATTEMPTS or not _is_retryable(last_exc):
+                    raise _wrap_as_model_unavailable(last_exc) from last_exc
+                _log_retry_attempt(attempt=attempt, exc=last_exc, elapsed_ms=elapsed_ms)
+                await asyncio.sleep(_retry_delay_seconds(attempt))
+                continue
             elapsed_ms = int((time.monotonic() - started) * 1000)
-            if attempt == _RETRY_ATTEMPTS or not _is_retryable(last_exc):
-                raise _wrap_as_model_unavailable(last_exc) from last_exc
-            _log_retry_attempt(attempt=attempt, exc=last_exc, elapsed_ms=elapsed_ms)
-            await asyncio.sleep(_retry_delay_seconds(attempt))
+            _log_model_call_attempt(
+                attempt=attempt, elapsed_ms=elapsed_ms, outcome="success"
+            )
+            return _gemini_response_to_model_response(response)
         raise AssertionError("unreachable: the loop above always returns or raises")
 
 
@@ -840,14 +923,20 @@ class OpenRouterTransport:
             raise LlmConfigurationError("OPENROUTER_API_KEY is empty")
         self._model = model
         self._headers = {"Authorization": f"Bearer {api_key}"}
-        self._timeout = httpx.Timeout(timeout_ms / 1000)
+        # The ceiling for one attempt when the turn's budget allows it in
+        # full -- generate() below overrides this per attempt with
+        # min(this, the turn's remaining budget), the same pattern as
+        # GeminiTransport's own _max_attempt_timeout_ms.
+        self._max_attempt_timeout_ms = timeout_ms
         self._provider_routing = _openrouter_provider_routing(providers)
         self._tools = [_tool_declaration_to_openrouter(d) for d in AGENT_TOOLS]
         self._http_transport = http_transport
 
-    async def _call_once(self, body: dict[str, Any]) -> ModelResponse:
+    async def _call_once(
+        self, body: dict[str, Any], *, timeout_seconds: float
+    ) -> ModelResponse:
         async with httpx.AsyncClient(
-            timeout=self._timeout, transport=self._http_transport
+            timeout=httpx.Timeout(timeout_seconds), transport=self._http_transport
         ) as client:
             response = await client.post(
                 OPENROUTER_CHAT_COMPLETIONS_URL, headers=self._headers, json=body
@@ -869,6 +958,7 @@ class OpenRouterTransport:
         *,
         turns: list[Turn],
         system_instruction: str,
+        deadline: float,
     ) -> ModelResponse:
         """Calls the model, retrying transient failures up to
         _RETRY_ATTEMPTS times with logged backoff between attempts.
@@ -876,7 +966,13 @@ class OpenRouterTransport:
         docs require, and tool execution stays entirely with
         conversation.py (CLAUDE.md rule 1).
 
+        Each attempt's own timeout is min(timeout_ms, time remaining
+        before deadline), checked fresh before every attempt -- the same
+        budget arithmetic as GeminiTransport.generate, see its docstring.
+
         Raises:
+            TurnBudgetExceededError: see _attempt_timeout_seconds --
+                raised before an attempt starts, never mid-attempt.
             ModelUnavailableError: every attempt failed on a transient
                 error, or a single attempt hit a permanent one.
             UsageUnavailableError: raised only after a successful
@@ -891,19 +987,33 @@ class OpenRouterTransport:
         }
         last_exc: OpenRouterCallError | httpx.HTTPError
         for attempt in range(1, _RETRY_ATTEMPTS + 1):
+            attempt_timeout_seconds = _attempt_timeout_seconds(
+                deadline=deadline, max_attempt_timeout_ms=self._max_attempt_timeout_ms
+            )
             started = time.monotonic()
             try:
-                return await self._call_once(body)
+                response = await self._call_once(
+                    body, timeout_seconds=attempt_timeout_seconds
+                )
             except (OpenRouterCallError, httpx.HTTPError) as exc:
                 last_exc = exc
+                elapsed_ms = int((time.monotonic() - started) * 1000)
+                _log_model_call_attempt(
+                    attempt=attempt, elapsed_ms=elapsed_ms, outcome="failure"
+                )
+                if attempt == _RETRY_ATTEMPTS or not _openrouter_is_retryable(last_exc):
+                    raise _wrap_openrouter_failure(last_exc) from last_exc
+                _log_retry_attempt(
+                    attempt=attempt,
+                    exc=last_exc,
+                    elapsed_ms=elapsed_ms,
+                    status_code=_openrouter_status_code(last_exc),
+                )
+                await asyncio.sleep(_retry_delay_seconds(attempt))
+                continue
             elapsed_ms = int((time.monotonic() - started) * 1000)
-            if attempt == _RETRY_ATTEMPTS or not _openrouter_is_retryable(last_exc):
-                raise _wrap_openrouter_failure(last_exc) from last_exc
-            _log_retry_attempt(
-                attempt=attempt,
-                exc=last_exc,
-                elapsed_ms=elapsed_ms,
-                status_code=_openrouter_status_code(last_exc),
+            _log_model_call_attempt(
+                attempt=attempt, elapsed_ms=elapsed_ms, outcome="success"
             )
-            await asyncio.sleep(_retry_delay_seconds(attempt))
+            return response
         raise AssertionError("unreachable: the loop above always returns or raises")

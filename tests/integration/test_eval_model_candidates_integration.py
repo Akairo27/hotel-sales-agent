@@ -48,17 +48,17 @@ class _ScriptedTransport:
         self._steps = list(steps)
 
     async def generate(
-        self, *, turns: list[Turn], system_instruction: str
+        self, *, turns: list[Turn], system_instruction: str, deadline: float
     ) -> ModelResponse:
-        del system_instruction  # unused: the script decides what to say
+        del system_instruction, deadline  # unused: the script decides what to say
         return ModelResponse(turn=self._steps.pop(0)(turns), usage=_USAGE)
 
 
 class _FailingTransport:
     async def generate(
-        self, *, turns: list[Turn], system_instruction: str
+        self, *, turns: list[Turn], system_instruction: str, deadline: float
     ) -> ModelResponse:
-        del turns, system_instruction  # unused: this fake only ever fails
+        del turns, system_instruction, deadline  # unused: this fake only ever fails
         raise ModelUnavailableError("scripted outage")
 
 

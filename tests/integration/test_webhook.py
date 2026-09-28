@@ -160,9 +160,9 @@ class _FakeTransport:
     calls: list[str] = field(default_factory=list)
 
     async def generate(
-        self, *, turns: list[Turn], system_instruction: str
+        self, *, turns: list[Turn], system_instruction: str, deadline: float
     ) -> ModelResponse:
-        del turns, system_instruction
+        del turns, system_instruction, deadline
         self.calls.append("call")
         return ModelResponse(
             turn=ModelTurn(text="hello from the model", tool_calls=()),
@@ -188,9 +188,9 @@ class _NoUsageTransport:
     calls: list[str] = field(default_factory=list)
 
     async def generate(
-        self, *, turns: list[Turn], system_instruction: str
+        self, *, turns: list[Turn], system_instruction: str, deadline: float
     ) -> ModelResponse:
-        del turns, system_instruction
+        del turns, system_instruction, deadline
         self.calls.append("call")
         raise UsageUnavailableError("model response carried no usage_metadata")
 
@@ -226,9 +226,9 @@ class _ToolCallingTransport:
     calls: list[str] = field(default_factory=list)
 
     async def generate(
-        self, *, turns: list[Turn], system_instruction: str
+        self, *, turns: list[Turn], system_instruction: str, deadline: float
     ) -> ModelResponse:
-        del turns, system_instruction
+        del turns, system_instruction, deadline
         self.calls.append("call")
         if len(self.calls) == 1:
             tool_call = ToolCall(
@@ -302,9 +302,9 @@ class _ScriptedTransport:
     calls: list[str] = field(default_factory=list)
 
     async def generate(
-        self, *, turns: list[Turn], system_instruction: str
+        self, *, turns: list[Turn], system_instruction: str, deadline: float
     ) -> ModelResponse:
-        del turns, system_instruction
+        del turns, system_instruction, deadline
         item = self.script[len(self.calls)]
         self.calls.append("call")
         if isinstance(item, BaseException):
@@ -2352,9 +2352,9 @@ class _RecordingTransport:
     turns_seen: list[list[Turn]] = field(default_factory=list)
 
     async def generate(
-        self, *, turns: list[Turn], system_instruction: str
+        self, *, turns: list[Turn], system_instruction: str, deadline: float
     ) -> ModelResponse:
-        del system_instruction
+        del system_instruction, deadline
         self.turns_seen.append(list(turns))
         return ModelResponse(
             turn=ModelTurn(text="hello from the model", tool_calls=()),

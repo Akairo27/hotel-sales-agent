@@ -17,6 +17,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import time
 from decimal import Decimal
 from typing import Any
 
@@ -27,11 +28,16 @@ from google.genai import errors, types
 from services.agent.llm import client as client_module
 from services.agent.llm.client import (
     GeminiTransport,
+    _attempt_timeout_seconds,
     _json_schema_to_gemini_schema,
     _retry_delay_seconds,
 )
 from services.agent.llm.config import LlmSettings
-from services.agent.llm.errors import ModelUnavailableError, UsageUnavailableError
+from services.agent.llm.errors import (
+    ModelUnavailableError,
+    TurnBudgetExceededError,
+    UsageUnavailableError,
+)
 from services.agent.llm.model_types import (
     ModelTurn,
     ToolResult,
@@ -49,6 +55,11 @@ _SETTINGS = LlmSettings(
     max_spend_per_day_usd=Decimal("5.00"),
     max_messages_per_number_per_day=50,
 )
+
+# Far enough out that _attempt_timeout_seconds never trims a test's
+# effective timeout below _SETTINGS.timeout_ms -- tests about the turn
+# budget itself (below) pass their own, much closer deadline instead.
+_FAR_FUTURE_DEADLINE = time.monotonic() + 3600
 
 
 def _usage_metadata() -> types.GenerateContentResponseUsageMetadata:
@@ -155,7 +166,11 @@ def test_generate_wraps_api_error_as_model_unavailable(
         ),
     )
     with pytest.raises(ModelUnavailableError):
-        asyncio.run(transport.generate(turns=[], system_instruction="be helpful"))
+        asyncio.run(
+            transport.generate(
+                turns=[], system_instruction="be helpful", deadline=_FAR_FUTURE_DEADLINE
+            )
+        )
 
 
 def test_generate_wraps_transport_timeout_as_model_unavailable(
@@ -164,7 +179,11 @@ def test_generate_wraps_transport_timeout_as_model_unavailable(
     transport = GeminiTransport(_SETTINGS)
     _patch_sdk_call_to_raise(monkeypatch, transport, httpx.ReadTimeout("timed out"))
     with pytest.raises(ModelUnavailableError):
-        asyncio.run(transport.generate(turns=[], system_instruction="be helpful"))
+        asyncio.run(
+            transport.generate(
+                turns=[], system_instruction="be helpful", deadline=_FAR_FUTURE_DEADLINE
+            )
+        )
 
 
 def test_init_does_not_configure_the_sdks_own_retry() -> None:
@@ -195,7 +214,9 @@ def test_generate_retries_a_transient_api_error_and_succeeds(
     )
 
     response = asyncio.run(
-        transport.generate(turns=[], system_instruction="be helpful")
+        transport.generate(
+            turns=[], system_instruction="be helpful", deadline=_FAR_FUTURE_DEADLINE
+        )
     )
 
     assert response.turn.text == "back online"
@@ -216,7 +237,11 @@ def test_generate_does_not_retry_a_non_retryable_api_error(
     )
 
     with pytest.raises(ModelUnavailableError):
-        asyncio.run(transport.generate(turns=[], system_instruction="be helpful"))
+        asyncio.run(
+            transport.generate(
+                turns=[], system_instruction="be helpful", deadline=_FAR_FUTURE_DEADLINE
+            )
+        )
 
     assert calls == [1]
 
@@ -236,7 +261,11 @@ def test_generate_exhausts_retries_and_raises_after_max_attempts(
     )
 
     with pytest.raises(ModelUnavailableError):
-        asyncio.run(transport.generate(turns=[], system_instruction="be helpful"))
+        asyncio.run(
+            transport.generate(
+                turns=[], system_instruction="be helpful", deadline=_FAR_FUTURE_DEADLINE
+            )
+        )
 
     assert calls == [1, 2, 3]
 
@@ -266,7 +295,11 @@ def test_generate_logs_a_warning_for_each_retried_attempt(
     )
     caplog.set_level(logging.WARNING, logger="services.agent.llm.client")
 
-    asyncio.run(transport.generate(turns=[], system_instruction="be helpful"))
+    asyncio.run(
+        transport.generate(
+            turns=[], system_instruction="be helpful", deadline=_FAR_FUTURE_DEADLINE
+        )
+    )
 
     assert calls == [1, 2, 3]
     retry_records = [
@@ -309,7 +342,11 @@ def test_generate_api_error_message_never_contains_the_raw_response_body(
     )
 
     with pytest.raises(ModelUnavailableError) as exc_info:
-        asyncio.run(transport.generate(turns=[], system_instruction="be helpful"))
+        asyncio.run(
+            transport.generate(
+                turns=[], system_instruction="be helpful", deadline=_FAR_FUTURE_DEADLINE
+            )
+        )
 
     message = str(exc_info.value)
     assert secret_detail not in message
@@ -330,7 +367,11 @@ def test_generate_transport_error_message_never_contains_the_raw_exception(
     _patch_sdk_call_to_raise(monkeypatch, transport, httpx.ConnectError(secret_detail))
 
     with pytest.raises(ModelUnavailableError) as exc_info:
-        asyncio.run(transport.generate(turns=[], system_instruction="be helpful"))
+        asyncio.run(
+            transport.generate(
+                turns=[], system_instruction="be helpful", deadline=_FAR_FUTURE_DEADLINE
+            )
+        )
 
     message = str(exc_info.value)
     assert secret_detail not in message
@@ -400,7 +441,11 @@ def test_generate_echoes_provider_state_verbatim_across_a_tool_calling_turn(
 
     monkeypatch.setattr(transport._client.aio.models, "generate_content", _capture)
 
-    first = asyncio.run(transport.generate(turns=[], system_instruction="be helpful"))
+    first = asyncio.run(
+        transport.generate(
+            turns=[], system_instruction="be helpful", deadline=_FAR_FUTURE_DEADLINE
+        )
+    )
     assert len(first.turn.tool_calls) == 1
     assert first.turn.provider_state is tool_call_content
 
@@ -416,7 +461,11 @@ def test_generate_echoes_provider_state_verbatim_across_a_tool_calling_turn(
             )
         ),
     ]
-    asyncio.run(transport.generate(turns=turns, system_instruction="be helpful"))
+    asyncio.run(
+        transport.generate(
+            turns=turns, system_instruction="be helpful", deadline=_FAR_FUTURE_DEADLINE
+        )
+    )
 
     assert len(captured_contents) == 2
     # Not a reconstruction that happens to be equal -- the exact same
@@ -439,7 +488,11 @@ def test_generate_raises_usage_unavailable_when_metadata_is_missing(
     _patch_sdk_call_with_sequence(monkeypatch, transport, [response_with_no_usage])
 
     with pytest.raises(UsageUnavailableError):
-        asyncio.run(transport.generate(turns=[], system_instruction="be helpful"))
+        asyncio.run(
+            transport.generate(
+                turns=[], system_instruction="be helpful", deadline=_FAR_FUTURE_DEADLINE
+            )
+        )
 
 
 def test_generate_raises_usage_unavailable_when_metadata_is_incomplete(
@@ -458,7 +511,11 @@ def test_generate_raises_usage_unavailable_when_metadata_is_incomplete(
     _patch_sdk_call_with_sequence(monkeypatch, transport, [response_with_partial_usage])
 
     with pytest.raises(UsageUnavailableError):
-        asyncio.run(transport.generate(turns=[], system_instruction="be helpful"))
+        asyncio.run(
+            transport.generate(
+                turns=[], system_instruction="be helpful", deadline=_FAR_FUTURE_DEADLINE
+            )
+        )
 
 
 def test_generate_folds_thinking_tokens_into_candidates_tokens(
@@ -483,7 +540,9 @@ def test_generate_folds_thinking_tokens_into_candidates_tokens(
     _patch_sdk_call_with_sequence(monkeypatch, transport, [response_with_thinking])
 
     response = asyncio.run(
-        transport.generate(turns=[], system_instruction="be helpful")
+        transport.generate(
+            turns=[], system_instruction="be helpful", deadline=_FAR_FUTURE_DEADLINE
+        )
     )
 
     assert response.usage.prompt_tokens == 10
@@ -512,7 +571,9 @@ def test_generate_treats_absent_thinking_tokens_as_zero(
     _patch_sdk_call_with_sequence(monkeypatch, transport, [response_with_no_thinking])
 
     response = asyncio.run(
-        transport.generate(turns=[], system_instruction="be helpful")
+        transport.generate(
+            turns=[], system_instruction="be helpful", deadline=_FAR_FUTURE_DEADLINE
+        )
     )
 
     assert response.usage.candidates_tokens == 2
@@ -546,7 +607,13 @@ def test_generate_translates_conversation_history_into_gemini_contents(
         UserTurn(text="hello"),
         ModelTurn(text="hi there", tool_calls=()),
     ]
-    asyncio.run(transport.generate(turns=history, system_instruction="be helpful"))
+    asyncio.run(
+        transport.generate(
+            turns=history,
+            system_instruction="be helpful",
+            deadline=_FAR_FUTURE_DEADLINE,
+        )
+    )
 
     assert len(captured_contents[0]) == 2
     user_content, model_content = captured_contents[0]
@@ -556,3 +623,149 @@ def test_generate_translates_conversation_history_into_gemini_contents(
     assert model_content.role == "model"
     assert model_content.parts is not None
     assert model_content.parts[0].text == "hi there"
+
+
+# --- turn budget --------------------------------------------------------
+
+
+def test_attempt_timeout_seconds_is_capped_by_the_remaining_budget() -> None:
+    """min(max_attempt_timeout_ms, remaining budget), shared by both
+    transports -- proven directly against the pure helper rather than by
+    inspecting what timeout the SDK actually received, the same reasoning
+    _retry_delay_seconds gets its own direct test above."""
+    assert _attempt_timeout_seconds(
+        deadline=time.monotonic() + 5, max_attempt_timeout_ms=30_000
+    ) == pytest.approx(5, abs=0.1)
+    assert _attempt_timeout_seconds(
+        deadline=time.monotonic() + 3600, max_attempt_timeout_ms=30_000
+    ) == pytest.approx(30, abs=0.1)
+
+
+def test_attempt_timeout_seconds_raises_once_the_deadline_has_passed() -> None:
+    with pytest.raises(TurnBudgetExceededError):
+        _attempt_timeout_seconds(
+            deadline=time.monotonic() - 1, max_attempt_timeout_ms=30_000
+        )
+
+
+def test_generate_raises_turn_budget_exceeded_with_no_call_when_already_past_deadline(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The budget check runs before the first attempt too, not only before
+    a retry -- a turn that arrives already out of budget (an earlier
+    tool-calling iteration spent it all) must never even call the SDK."""
+    transport = GeminiTransport(_SETTINGS)
+    calls: list[int] = []
+
+    async def _count(*_args: Any, **_kwargs: Any) -> types.GenerateContentResponse:
+        calls.append(1)
+        return _text_response("should never be reached")
+
+    monkeypatch.setattr(transport._client.aio.models, "generate_content", _count)
+
+    with pytest.raises(TurnBudgetExceededError):
+        asyncio.run(
+            transport.generate(
+                turns=[],
+                system_instruction="be helpful",
+                deadline=time.monotonic() - 1,
+            )
+        )
+
+    assert calls == []
+
+
+def test_generate_stops_retrying_once_the_deadline_passes_between_attempts(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A 503 is normally retried (test_generate_retries_a_transient_api_
+    error_and_succeeds above) -- but if the turn's shared budget runs out
+    during the first attempt itself, the second attempt must never start,
+    even though the failure was retryable."""
+    _disable_retry_backoff(monkeypatch)
+    transport = GeminiTransport(_SETTINGS)
+    deadline = time.monotonic() + 0.05
+    calls: list[int] = []
+
+    async def _slow_failure(
+        *_args: Any, **_kwargs: Any
+    ) -> types.GenerateContentResponse:
+        # A real (blocking) sleep, not asyncio.sleep -- _disable_retry_
+        # backoff above patches services.agent.llm.client.asyncio.sleep,
+        # which IS the asyncio module's own sleep (client.py's `import
+        # asyncio` binds the same module object), so an awaited
+        # asyncio.sleep here would be silently patched to a no-op too and
+        # never actually advance time.monotonic().
+        calls.append(1)
+        time.sleep(0.1)
+        raise errors.ServerError(code=503, response_json={"error": {}})
+
+    monkeypatch.setattr(transport._client.aio.models, "generate_content", _slow_failure)
+
+    with pytest.raises(TurnBudgetExceededError):
+        asyncio.run(
+            transport.generate(
+                turns=[], system_instruction="be helpful", deadline=deadline
+            )
+        )
+
+    assert calls == [1]
+
+
+def test_generate_logs_info_for_a_successful_first_attempt(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Per-attempt duration logging must cover the success path too, not
+    only a retried failure (test_generate_logs_a_warning_for_each_retried_
+    attempt above) -- otherwise a turn where every attempt succeeds on the
+    first try leaves no latency signal at all."""
+    transport = GeminiTransport(_SETTINGS)
+    _patch_sdk_call_with_sequence(monkeypatch, transport, [_text_response("hi")])
+    caplog.set_level(logging.INFO, logger="services.agent.llm.client")
+
+    asyncio.run(
+        transport.generate(
+            turns=[], system_instruction="be helpful", deadline=_FAR_FUTURE_DEADLINE
+        )
+    )
+
+    info_records = [
+        json.loads(r.getMessage()) for r in caplog.records if r.levelno == logging.INFO
+    ]
+    assert len(info_records) == 1
+    assert info_records[0]["event"] == "model_call_attempt"
+    assert info_records[0]["attempt"] == 1
+    assert info_records[0]["outcome"] == "success"
+    assert isinstance(info_records[0]["elapsed_ms"], int)
+    assert info_records[0]["elapsed_ms"] >= 0
+
+
+def test_generate_logs_info_for_a_failed_final_attempt(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The final, non-retried failure gets a duration log too -- not just
+    the retried attempts test_generate_logs_a_warning_for_each_retried_
+    attempt already covers."""
+    transport = GeminiTransport(_SETTINGS)
+    _patch_sdk_call_to_raise(
+        monkeypatch,
+        transport,
+        errors.ClientError(code=400, response_json={"error": {}}),
+    )
+    caplog.set_level(logging.INFO, logger="services.agent.llm.client")
+
+    with pytest.raises(ModelUnavailableError):
+        asyncio.run(
+            transport.generate(
+                turns=[],
+                system_instruction="be helpful",
+                deadline=_FAR_FUTURE_DEADLINE,
+            )
+        )
+
+    info_records = [
+        json.loads(r.getMessage()) for r in caplog.records if r.levelno == logging.INFO
+    ]
+    assert len(info_records) == 1
+    assert info_records[0]["event"] == "model_call_attempt"
+    assert info_records[0]["outcome"] == "failure"
