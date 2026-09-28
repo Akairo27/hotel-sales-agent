@@ -9,14 +9,23 @@ services would look like failing.
 
 from __future__ import annotations
 
+import inspect
+import json
+import logging
 from datetime import UTC, date, datetime
 from typing import Any, cast
 
 import pytest
 
+from services.agent.llm import dispatch as dispatch_module
 from services.agent.llm.dispatch import (
+    CHECK_AVAILABILITY_LOG_SUMMARY_KEYS,
+    GET_QUOTE_LOG_SUMMARY_KEYS,
     NIGHT_RESULT_KEYS,
     QUOTE_RESULT_KEYS,
+    _check_availability_log_summary,
+    _get_quote_log_summary,
+    _log_tool_call,
     dispatch_check_availability,
     dispatch_get_quote,
     dispatch_tool,
@@ -145,3 +154,116 @@ def test_quote_to_tool_result_formats_prices_as_display_strings_not_raw_integers
     assert result["total_price_display"] == "150.00 SAR"
     assert result["nights"][0]["price_display"] == "150.00 SAR"
     assert isinstance(result["total_price_display"], str)
+
+
+def test_check_availability_log_summary_contains_only_the_whitelisted_key() -> None:
+    result = {
+        "available": True,
+        "hotel_id": 1,
+        "room_type_id": 2,
+        "check_in": "2026-09-01",
+        "check_out": "2026-09-03",
+        "rooms": 1,
+    }
+    assert (
+        _check_availability_log_summary(result).keys()
+        == CHECK_AVAILABILITY_LOG_SUMMARY_KEYS
+    )
+    assert _check_availability_log_summary(result) == {"available": True}
+
+
+def test_get_quote_log_summary_contains_no_cost_bearing_field() -> None:
+    """Fed the full, already-cost-free tool result (itself proven cost-free
+    by test_quote_to_tool_result_contains_no_cost_bearing_field above) --
+    proves the log summary narrows further still, to exactly quote_id and
+    priced, not everything quote_to_tool_result happens to return."""
+    result = quote_to_tool_result(_quote_with_full_cost_detail())
+    summary = _get_quote_log_summary(result)
+
+    assert summary.keys() == GET_QUOTE_LOG_SUMMARY_KEYS
+    assert summary == {"priced": True, "quote_id": 42}
+
+
+def test_get_quote_log_summary_reports_quote_id_none_when_unpriced() -> None:
+    unpriced_result = {
+        "priced": False,
+        "reason": "no_allotment_for_dates",
+        "hotel_id": 1,
+        "room_type_id": 2,
+        "check_in": "2026-09-01",
+        "check_out": "2026-09-03",
+    }
+    assert _get_quote_log_summary(unpriced_result) == {
+        "priced": False,
+        "quote_id": None,
+    }
+
+
+def test_dispatch_tool_logs_and_reraises_invalid_tool_arguments_error(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    caplog.set_level(logging.INFO, logger="services.agent.llm.dispatch")
+    bad_args = {**_VALID_ARGS, "rooms": 0}
+
+    with pytest.raises(InvalidToolArgumentsError):
+        dispatch_tool(
+            _NOT_A_CONNECTION,
+            "check_availability",
+            bad_args,
+            now=_UNUSED_NOW,
+            customer_phone=None,
+            conversation_id=7,
+        )
+
+    records = [json.loads(r.getMessage()) for r in caplog.records]
+    assert len(records) == 1
+    record = records[0]
+    assert record["event"] == "agent_tool_call"
+    assert record["conversation_id"] == 7
+    assert record["tool_name"] == "check_availability"
+    assert record["arguments"] == bad_args
+    assert record["result_summary"] is None
+    assert record["error_type"] == "InvalidToolArgumentsError"
+
+
+def test_dispatch_tool_logs_and_reraises_unknown_tool_error(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    caplog.set_level(logging.INFO, logger="services.agent.llm.dispatch")
+
+    with pytest.raises(UnknownToolError):
+        dispatch_tool(
+            _NOT_A_CONNECTION,
+            "made_up_tool",
+            {"anything": "goes"},
+            now=_UNUSED_NOW,
+            customer_phone=None,
+            conversation_id=None,
+        )
+
+    records = [json.loads(r.getMessage()) for r in caplog.records]
+    assert len(records) == 1
+    record = records[0]
+    assert record["tool_name"] == "made_up_tool"
+    assert record["arguments"] == {"anything": "goes"}
+    assert record["result_summary"] is None
+    assert record["error_type"] == "UnknownToolError"
+
+
+def test_logging_code_never_references_a_floor_or_cost_field_by_name() -> None:
+    """Belt-and-suspenders alongside the whitelist tests above: scans the
+    actual source of the functions that build and emit the logged record
+    (not the whole module -- dispatch.py's own docstring legitimately
+    names these fields in prose) for the literal field names CLAUDE.md
+    rule 2 says must never reach a log the model can read."""
+    logging_source = "".join(
+        inspect.getsource(func)
+        for func in (
+            _log_tool_call,
+            _check_availability_log_summary,
+            _get_quote_log_summary,
+            dispatch_module.dispatch_tool,
+        )
+    )
+    for forbidden in ("cost_per_night", "min_allowed", "target_margin", "min_profit"):
+        assert forbidden not in logging_source
