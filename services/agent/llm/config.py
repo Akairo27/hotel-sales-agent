@@ -104,13 +104,28 @@ MAX_TOOL_ITERATIONS = 4
 # name and short enough that an injected paragraph cannot fit.
 MAX_CUSTOMER_NAME_LENGTH = 60
 
-# Lowered from 20_000: this is a WhatsApp conversation, not a batch job.
-# A customer waiting silently past ~30 seconds assumes the bot is
-# broken, and escalating to a human at that point (see webhook.py's
-# _escalate_and_notify) is a better outcome than a longer wait that may
-# still fail. See client.py's own retry constants for the matching
-# reasoning on attempt count and backoff.
-_DEFAULT_TIMEOUT_MS = 10_000
+# The ceiling for a single model-call attempt. Raised from 10_000
+# (2026-09-24): a real incident showed one retryable failure plus one
+# successful retry can each legitimately take close to 10s under
+# transient provider latency, and TURN_BUDGET_SECONDS below (not this
+# value) is now what actually bounds how long a customer waits --
+# client.py's per-attempt timeout is min(this, the turn's remaining
+# budget), so raising this cap only lets a single healthy-but-slow
+# attempt finish; it does not by itself let a turn run any longer.
+_DEFAULT_TIMEOUT_MS = 30_000
+
+# The total wall-clock time one turn may spend across every model-call
+# attempt and retry, in every tool-calling iteration combined (CLAUDE.md
+# §8's "a hanging call must not hang a customer conversation", applied to
+# the whole turn rather than one call). services.agent.llm.client checks
+# the remaining budget against this before every attempt -- not just the
+# first -- and raises TurnBudgetExceededError once it is exhausted,
+# instead of starting an attempt it cannot see through. Chosen by the
+# owner (2026-09-28) well under ops/hotel-agent.service's TimeoutStopSec
+# (120s), so a turn that hits its budget always escalates cleanly rather
+# than being killed mid-write by a service restart -- see
+# ARCHITECTURE.md's note on both numbers together.
+TURN_BUDGET_SECONDS = 75.0
 
 
 @dataclass(frozen=True)

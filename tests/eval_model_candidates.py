@@ -119,11 +119,11 @@ class _CountingTransport:
         self.calls = 0
 
     async def generate(
-        self, *, turns: list[Turn], system_instruction: str
+        self, *, turns: list[Turn], system_instruction: str, deadline: float
     ) -> ModelResponse:
         self.calls += 1
         return await self._inner.generate(
-            turns=turns, system_instruction=system_instruction
+            turns=turns, system_instruction=system_instruction, deadline=deadline
         )
 
 

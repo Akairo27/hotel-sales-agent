@@ -12,6 +12,14 @@
 #     repo's own .venv),
 #   - the hotel_agent DATABASE_URL in /etc/hotel-admin/agent.env, set by the
 #     owner (the value is never written to the repository).
+# TimeoutStopSec=120 (below) is explicit, above systemd's own 90s default:
+# margin over generate_reply's own turn-wide time budget
+# (services/agent/llm/config.py's TURN_BUDGET_SECONDS, 75s), so a graceful
+# restart's SIGTERM always outlives the worst case the application itself
+# is willing to wait, plus time for the guard check, DB writes and the
+# send that follow a model call — see ARCHITECTURE.md's note on both
+# numbers together and services/agent/webhook.py's own module docstring.
+#
 # Each host step is shown to the owner before it is run, and hotel-agent is
 # restarted only with the owner's explicit confirmation. To apply a change
 # (root):
@@ -35,6 +43,7 @@ EnvironmentFile=/etc/hotel-admin/agent.env
 ExecStart=/opt/hotel/venv/bin/uvicorn services.agent.main:app --host 127.0.0.1 --port 8000
 Restart=on-failure
 RestartSec=5
+TimeoutStopSec=120
 Environment=PYTHONDONTWRITEBYTECODE=1
 NoNewPrivileges=yes
 PrivateTmp=yes

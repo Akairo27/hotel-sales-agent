@@ -56,8 +56,10 @@ response can take without this split). Order matters and is deliberate:
    touching this module.
 5a. Any exception in _handle_generate_reply_failure's _ESCALATION_REASONS
     — CLAUDE.md §9's three caps (TurnCapExceededError,
-    TokenSpendCapExceededError, DailySpendCapExceededError), or
-    ModelUnavailableError once the transport's own retries are exhausted
+    TokenSpendCapExceededError, DailySpendCapExceededError),
+    ModelUnavailableError once the transport's own retries are exhausted,
+    or TurnBudgetExceededError once the turn's own shared time budget
+    (services.agent.llm.config.TURN_BUDGET_SECONDS) runs out
     — after step 5's recording above, is escalated to a human and
     answered with the exact same bilingual fallback message a blocked
     reply gets in step 6 (_escalate_and_notify), rather than just a
@@ -90,8 +92,10 @@ the same ASGI call Starlette is already handling — after the response is
 sent, but before the app's callable returns — so a graceful `systemctl
 restart` (SIGTERM) waits for an in-flight background job exactly the way
 it waits for any other in-flight request, bounded by systemd's
-TimeoutStopSec (90s on this service today, comfortable margin over the
-worst observed ~32s turn). A hard kill (SIGKILL, OOM, crash) loses
+TimeoutStopSec (120s, set explicitly in ops/hotel-agent.service —
+comfortable margin over generate_reply's own TURN_BUDGET_SECONDS cap of
+75s, plus time for the guard check, the DB writes and the send that
+follow a model call). A hard kill (SIGKILL, OOM, crash) loses
 whatever was in flight — the same exposure a synchronous in-flight
 request already had, not a new regression, but not newly solved by this
 split either. See _generate_and_deliver_reply's own docstring for the
@@ -150,6 +154,7 @@ from services.agent.llm.errors import (
     DailySpendCapExceededError,
     ModelUnavailableError,
     TokenSpendCapExceededError,
+    TurnBudgetExceededError,
     TurnCapExceededError,
     UsageUnavailableError,
     read_usage_so_far,
@@ -549,12 +554,17 @@ _STATUS_ESCALATED = "escalated"
 # re-deriving it from notes. Covers CLAUDE.md §9's three caps plus
 # ModelUnavailableError (raised only after client.py's own retries are
 # exhausted -- see that module's constants for why retrying again here
-# would just stack a second layer on the SDK's).
+# would just stack a second layer on the SDK's) and
+# TurnBudgetExceededError (the turn's own shared time budget ran out --
+# see services.agent.llm.config.TURN_BUDGET_SECONDS -- a distinct cause
+# from a single call's transient failure, so it gets its own reason
+# rather than being folded into model_unavailable).
 _ESCALATION_REASONS: dict[type[Exception], str] = {
     TurnCapExceededError: "turn_cap_exceeded",
     TokenSpendCapExceededError: "token_spend_cap_exceeded",
     DailySpendCapExceededError: "daily_spend_cap_exceeded",
     ModelUnavailableError: "model_unavailable",
+    TurnBudgetExceededError: "turn_budget_exceeded",
 }
 
 # Used only by _escalate_unexpected_background_failure -- not in
@@ -744,6 +754,7 @@ async def _handle_generate_reply_failure(
             TokenSpendCapExceededError,
             DailySpendCapExceededError,
             ModelUnavailableError,
+            TurnBudgetExceededError,
         ),
     ):
         return await _escalate_and_notify(

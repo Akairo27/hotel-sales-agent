@@ -28,6 +28,7 @@ from services.agent.llm.errors import (
     DailySpendCapExceededError,
     TokenSpendCapExceededError,
     ToolLoopLimitError,
+    TurnBudgetExceededError,
     TurnCapExceededError,
     read_usage_so_far,
 )
@@ -56,15 +57,20 @@ _SETTINGS = LlmSettings(
 
 @dataclass
 class FakeTransport:
-    responses: list[ModelResponse]
+    responses: list[ModelResponse | Exception]
     calls: list[list[Turn]] = field(default_factory=list)
+    deadlines: list[float] = field(default_factory=list)
 
     async def generate(
-        self, *, turns: list[Turn], system_instruction: str
+        self, *, turns: list[Turn], system_instruction: str, deadline: float
     ) -> ModelResponse:
         del system_instruction  # unused: this fake only records `turns`
         self.calls.append(list(turns))
-        return self.responses.pop(0)
+        self.deadlines.append(deadline)
+        outcome = self.responses.pop(0)
+        if isinstance(outcome, Exception):
+            raise outcome
+        return outcome
 
 
 def _text_response(text: str, *, total_tokens: int = 10) -> ModelResponse:
@@ -230,7 +236,7 @@ def test_generate_reply_raises_after_exceeding_the_tool_iteration_limit(
             "reason": "loops_forever",
         },
     )
-    responses = [
+    responses: list[ModelResponse | Exception] = [
         _function_call_response("check_availability", {"hotel_id": 1})
         for _ in range(MAX_TOOL_ITERATIONS)
     ]
@@ -343,7 +349,7 @@ def test_generate_reply_rechecks_the_spend_cap_before_every_model_call(
     )
     # Each call reports 12 tokens; the fake cap trips at 20, so it must
     # cross between the second and third calls (0, then 12, then 24).
-    responses = [
+    responses: list[ModelResponse | Exception] = [
         _function_call_response("check_availability", {"hotel_id": 1}),
         _function_call_response("check_availability", {"hotel_id": 1}),
     ]
@@ -371,4 +377,86 @@ def test_generate_reply_rechecks_the_spend_cap_before_every_model_call(
     # does not) set it itself.
     attached = read_usage_so_far(exc_info.value)
     assert attached is not None
-    assert attached.total_tokens == 24
+
+
+def test_generate_reply_passes_the_same_absolute_deadline_to_every_model_call(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The turn's shared time budget (config.TURN_BUDGET_SECONDS) is spent
+    across every model call in the turn, not reset per tool-calling
+    iteration -- generate_reply must compute its deadline once and pass
+    the identical value to every transport.generate() call, so client.py's
+    own per-attempt budget check (services/agent/llm/client.py) sees a
+    shrinking remaining time on each successive call, never a fresh
+    budget."""
+    _stub_conversation_state(monkeypatch, turn_count=0)
+    monkeypatch.setattr(
+        conversation_module,
+        "dispatch_tool",
+        lambda _conn, _name, _args, **_kwargs: {"available": False},
+    )
+    transport = FakeTransport(
+        [
+            _function_call_response("check_availability", {"hotel_id": 1}),
+            _text_response("done"),
+        ]
+    )
+
+    asyncio.run(
+        generate_reply(
+            _NOT_A_CONNECTION,
+            conversation_id=1,
+            customer_name=None,
+            transport=transport,
+            settings=_SETTINGS,
+            now=_NOW,
+        )
+    )
+
+    assert len(transport.deadlines) == 2
+    assert transport.deadlines[0] == transport.deadlines[1]
+
+
+def test_generate_reply_propagates_turn_budget_exceeded_with_usage_attached(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A real transport raises TurnBudgetExceededError itself once the
+    turn's shared time budget runs out before it can start a new
+    model-call attempt (services.agent.llm.client's own per-attempt
+    check) -- this fake stands in for that to prove generate_reply's own
+    wrapping (this module's docstring) attaches usage_so_far to it
+    exactly like every other mid-loop exception, with no special-casing
+    for this new error type."""
+    _stub_conversation_state(monkeypatch, turn_count=0)
+    monkeypatch.setattr(
+        conversation_module,
+        "dispatch_tool",
+        lambda _conn, _name, _args, **_kwargs: {"available": False},
+    )
+    transport = FakeTransport(
+        [
+            _function_call_response("check_availability", {"hotel_id": 1}),
+            TurnBudgetExceededError(
+                "turn's time budget was exhausted before starting a model-call attempt"
+            ),
+        ]
+    )
+
+    with pytest.raises(TurnBudgetExceededError) as exc_info:
+        asyncio.run(
+            generate_reply(
+                _NOT_A_CONNECTION,
+                conversation_id=1,
+                customer_name=None,
+                transport=transport,
+                settings=_SETTINGS,
+                now=_NOW,
+            )
+        )
+
+    assert len(transport.calls) == 2
+    attached = read_usage_so_far(exc_info.value)
+    assert attached is not None
+    # One real call happened (12 tokens, _function_call_response's
+    # default) before the second raised TurnBudgetExceededError.
+    assert attached.total_tokens == 12
