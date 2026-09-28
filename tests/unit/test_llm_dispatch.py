@@ -13,7 +13,7 @@ import inspect
 import json
 import logging
 from datetime import UTC, date, datetime
-from typing import Any, cast
+from typing import Any, cast, get_args
 
 import pytest
 
@@ -25,6 +25,7 @@ from services.agent.llm.dispatch import (
     QUOTE_RESULT_KEYS,
     SEARCH_HOTELS_LOG_SUMMARY_KEYS,
     StayArgs,
+    UnpricedReason,
     _check_availability_log_summary,
     _get_quote_log_summary,
     _log_tool_call,
@@ -211,13 +212,14 @@ def test_check_availability_log_summary_contains_only_the_whitelisted_key() -> N
 def test_get_quote_log_summary_contains_no_cost_bearing_field() -> None:
     """Fed the full, already-cost-free tool result (itself proven cost-free
     by test_quote_to_tool_result_contains_no_cost_bearing_field above) --
-    proves the log summary narrows further still, to exactly quote_id and
-    priced, not everything quote_to_tool_result happens to return."""
+    proves the log summary narrows further still, to exactly priced,
+    quote_id and reason (None for a priced result), not everything
+    quote_to_tool_result happens to return."""
     result = quote_to_tool_result(_quote_with_full_cost_detail())
     summary = _get_quote_log_summary(result)
 
     assert summary.keys() == GET_QUOTE_LOG_SUMMARY_KEYS
-    assert summary == {"priced": True, "quote_id": 42}
+    assert summary == {"priced": True, "quote_id": 42, "reason": None}
 
 
 def test_get_quote_log_summary_reports_quote_id_none_when_unpriced() -> None:
@@ -232,7 +234,173 @@ def test_get_quote_log_summary_reports_quote_id_none_when_unpriced() -> None:
     assert _get_quote_log_summary(unpriced_result) == {
         "priced": False,
         "quote_id": None,
+        "reason": "no_allotment_for_dates",
     }
+
+
+@pytest.mark.parametrize("reason", get_args(UnpricedReason))
+def test_get_quote_log_summary_carries_every_unpriced_reason_unchanged(
+    reason: str,
+) -> None:
+    """The reason is logged as the fixed literal _unpriced_result put in the
+    result -- one case per member of UnpricedReason, so a reason added to
+    that closed set later is exercised here without editing this test."""
+    unpriced_result = {
+        "priced": False,
+        "reason": reason,
+        "hotel_id": 1,
+        "room_type_id": 2,
+        "check_in": "2026-09-01",
+        "check_out": "2026-09-03",
+    }
+    summary = _get_quote_log_summary(unpriced_result)
+
+    assert summary.keys() == GET_QUOTE_LOG_SUMMARY_KEYS
+    assert summary == {"priced": False, "quote_id": None, "reason": reason}
+
+
+def _must_not_be_called(*_args: Any, **_kwargs: Any) -> Any:
+    raise AssertionError("this call must not happen on this path")
+
+
+def test_dispatch_get_quote_declines_without_pricing_when_rooms_are_not_free(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The gate sits before compute_quote: compute_quote is what writes the
+    `quotes` row, so never reaching it is what guarantees no row is written
+    for a stay the inventory cannot cover. The result carries no room
+    count -- exactly the ids and dates, nothing about how many rooms are
+    free."""
+    availability_calls: list[tuple[Any, ...]] = []
+
+    def _not_available(*args: Any) -> bool:
+        availability_calls.append(args)
+        return False
+
+    monkeypatch.setattr(
+        dispatch_module, "_allotment_covers_every_night", lambda *_: True
+    )
+    monkeypatch.setattr(dispatch_module, "check_availability", _not_available)
+    monkeypatch.setattr(dispatch_module, "compute_quote", _must_not_be_called)
+
+    result = dispatch_get_quote(
+        _NOT_A_CONNECTION,
+        _VALID_ARGS,
+        now=_UNUSED_NOW,
+        customer_phone=None,
+        conversation_id=None,
+    )
+
+    assert result == {
+        "priced": False,
+        "reason": "insufficient_availability",
+        "hotel_id": 1,
+        "room_type_id": 2,
+        "check_in": "2026-09-01",
+        "check_out": "2026-09-03",
+    }
+    assert availability_calls == [
+        (_NOT_A_CONNECTION, 1, 2, date(2026, 9, 1), date(2026, 9, 3), 1)
+    ]
+
+
+def test_dispatch_get_quote_checks_allotment_coverage_before_availability(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """check_availability returns False for a missing night too, so if it
+    ran first the distinct no_allotment_for_dates reason could never be
+    reported -- coverage must be decided first."""
+    monkeypatch.setattr(
+        dispatch_module, "_allotment_covers_every_night", lambda *_: False
+    )
+    monkeypatch.setattr(dispatch_module, "check_availability", _must_not_be_called)
+    monkeypatch.setattr(dispatch_module, "compute_quote", _must_not_be_called)
+
+    result = dispatch_get_quote(
+        _NOT_A_CONNECTION,
+        _VALID_ARGS,
+        now=_UNUSED_NOW,
+        customer_phone=None,
+        conversation_id=None,
+    )
+
+    assert result["priced"] is False
+    assert result["reason"] == "no_allotment_for_dates"
+
+
+def test_dispatch_get_quote_prices_when_rooms_are_free(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        dispatch_module, "_allotment_covers_every_night", lambda *_: True
+    )
+    monkeypatch.setattr(dispatch_module, "check_availability", lambda *_: True)
+    monkeypatch.setattr(
+        dispatch_module,
+        "compute_quote",
+        lambda *_args, **_kwargs: _quote_with_full_cost_detail(),
+    )
+
+    result = dispatch_get_quote(
+        _NOT_A_CONNECTION,
+        _VALID_ARGS,
+        now=_UNUSED_NOW,
+        customer_phone=None,
+        conversation_id=None,
+    )
+
+    assert result["priced"] is True
+    assert result["quote_id"] == 42
+
+
+def test_dispatch_get_quote_rejects_a_past_check_in_before_any_inventory_read(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Date validation runs ahead of every inventory decision: none of the
+    coverage check, the availability check or compute_quote may be reached
+    for a check_in before today (each is stubbed to fail loudly if it is)."""
+    monkeypatch.setattr(
+        dispatch_module, "_allotment_covers_every_night", _must_not_be_called
+    )
+    monkeypatch.setattr(dispatch_module, "check_availability", _must_not_be_called)
+    monkeypatch.setattr(dispatch_module, "compute_quote", _must_not_be_called)
+
+    with pytest.raises(InvalidToolArgumentsError) as exc_info:
+        dispatch_get_quote(
+            _NOT_A_CONNECTION,
+            _VALID_ARGS,  # check_in 2026-09-01
+            now=datetime(2026, 10, 1, tzinfo=UTC),
+            customer_phone=None,
+            conversation_id=None,
+        )
+
+    assert str(exc_info.value) == "check_in must not be in the past"
+
+
+def test_dispatch_get_quote_accepts_a_check_in_of_today(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The boundary of the date rule: check_in equal to now's date is not
+    in the past (strictly earlier is), so the stay goes on to be priced."""
+    monkeypatch.setattr(
+        dispatch_module, "_allotment_covers_every_night", lambda *_: True
+    )
+    monkeypatch.setattr(dispatch_module, "check_availability", lambda *_: True)
+    monkeypatch.setattr(
+        dispatch_module,
+        "compute_quote",
+        lambda *_args, **_kwargs: _quote_with_full_cost_detail(),
+    )
+
+    result = dispatch_get_quote(
+        _NOT_A_CONNECTION,
+        _VALID_ARGS,  # check_in 2026-09-01
+        now=datetime(2026, 9, 1, 23, 59, tzinfo=UTC),
+        customer_phone=None,
+        conversation_id=None,
+    )
+
+    assert result["priced"] is True
 
 
 def test_dispatch_tool_logs_and_reraises_invalid_tool_arguments_error(

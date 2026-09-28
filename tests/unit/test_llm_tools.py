@@ -70,6 +70,17 @@ def test_search_hotels_city_and_zone_are_closed_lists() -> None:
     }
 
 
+def test_get_quote_description_says_it_checks_availability_itself() -> None:
+    """dispatch_get_quote declines to price a stay whose rooms are not free
+    (services/agent/llm/dispatch.py) -- the model only knows that if the
+    description tells it, and a description that quietly stops saying so
+    would bring back the model offering to "check availability" after
+    quoting a price."""
+    description = GET_QUOTE.description
+    assert "checks availability itself" in description
+    assert "priced=false" in description
+
+
 def test_agent_tools_declares_exactly_the_three_read_only_tools() -> None:
     """PLAN.md's المرحلة ٤ scopes the agent to check_availability and
     get_quote; search_hotels is the prerequisite id-resolution tool added
