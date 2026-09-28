@@ -133,12 +133,34 @@ _MANIFEST: dict[str, dict[str, dict[str, tuple[str, ...] | str]]] = {
         "seasons": {"SELECT": _ALL},
         "price_rules": {"SELECT": _ALL},
         "price_overrides": {"SELECT": _ALL},
-        # Migration 0030: search_hotels (services/agent/llm/dispatch.py)
-        # needs to read the full hotel/room-type profile, including
-        # address_text, for the completeness check -- neither table has a
-        # cost column, so this is a simpler case than allotments above.
-        "hotels": {"SELECT": _ALL},
-        "room_types": {"SELECT": _ALL},
+        # Migration 0030: search_hotels (services/agent/llm/dispatch.py).
+        # Column-scoped, not _ALL like allotments above: hotels is expected
+        # to grow columns this role must never see just by being added (a
+        # per-hotel FAREAST meal price, contract/supplier details), so the
+        # grant is narrowed to exactly what search_hotels reads, including
+        # address_text and is_active for the completeness/active filter.
+        "hotels": {
+            "SELECT": (
+                "id",
+                "hotel_name",
+                "city",
+                "zone",
+                "district_name",
+                "star_rating",
+                "distance_to_haram_meters",
+                "address_text",
+                "is_active",
+            )
+        },
+        "room_types": {
+            "SELECT": (
+                "id",
+                "hotel_id",
+                "room_type_name",
+                "capacity_adults",
+                "bed_configuration",
+            )
+        },
     },
     "hotel_worker": {
         "holds": {"SELECT": _ALL, "UPDATE": ("released_at",)},

@@ -366,17 +366,35 @@ def test_hotel_worker_cannot_read_the_new_columns(
     assert row == (False,)
 
 
-@pytest.mark.parametrize("column", _LOCATION_COLUMNS)
-def test_hotel_agent_can_read_the_new_columns(
+# Migration 0030 grants hotel_agent exactly these three of the four
+# _LOCATION_COLUMNS, column-scoped -- not weekend_days, which
+# search_hotels never reads. Deliberately narrower than a full-table
+# grant: hotels is expected to grow columns (a per-hotel FAREAST meal
+# price, contract/supplier details) this role must never see automatically
+# just by being added.
+_LOCATION_COLUMNS_HOTEL_AGENT_CAN_READ = ("city", "zone", "district_name")
+
+
+@pytest.mark.parametrize("column", _LOCATION_COLUMNS_HOTEL_AGENT_CAN_READ)
+def test_hotel_agent_can_read_the_new_location_columns_search_hotels_uses(
     db_conn: psycopg.Connection[Any], column: str
 ) -> None:
-    """hotel_agent gained full-table SELECT on hotels in migration 0030
-    (search_hotels needs city/zone at minimum) -- these columns are no
-    exception, matching migration 0027's own "full grant, boundary
-    enforced in code" pattern already established for this role's other
-    reference-table reads."""
+    """hotel_agent gained column-scoped SELECT on hotels in migration 0030
+    -- exactly what search_hotels (services/agent/llm/dispatch.py) reads,
+    not the whole table."""
     row = db_conn.execute(
         "SELECT has_column_privilege('hotel_agent', 'public.hotels', %s, 'SELECT')",
         (column,),
     ).fetchone()
     assert row == (True,)
+
+
+def test_hotel_agent_cannot_read_weekend_days(db_conn: psycopg.Connection[Any]) -> None:
+    """search_hotels never reads weekend_days, so migration 0030's
+    column-scoped grant deliberately leaves it out -- unlike the other
+    three _LOCATION_COLUMNS."""
+    row = db_conn.execute(
+        "SELECT has_column_privilege('hotel_agent', 'public.hotels', "
+        "'weekend_days', 'SELECT')"
+    ).fetchone()
+    assert row == (False,)

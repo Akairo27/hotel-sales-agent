@@ -4,20 +4,23 @@
 -- (services/agent/llm/tools.py, dispatch.py) is that resolution path; this
 -- migration is its only schema dependency.
 --
--- Full-table GRANT SELECT, not column-scoped: matches migration 0027's own
--- established pattern for every other reference table this role reads
--- (allotments, room_night_inventory, seasons, price_rules,
--- price_overrides) -- the boundary against a sensitive column reaching the
--- model is enforced by what dispatch.py's hand-built result dict contains,
--- not by withholding a DB grant (see 0027's own comment on cost_per_night
--- for the identical reasoning). Neither table has a cost column at all, so
--- this is if anything a simpler case than that precedent already covers.
--- address_text is included: dispatch_search_hotels needs it to compute
--- profile completeness (services/agent/hotel_profile.py) even though it is
--- never placed in a tool result.
+-- Column-scoped, not full-table: hotels is expected to grow columns this
+-- role must never see automatically just by being added (a per-hotel
+-- FAREAST meal price, contract or supplier contact details) -- a
+-- full-table grant would expose each one to hotel_agent the moment it
+-- exists, with no further review. Every column below is exactly one
+-- search_hotels (services/agent/llm/dispatch.py) itself reads: the eight
+-- it can place in a result, plus address_text and is_active for the
+-- completeness/active filter (address_text is never placed in a result).
 
-GRANT SELECT ON TABLE hotels TO hotel_agent;
-GRANT SELECT ON TABLE room_types TO hotel_agent;
+GRANT SELECT (
+    id, hotel_name, city, zone, district_name, star_rating,
+    distance_to_haram_meters, address_text, is_active
+) ON TABLE hotels TO hotel_agent;
+
+GRANT SELECT (
+    id, hotel_id, room_type_name, capacity_adults, bed_configuration
+) ON TABLE room_types TO hotel_agent;
 
 CREATE POLICY hotels_agent_select ON hotels
 FOR SELECT TO hotel_agent
