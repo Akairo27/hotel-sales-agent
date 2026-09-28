@@ -84,3 +84,7 @@ PR-2:
 - Migration 0016 gave `authenticated` only `SELECT (id)` and `UPDATE (cost_per_night)` on `allotments`, no INSERT (its own comment says allotment creation belongs to the unbuilt entry screen), plus the masking view, an UPDATE audit trigger and `admin_set_allotment_cost`.
 - Migration 0014: `hotels` and `room_types` have SELECT, INSERT and UPDATE for `authenticated`, admin-only write policies, and no DELETE.
 - The pricing engine reads `cost_per_night` per night and the availability query joins inventory, so a night needs both rows to be sellable.
+
+## 8. Backlog
+
+- **Drop `admin_set_allotment_cost` (migration 0016) in a later migration.** The admin entry screen (PR #69) moved its only caller — the `/allotments` inline edit — to `admin_set_allotments`, so the function, its grants and its policies are now dead. Not dropped here: forward-only migrations mean removing it is its own reviewed migration, not a side effect of the PR that stopped calling it.

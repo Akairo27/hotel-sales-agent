@@ -1,0 +1,44 @@
+{
+  "cases": [
+    {
+      "gregorian": "2026-03-20",
+      "hijri": {
+        "year": 1447,
+        "month": 10,
+        "day": 1
+      }
+    },
+    {
+      "gregorian": "2026-09-28",
+      "hijri": {
+        "year": 1448,
+        "month": 4,
+        "day": 17
+      }
+    },
+    {
+      "gregorian": "2018-09-11",
+      "hijri": {
+        "year": 1440,
+        "month": 1,
+        "day": 1
+      }
+    },
+    {
+      "gregorian": "2018-09-10",
+      "hijri": {
+        "year": 1439,
+        "month": 12,
+        "day": 30
+      }
+    },
+    {
+      "gregorian": "2038-12-27",
+      "hijri": {
+        "year": 1460,
+        "month": 12,
+        "day": 1
+      }
+    }
+  ]
+}
