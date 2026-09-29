@@ -135,8 +135,11 @@ CHECK_AVAILABILITY = ToolDeclaration(
     name="check_availability",
     description=(
         "Checks whether the requested number of rooms is available for "
-        "every night of a stay. Returns only a yes/no answer — call "
-        "get_quote separately for pricing."
+        "every night of a stay. Returns a yes/no answer and, when the "
+        "answer is no, the nights that stop the stay in two lists: "
+        "unavailable_nights (open for booking, not enough free rooms) and "
+        "nights_without_allotment (not open for booking yet). Never a "
+        "price or a room count — call get_quote separately for pricing."
     ),
     parameters=_stay_parameters(),
 )
@@ -147,9 +150,11 @@ GET_QUOTE = ToolDeclaration(
         "Prices a stay and returns the price to quote the customer. It "
         "checks availability itself: if the requested rooms are not free "
         "for every night, or the dates have no inventory, it returns "
-        "priced=false with a reason and no price — never quote a price in "
-        "that case. The returned price is already final and already "
-        "formatted — never recompute, convert, or round it yourself."
+        "priced=false with a reason, the nights that stop the stay "
+        "(unavailable_nights, nights_without_allotment) and no price — "
+        "never quote a price in that case. The returned price is already "
+        "final and already formatted — never recompute, convert, or round "
+        "it yourself."
     ),
     parameters=_stay_parameters(),
 )

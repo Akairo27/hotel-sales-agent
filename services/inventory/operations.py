@@ -9,7 +9,8 @@ clear error before the database would reject the write. CLAUDE.md rule 3.
 
 from __future__ import annotations
 
-from datetime import date, datetime
+from dataclasses import dataclass
+from datetime import date, datetime, timedelta
 from typing import Any, cast
 
 import psycopg
@@ -51,6 +52,65 @@ def _range_params(
     }
 
 
+@dataclass(frozen=True)
+class StayAvailability:
+    """Why a stay cannot be sold, night by night — two separate reasons a
+    customer must be told apart: a night that is open for sale but lacks
+    free rooms, and a night that has no inventory at all (not open for
+    booking yet, never "fully booked"). Both lists are sorted and empty
+    when every night can supply the rooms asked for. No room counts."""
+
+    unavailable_nights: tuple[date, ...]
+    nights_without_allotment: tuple[date, ...]
+
+    @property
+    def is_available(self) -> bool:
+        return not self.unavailable_nights and not self.nights_without_allotment
+
+
+def stay_availability(
+    conn: psycopg.Connection[Any],
+    hotel_id: int,
+    room_type_id: int,
+    check_in: date,
+    check_out: date,
+    rooms: int,
+) -> StayAvailability:
+    """Advisory-only and read-only: which nights of the stay cannot supply
+    `rooms` rooms, split by reason (see StayAvailability). A night counts
+    as without allotment when it has no room_night_inventory row, whether
+    or not an allotments row exists. The database constraint, not this
+    function, is what actually prevents an oversell — see create_hold.
+
+    Raises:
+        ValueError: check_out is not after check_in, or rooms is not
+            positive.
+    """
+    nights = _nights_count(check_in, check_out)
+    if rooms <= 0:
+        raise ValueError("rooms must be positive")
+
+    rows = conn.execute(
+        "SELECT rni.stay_date, rni.total, rni.reserved, rni.held " + _RANGE_JOIN,
+        _range_params(hotel_id, room_type_id, check_in, check_out),
+    ).fetchall()
+    free_rooms = {
+        stay_date: total - reserved - held for stay_date, total, reserved, held in rows
+    }
+
+    stay_dates = [check_in + timedelta(days=offset) for offset in range(nights)]
+    return StayAvailability(
+        unavailable_nights=tuple(
+            night
+            for night in stay_dates
+            if night in free_rooms and free_rooms[night] < rooms
+        ),
+        nights_without_allotment=tuple(
+            night for night in stay_dates if night not in free_rooms
+        ),
+    )
+
+
 def check_availability(
     conn: psycopg.Connection[Any],
     hotel_id: int,
@@ -60,21 +120,13 @@ def check_availability(
     rooms: int,
 ) -> bool:
     """Advisory-only: whether `rooms` rooms appear free for every night of
-    the stay. The database constraint, not this function, is what actually
-    prevents an oversell — see create_hold.
+    the stay (stay_availability, with no night short or missing). The
+    database constraint, not this function, is what actually prevents an
+    oversell — see create_hold.
     """
-    expected_nights = _nights_count(check_in, check_out)
-    if rooms <= 0:
-        raise ValueError("rooms must be positive")
-
-    rows = conn.execute(
-        "SELECT rni.total, rni.reserved, rni.held " + _RANGE_JOIN,
-        _range_params(hotel_id, room_type_id, check_in, check_out),
-    ).fetchall()
-
-    if len(rows) != expected_nights:
-        return False
-    return all(total - reserved - held >= rooms for total, reserved, held in rows)
+    return stay_availability(
+        conn, hotel_id, room_type_id, check_in, check_out, rooms
+    ).is_available
 
 
 def _lock_nights_for_update(

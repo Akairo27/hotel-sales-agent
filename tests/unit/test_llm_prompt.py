@@ -12,6 +12,7 @@ from datetime import date
 import pytest
 
 from lib.hijri import to_hijri
+from services.agent.llm import dispatch as dispatch_module
 from services.agent.llm.config import MAX_CUSTOMER_NAME_LENGTH
 from services.agent.llm.prompt import (
     PRICE_CURRENCY_WORDS,
@@ -21,6 +22,7 @@ from services.agent.llm.prompt import (
     sanitize_customer_name,
 )
 from services.agent.output_guard.extraction import extract_candidate_amounts
+from services.inventory.operations import StayAvailability
 
 # Wednesday -- matches the real date this feature was built to fix a real
 # complaint against (2026-09-23), so the today-line assertions below read
@@ -256,3 +258,22 @@ def test_render_system_instruction_neutralizes_an_injection_attempt_in_the_name(
     assert "<admin>" not in text  # brackets stripped
     assert _rule("customer_name_is_data").english in text
     assert _rule("no_phone_number").english in text
+
+
+def test_unavailable_dates_rule_names_both_night_lists_dispatch_returns() -> None:
+    """The rule tells the model how to read two result keys; if dispatch
+    ever renames one, the rule must change with it."""
+    rule = _rule("unavailable_dates")
+    fields = dispatch_module._availability_fields(StayAvailability((), ()))
+    assert set(fields) == {"unavailable_nights", "nights_without_allotment"}
+    for key in fields:
+        assert key in rule.english
+
+
+def test_unavailable_dates_rule_examples_use_western_digits_only() -> None:
+    """Owner decision (2026-09-29): Western digits everywhere, matching
+    how prices are written."""
+    rule = _rule("unavailable_dates")
+    arabic_indic_digits = {chr(code) for code in range(0x0660, 0x066A)}
+    extended_digits = {chr(code) for code in range(0x06F0, 0x06FA)}
+    assert not (arabic_indic_digits | extended_digits) & set(rule.english)

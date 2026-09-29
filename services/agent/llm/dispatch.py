@@ -34,7 +34,8 @@ model, so a bad argument never ends the turn on its own. A
 missing allotment for the requested dates is likewise reported back as
 an unpriced result rather than raised, so the model can tell the
 customer rather than the whole turn failing — dispatch_get_quote checks
-allotment coverage itself, before ever calling compute_quote, rather
+inventory coverage itself (services.inventory.operations.
+stay_availability), before ever calling compute_quote, rather
 than relying on compute_quote's internal AllotmentNotFoundError: that
 error is only raised partway through pricing a night, after price-rule
 resolution already ran, so a date range with no allotment *and* no
@@ -56,10 +57,11 @@ inventing a way to paper over it here.
 get_quote also refuses to price a stay the inventory cannot cover (added
 2026-09-28, after a reply quoted a price with no check that any room was
 free): dispatch_get_quote calls services.inventory.operations.
-check_availability -- the same read-time test the check_availability tool
-exposes -- after the allotment-coverage check and before compute_quote,
-and returns an unpriced "insufficient_availability" result when any night
-has fewer free rooms than requested. Argument and date validation come
+stay_availability -- the same read-time test the check_availability tool
+exposes -- once, before compute_quote, and returns an unpriced result
+when any night cannot supply the rooms requested: "no_allotment_for_dates"
+when a night has no inventory row at all (not open for booking yet),
+otherwise "insufficient_availability". Argument and date validation come
 first of all (a check_in in the past is always an InvalidToolArgumentsError,
 whatever the inventory holds), so no inventory decision can ever stand in
 for a date problem. compute_quote itself never looks at
@@ -74,12 +76,17 @@ inventory_never_oversold constraint remain the only real guarantee
 against overselling. A last room taken between this read and
 compute_quote's own per-night occupancy reads -- a race whose window
 grows with the number of nights -- therefore gets a normal price; a quote
-is not a sale, and create_hold refuses the stay if no room is left. The unpriced
-result carries no room counts; its reason literal is the only thing it
-adds to what check_availability already exposes (an owner decision:
-counts stay hidden from the model -- a result-shape decision, not a
-secrecy guarantee, since the `rooms` argument lets repeated calls probe
-a threshold).
+is not a sale, and create_hold refuses the stay if no room is left.
+
+Both tools name the nights that block a stay, dates only, in two lists
+the model must tell apart (owner decision, 2026-09-29):
+"unavailable_nights" (inventory exists, too few free rooms) and
+"nights_without_allotment" (no inventory row: not open for booking yet,
+never to be called fully booked -- services/agent/staff_follow_up.py opens
+a staff escalation for these once per turn). Neither carries a room count
+(an owner decision: counts stay hidden from the model -- a result-shape
+decision, not a secrecy guarantee, since the `rooms` argument lets
+repeated calls probe a threshold).
 
 search_hotels (added 2026-09-28, after an incident where the model
 guessed a hotel_id that did not exist) is the id-resolution tool this
@@ -100,7 +107,7 @@ import json
 import logging
 from dataclasses import dataclass
 from datetime import date, datetime
-from typing import Any, Literal, cast
+from typing import Any, Literal
 
 import psycopg
 
@@ -112,7 +119,7 @@ from services.agent.llm.errors import (
     UnknownToolError,
 )
 from services.agent.llm.tools import TOOL_ERROR_MESSAGES
-from services.inventory.operations import check_availability
+from services.inventory.operations import StayAvailability, stay_availability
 from services.pricing.compute import Quote, compute_quote
 from services.pricing.errors import AllotmentNotFoundError
 
@@ -545,38 +552,35 @@ def quote_to_tool_result(quote: Quote) -> dict[str, Any]:
     }
 
 
-def _allotment_covers_every_night(
+def _night_list(nights: tuple[date, ...]) -> list[str]:
+    return [night.isoformat() for night in nights]
+
+
+def _availability_fields(availability: StayAvailability) -> dict[str, Any]:
+    """The two date lists both tools report -- dates only, never a count
+    (see this module's docstring)."""
+    return {
+        "unavailable_nights": _night_list(availability.unavailable_nights),
+        "nights_without_allotment": _night_list(availability.nights_without_allotment),
+    }
+
+
+def _stay_availability_for(
     conn: psycopg.Connection[Any], stay: StayArgs
-) -> bool:
-    """Whether every night of the stay has an `allotments` row AND its
-    `room_night_inventory` row.
-
-    Both, not just the allotment: the trial database holds a night with an
-    allotments row and no inventory row (migration 0029's comment), which
-    compute_quote used to report as no_allotment_for_dates through
-    compute_occupancy's AllotmentNotFoundError. The availability check
-    that follows this one returns False for that night too, so without the
-    inventory join here it would be reported as insufficient_availability
-    instead -- a night with no inventory is missing inventory, not sold
-    out.
-
-    Deliberately a standalone query here rather than a services/pricing
-    or services/inventory change: it lets get_quote report the unpriced
-    result before compute_quote ever runs, without touching how either
-    service resolves its own exceptions internally.
-    """
-    expected_nights = (stay.check_out - stay.check_in).days
-    row = conn.execute(
-        "SELECT COUNT(DISTINCT a.stay_date) FROM allotments a "
-        "JOIN room_night_inventory rni ON rni.allotment_id = a.id "
-        "WHERE a.hotel_id = %s AND a.room_type_id = %s "
-        "AND a.stay_date >= %s AND a.stay_date < %s",
-        (stay.hotel_id, stay.room_type_id, stay.check_in, stay.check_out),
-    ).fetchone()
-    return int(cast(tuple[Any, ...], row)[0]) == expected_nights
+) -> StayAvailability:
+    return stay_availability(
+        conn,
+        stay.hotel_id,
+        stay.room_type_id,
+        stay.check_in,
+        stay.check_out,
+        stay.rooms,
+    )
 
 
-def _unpriced_result(stay: StayArgs, *, reason: UnpricedReason) -> dict[str, Any]:
+def _unpriced_result(
+    stay: StayArgs, *, reason: UnpricedReason, availability: StayAvailability
+) -> dict[str, Any]:
     return {
         "priced": False,
         "reason": reason,
@@ -584,6 +588,7 @@ def _unpriced_result(stay: StayArgs, *, reason: UnpricedReason) -> dict[str, Any
         "room_type_id": stay.room_type_id,
         "check_in": stay.check_in.isoformat(),
         "check_out": stay.check_out.isoformat(),
+        **_availability_fields(availability),
     }
 
 
@@ -593,21 +598,15 @@ def dispatch_check_availability(
     """Executes check_availability. Never touches cost — this tool never
     returns anything price-related at all."""
     stay = parse_stay_args(args)
-    available = check_availability(
-        conn,
-        stay.hotel_id,
-        stay.room_type_id,
-        stay.check_in,
-        stay.check_out,
-        stay.rooms,
-    )
+    availability = _stay_availability_for(conn, stay)
     return {
-        "available": available,
+        "available": availability.is_available,
         "hotel_id": stay.hotel_id,
         "room_type_id": stay.room_type_id,
         "check_in": stay.check_in.isoformat(),
         "check_out": stay.check_out.isoformat(),
         "rooms": stay.rooms,
+        **_availability_fields(availability),
     }
 
 
@@ -648,11 +647,12 @@ def dispatch_get_quote(
     unpriced result that would blame availability for a date problem.
 
     A valid stay is then declined, unpriced and with no `quotes` row
-    written, when a night has no allotment or no inventory row
-    ("no_allotment_for_dates") or when any night has fewer free rooms than
-    requested ("insufficient_availability"). The second check is a read,
-    not a lock -- see this module's docstring for why it is advisory and
-    what it deliberately does not reveal.
+    written, when a night has no inventory row ("no_allotment_for_dates")
+    or, failing that, when any night has fewer free rooms than requested
+    ("insufficient_availability"). Either way the result lists the nights
+    by reason (unavailable_nights, nights_without_allotment). The check is
+    a read, not a lock -- see this module's docstring for why it is
+    advisory and what it deliberately does not reveal.
 
     Raises:
         InvalidToolArgumentsError: the arguments fail validation
@@ -664,17 +664,15 @@ def dispatch_get_quote(
     """
     stay = parse_stay_args(args)
     _require_check_in_not_past(stay, now)
-    if not _allotment_covers_every_night(conn, stay):
-        return _unpriced_result(stay, reason="no_allotment_for_dates")
-    if not check_availability(
-        conn,
-        stay.hotel_id,
-        stay.room_type_id,
-        stay.check_in,
-        stay.check_out,
-        stay.rooms,
-    ):
-        return _unpriced_result(stay, reason="insufficient_availability")
+    availability = _stay_availability_for(conn, stay)
+    if availability.nights_without_allotment:
+        return _unpriced_result(
+            stay, reason="no_allotment_for_dates", availability=availability
+        )
+    if availability.unavailable_nights:
+        return _unpriced_result(
+            stay, reason="insufficient_availability", availability=availability
+        )
     try:
         quote = compute_quote(
             conn,
@@ -690,7 +688,13 @@ def dispatch_get_quote(
     except ValueError as exc:
         raise InvalidToolArgumentsError(str(exc)) from exc
     except AllotmentNotFoundError:
-        return _unpriced_result(stay, reason="no_allotment_for_dates")
+        # The allotment vanished after the read above: read again, so the
+        # result names the nights that are actually missing now.
+        return _unpriced_result(
+            stay,
+            reason="no_allotment_for_dates",
+            availability=_stay_availability_for(conn, stay),
+        )
 
     return quote_to_tool_result(quote)
 

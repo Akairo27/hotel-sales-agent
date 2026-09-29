@@ -23,13 +23,20 @@ from services.inventory.errors import (
     RoomNightCountMismatchError,
 )
 from services.inventory.operations import (
+    StayAvailability,
     _adjust_room_nights,
     check_availability,
     confirm_hold,
     create_hold,
     release_hold,
+    stay_availability,
 )
-from tests.integration._seed import seed_allotment_nights, seed_hotel_and_room_type
+from tests.integration._seed import (
+    seed_actor,
+    seed_allotment_night,
+    seed_allotment_nights,
+    seed_hotel_and_room_type,
+)
 
 pytestmark = pytest.mark.usefixtures("db_conn")
 
@@ -108,6 +115,130 @@ def test_check_availability_false_when_night_missing_allotment(
     assert not check_availability(
         db_conn, hotel_id, room_type_id, _CHECK_IN, _CHECK_OUT, 1
     )
+
+
+_THREE_NIGHT_START = date(2026, 7, 10)
+
+
+def _seed_nights(
+    conn: psycopg.Connection[Any], nights: dict[int, tuple[int, int, int]]
+) -> tuple[int, int]:
+    """One allotment + inventory row per {day offset: (total, reserved,
+    held)} from _THREE_NIGHT_START; offsets left out have no row at all."""
+    hotel_id, room_type_id = seed_hotel_and_room_type(conn)
+    for offset, (total, reserved, held) in nights.items():
+        seed_allotment_night(
+            conn,
+            hotel_id,
+            room_type_id,
+            _THREE_NIGHT_START + timedelta(days=offset),
+            total_rooms=total,
+            reserved=reserved,
+            held=held,
+        )
+    return hotel_id, room_type_id
+
+
+def _three_night_availability(
+    conn: psycopg.Connection[Any], hotel_id: int, room_type_id: int, rooms: int
+) -> StayAvailability:
+    return stay_availability(
+        conn,
+        hotel_id,
+        room_type_id,
+        _THREE_NIGHT_START,
+        _THREE_NIGHT_START + timedelta(days=3),
+        rooms,
+    )
+
+
+def _night(offset: int) -> date:
+    return _THREE_NIGHT_START + timedelta(days=offset)
+
+
+def test_stay_availability_is_empty_when_every_night_has_the_rooms(
+    db_conn: psycopg.Connection[Any],
+) -> None:
+    """Free rooms exactly equal to the request still count as available."""
+    hotel_id, room_type_id = _seed_nights(
+        db_conn, {0: (5, 0, 0), 1: (5, 3, 0), 2: (5, 1, 2)}
+    )
+
+    availability = _three_night_availability(db_conn, hotel_id, room_type_id, 2)
+
+    assert availability == StayAvailability((), ())
+    assert availability.is_available
+
+
+@pytest.mark.parametrize(
+    "night",
+    [
+        pytest.param((5, 5, 0), id="sold-out-by-reserved"),
+        pytest.param((5, 0, 5), id="sold-out-by-held"),
+        pytest.param((5, 4, 0), id="fewer-free-than-requested"),
+        pytest.param((0, 0, 0), id="zero-total"),
+    ],
+)
+def test_stay_availability_lists_a_short_night_as_unavailable(
+    db_conn: psycopg.Connection[Any], night: tuple[int, int, int]
+) -> None:
+    hotel_id, room_type_id = _seed_nights(
+        db_conn, {0: (5, 0, 0), 1: night, 2: (5, 0, 0)}
+    )
+
+    availability = _three_night_availability(db_conn, hotel_id, room_type_id, 2)
+
+    assert availability == StayAvailability((_night(1),), ())
+    assert not availability.is_available
+
+
+def test_stay_availability_lists_a_night_with_no_inventory_row_separately(
+    db_conn: psycopg.Connection[Any],
+) -> None:
+    """A night with no row at all is not open for booking -- never reported
+    as unavailable (fully booked)."""
+    hotel_id, room_type_id = _seed_nights(db_conn, {0: (5, 0, 0), 2: (5, 0, 0)})
+
+    availability = _three_night_availability(db_conn, hotel_id, room_type_id, 1)
+
+    assert availability == StayAvailability((), (_night(1),))
+    assert not availability.is_available
+
+
+def test_stay_availability_counts_an_allotment_without_inventory_as_missing(
+    db_conn: psycopg.Connection[Any],
+) -> None:
+    """An allotments row with no room_night_inventory row (the trial
+    database holds one -- migration 0029's comment) has nothing to sell."""
+    hotel_id, room_type_id = _seed_nights(db_conn, {0: (5, 0, 0), 2: (5, 0, 0)})
+    seed_actor(db_conn)
+    db_conn.execute(
+        "INSERT INTO allotments (hotel_id, room_type_id, stay_date, total_rooms, "
+        "cost_per_night) VALUES (%s, %s, %s, 5, 10000)",
+        (hotel_id, room_type_id, _night(1)),
+    )
+
+    availability = _three_night_availability(db_conn, hotel_id, room_type_id, 1)
+
+    assert availability == StayAvailability((), (_night(1),))
+
+
+def test_stay_availability_reports_short_and_missing_nights_together(
+    db_conn: psycopg.Connection[Any],
+) -> None:
+    hotel_id, room_type_id = _seed_nights(db_conn, {0: (5, 5, 0), 2: (5, 0, 0)})
+
+    availability = _three_night_availability(db_conn, hotel_id, room_type_id, 1)
+
+    assert availability == StayAvailability((_night(0),), (_night(1),))
+
+
+def test_stay_availability_raises_when_rooms_not_positive(
+    db_conn: psycopg.Connection[Any],
+) -> None:
+    hotel_id, room_type_id = _seed_nights(db_conn, {0: (5, 0, 0)})
+    with pytest.raises(ValueError, match="rooms must be positive"):
+        _three_night_availability(db_conn, hotel_id, room_type_id, 0)
 
 
 def test_create_hold_increments_held_and_returns_id(

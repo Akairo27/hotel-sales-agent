@@ -181,6 +181,7 @@ from services.agent.output_guard.enforcement import (
     enforce_outbound_text,
     open_escalation,
 )
+from services.agent.staff_follow_up import open_follow_up_for_dates_not_open
 from services.agent.whatsapp_send import (
     WHATSAPP_TEXT_BODY_MAX_CHARS,
     WhatsAppCloudApiSender,
@@ -1086,7 +1087,9 @@ async def _process_turn(
     now: datetime,
 ) -> str:
     """Steps 4-7 of the module docstring: the model call through the
-    output-guard-checked send. Returns a status label that
+    output-guard-checked send, plus the staff follow-up for dates not open
+    for booking (services/agent/staff_follow_up.py) when the turn's tools
+    reported any. Returns a status label that
     _generate_and_deliver_reply logs; no caller reads it as an HTTP
     response anymore. Every path ends in either the reply delivered
     ("processed") or _escalate_and_notify (CLAUDE.md rule 12).
@@ -1120,6 +1123,9 @@ async def _process_turn(
         now=now,
     )
     _increment_turn_count_or_log_failure(conn, conversation_id=conversation_id)
+    open_follow_up_for_dates_not_open(
+        conn, conversation_id=conversation_id, tool_calls=outcome.tool_calls
+    )
 
     return await _deliver_reply(
         conn,

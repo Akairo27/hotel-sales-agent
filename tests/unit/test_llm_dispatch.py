@@ -45,6 +45,7 @@ from services.agent.llm.errors import (
     UnknownToolError,
 )
 from services.agent.llm.tools import TOOL_ERROR_MESSAGES
+from services.inventory.operations import StayAvailability
 from services.pricing.compute import NightPrice, Quote
 
 _NOT_A_CONNECTION = cast(Any, object())
@@ -270,24 +271,36 @@ def _must_not_be_called(*_args: Any, **_kwargs: Any) -> Any:
     raise AssertionError("this call must not happen on this path")
 
 
+def _stub_stay_availability(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    unavailable_nights: tuple[date, ...] = (),
+    nights_without_allotment: tuple[date, ...] = (),
+) -> list[tuple[Any, ...]]:
+    """Makes dispatch's one inventory read return the given nights, and
+    records every call's arguments."""
+    calls: list[tuple[Any, ...]] = []
+
+    def _stay_availability(*args: Any) -> StayAvailability:
+        calls.append(args)
+        return StayAvailability(
+            unavailable_nights=unavailable_nights,
+            nights_without_allotment=nights_without_allotment,
+        )
+
+    monkeypatch.setattr(dispatch_module, "stay_availability", _stay_availability)
+    return calls
+
+
 def test_dispatch_get_quote_declines_without_pricing_when_rooms_are_not_free(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """The gate sits before compute_quote: compute_quote is what writes the
     `quotes` row, so never reaching it is what guarantees no row is written
-    for a stay the inventory cannot cover. The result carries no room
-    count -- exactly the ids and dates, nothing about how many rooms are
-    free."""
-    availability_calls: list[tuple[Any, ...]] = []
-
-    def _not_available(*args: Any) -> bool:
-        availability_calls.append(args)
-        return False
-
-    monkeypatch.setattr(
-        dispatch_module, "_allotment_covers_every_night", lambda *_: True
-    )
-    monkeypatch.setattr(dispatch_module, "check_availability", _not_available)
+    for a stay the inventory cannot cover. The result names the short night
+    by date and carries no room count -- exactly the ids, dates and the two
+    night lists, nothing about how many rooms are free."""
+    calls = _stub_stay_availability(monkeypatch, unavailable_nights=(date(2026, 9, 2),))
     monkeypatch.setattr(dispatch_module, "compute_quote", _must_not_be_called)
 
     result = dispatch_get_quote(
@@ -305,22 +318,24 @@ def test_dispatch_get_quote_declines_without_pricing_when_rooms_are_not_free(
         "room_type_id": 2,
         "check_in": "2026-09-01",
         "check_out": "2026-09-03",
+        "unavailable_nights": ["2026-09-02"],
+        "nights_without_allotment": [],
     }
-    assert availability_calls == [
-        (_NOT_A_CONNECTION, 1, 2, date(2026, 9, 1), date(2026, 9, 3), 1)
-    ]
+    assert calls == [(_NOT_A_CONNECTION, 1, 2, date(2026, 9, 1), date(2026, 9, 3), 1)]
 
 
-def test_dispatch_get_quote_checks_allotment_coverage_before_availability(
+def test_dispatch_get_quote_reports_missing_inventory_ahead_of_short_nights(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """check_availability returns False for a missing night too, so if it
-    ran first the distinct no_allotment_for_dates reason could never be
-    reported -- coverage must be decided first."""
-    monkeypatch.setattr(
-        dispatch_module, "_allotment_covers_every_night", lambda *_: False
+    """A stay with a night not open for booking is reported as
+    no_allotment_for_dates even when another night is merely short -- that
+    night is not "fully booked", and the customer must hear the difference.
+    Both lists are still returned."""
+    _stub_stay_availability(
+        monkeypatch,
+        unavailable_nights=(date(2026, 9, 1),),
+        nights_without_allotment=(date(2026, 9, 2),),
     )
-    monkeypatch.setattr(dispatch_module, "check_availability", _must_not_be_called)
     monkeypatch.setattr(dispatch_module, "compute_quote", _must_not_be_called)
 
     result = dispatch_get_quote(
@@ -333,15 +348,14 @@ def test_dispatch_get_quote_checks_allotment_coverage_before_availability(
 
     assert result["priced"] is False
     assert result["reason"] == "no_allotment_for_dates"
+    assert result["unavailable_nights"] == ["2026-09-01"]
+    assert result["nights_without_allotment"] == ["2026-09-02"]
 
 
 def test_dispatch_get_quote_prices_when_rooms_are_free(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr(
-        dispatch_module, "_allotment_covers_every_night", lambda *_: True
-    )
-    monkeypatch.setattr(dispatch_module, "check_availability", lambda *_: True)
+    _stub_stay_availability(monkeypatch)
     monkeypatch.setattr(
         dispatch_module,
         "compute_quote",
@@ -363,13 +377,10 @@ def test_dispatch_get_quote_prices_when_rooms_are_free(
 def test_dispatch_get_quote_rejects_a_past_check_in_before_any_inventory_read(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Date validation runs ahead of every inventory decision: none of the
-    coverage check, the availability check or compute_quote may be reached
-    for a check_in before today (each is stubbed to fail loudly if it is)."""
-    monkeypatch.setattr(
-        dispatch_module, "_allotment_covers_every_night", _must_not_be_called
-    )
-    monkeypatch.setattr(dispatch_module, "check_availability", _must_not_be_called)
+    """Date validation runs ahead of every inventory decision: neither the
+    inventory read nor compute_quote may be reached for a check_in before
+    today (each is stubbed to fail loudly if it is)."""
+    monkeypatch.setattr(dispatch_module, "stay_availability", _must_not_be_called)
     monkeypatch.setattr(dispatch_module, "compute_quote", _must_not_be_called)
 
     with pytest.raises(InvalidToolArgumentsError) as exc_info:
@@ -390,10 +401,7 @@ def test_dispatch_get_quote_accepts_a_check_in_of_today(
 ) -> None:
     """The boundary of the date rule: check_in equal to now's date is not
     in the past (strictly earlier is), so the stay goes on to be priced."""
-    monkeypatch.setattr(
-        dispatch_module, "_allotment_covers_every_night", lambda *_: True
-    )
-    monkeypatch.setattr(dispatch_module, "check_availability", lambda *_: True)
+    _stub_stay_availability(monkeypatch)
     monkeypatch.setattr(
         dispatch_module,
         "compute_quote",
