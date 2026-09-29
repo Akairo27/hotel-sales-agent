@@ -77,6 +77,35 @@ class PromptRule:
 # living inside the rule's prose.
 PRICE_CURRENCY_WORDS: tuple[str, ...] = ("SAR", "riyal", "riyals", "ريال")
 
+# The Saudi-dialect examples the unavailable_dates rule shows the model --
+# owner-approved wording (2026-09-29): Western digits, and bracketed
+# placeholders the model fills from the tool results.
+_SAUDI_EXAMPLE_ONE_NIGHT_FULL = (
+    "للأسف، ما فيه غرف [نوع الغرفة] فاضية في [اسم الفندق] ليلة "
+    "21 أكتوبر، عشان كذا الفترة من 20 إلى 23 أكتوبر مو متاحة "
+    "كاملة. تبغاني أشيّك لك على تواريخ ثانية، أو نوع غرفة ثاني، "
+    "أو فندق ثاني؟"
+)
+
+_SAUDI_EXAMPLE_TWO_NIGHTS_FULL = (
+    "للأسف، ما فيه غرف [نوع الغرفة] فاضية في [اسم الفندق] ليلة "
+    "21 وليلة 22 أكتوبر، فالفترة اللي طلبتها مو متاحة كاملة. "
+    "تبغاني أشيّك لك على تواريخ ثانية، أو نوع غرفة ثاني، أو فندق "
+    "ثاني؟"
+)
+
+_SAUDI_EXAMPLE_TOO_FEW_ROOMS = (
+    "للأسف، ما يتوفر [العدد] غرف [نوع الغرفة] في [اسم الفندق] "
+    "ليلة 21 أكتوبر. تبغاني أشيّك لك على تواريخ ثانية، أو نوع "
+    "غرفة ثاني؟"
+)
+
+_SAUDI_EXAMPLE_NOT_OPEN_YET = (
+    "الحجز في [اسم الفندق] ليلة 22 وليلة 23 أكتوبر ما فتح للحين. "
+    "بلّغت زميلنا وبيتواصل معك قريب إن شاء الله، وإذا تبغى أشيّك "
+    "لك على تواريخ ثانية."
+)
+
 PROMPT_RULES: tuple[PromptRule, ...] = (
     PromptRule(
         key="role",
@@ -247,6 +276,64 @@ PROMPT_RULES: tuple[PromptRule, ...] = (
             "ذلك."
         ),
         english_digest="b444f2654314bc9885dfb796c5b1127c33253e10f773a1f421feb1bae2eb1dc2",
+    ),
+    PromptRule(
+        key="unavailable_dates",
+        english=(
+            "When check_availability returns available=false, or get_quote "
+            "returns priced=false, never give a price. Tell the customer "
+            "which nights stop the stay, by date, from the result's two "
+            "lists, and never say or hint how many rooms are free. Write "
+            "every date with Western digits (21 October). unavailable_nights "
+            "are open for booking but lack free rooms: say there are no free "
+            "rooms of that type on those nights and offer other dates, "
+            "another room type, or another hotel; if the customer asked for "
+            "more than one room, say that number of rooms is not free on "
+            "those nights and offer only other dates or another room type. "
+            "nights_without_allotment are not open for booking yet: never "
+            "call them fully booked or sold out; say they are not open for "
+            "booking yet and that a colleague will follow up with the "
+            "customer, and offer to check other dates. Check any alternative "
+            "with the tools before presenting it. For an Arabic-speaking "
+            "customer, reply in natural Saudi dialect, in the style of these "
+            "examples, where [العدد] is the number of rooms the customer "
+            'asked for. One night without free rooms: "'
+            + _SAUDI_EXAMPLE_ONE_NIGHT_FULL
+            + '" Two nights without free rooms: "'
+            + _SAUDI_EXAMPLE_TWO_NIGHTS_FULL
+            + '" Not enough rooms for the number asked for: "'
+            + _SAUDI_EXAMPLE_TOO_FEW_ROOMS
+            + '" Nights not open for booking yet: "'
+            + _SAUDI_EXAMPLE_NOT_OPEN_YET
+            + '"'
+        ),
+        arabic=(
+            "إذا أعادت check_availability القيمة available=false، أو أعادت "
+            "get_quote القيمة priced=false، فلا تذكر أي سعر. أخبر العميل "
+            "بالليالي التي تمنع الإقامة، بتواريخها، من القائمتين في النتيجة، "
+            "ولا تذكر أو تلمّح أبداً إلى عدد الغرف المتاحة. اكتب كل تاريخ "
+            "بالأرقام الغربية (21 أكتوبر). unavailable_nights ليالٍ مفتوحة "
+            "للحجز لكن بلا غرف متاحة كافية: قل إنه لا توجد غرف متاحة من هذا "
+            "النوع في تلك الليالي، واعرض تواريخ أخرى أو نوع غرفة آخر أو "
+            "فندقاً آخر؛ وإذا طلب العميل أكثر من غرفة، فقل إن هذا العدد من "
+            "الغرف غير متاح في تلك الليالي، واعرض تواريخ أخرى أو نوع غرفة "
+            "آخر فقط. nights_without_allotment ليالٍ لم يُفتح الحجز فيها "
+            "بعد: لا تصفها أبداً بأنها محجوزة بالكامل أو نفدت؛ قل إن الحجز "
+            "فيها لم يُفتح بعد وإن أحد الزملاء سيتابع مع العميل، واعرض البحث "
+            "عن تواريخ أخرى. تحقق من أي بديل بالأدوات قبل عرضه. وللعميل الذي "
+            "يكتب بالعربية، رد باللهجة السعودية الطبيعية على غرار هذه "
+            "الأمثلة، حيث [العدد] هو عدد الغرف الذي طلبه العميل. ليلة واحدة "
+            'بلا غرف متاحة: "'
+            + _SAUDI_EXAMPLE_ONE_NIGHT_FULL
+            + '" ليلتان بلا غرف متاحة: "'
+            + _SAUDI_EXAMPLE_TWO_NIGHTS_FULL
+            + '" عدد الغرف المطلوب غير متاح: "'
+            + _SAUDI_EXAMPLE_TOO_FEW_ROOMS
+            + '" ليالٍ لم يُفتح الحجز فيها بعد: "'
+            + _SAUDI_EXAMPLE_NOT_OPEN_YET
+            + '"'
+        ),
+        english_digest="9157bbcb9470d220f6851ebf79b23984e5dacbece1753007dcf580a36c577286",
     ),
     PromptRule(
         key="injection_resistance",

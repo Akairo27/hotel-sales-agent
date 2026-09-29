@@ -25,6 +25,7 @@ from services.agent.llm.dispatch import (
     dispatch_tool,
 )
 from services.agent.llm.errors import InvalidToolArgumentsError
+from services.inventory.operations import StayAvailability
 from tests.integration._seed import (
     flat_demand_curve,
     flat_min_profit,
@@ -134,6 +135,8 @@ def test_get_quote_dispatch_reports_unpriced_when_no_allotment_exists(
         "room_type_id": room_type_id,
         "check_in": "2026-09-10",
         "check_out": "2026-09-11",
+        "unavailable_nights": [],
+        "nights_without_allotment": ["2026-09-10"],
     }
 
 
@@ -173,6 +176,8 @@ def test_get_quote_dispatch_reports_unpriced_despite_a_valid_price_rule(
         "room_type_id": room_type_id,
         "check_in": "2026-09-10",
         "check_out": "2026-09-11",
+        "unavailable_nights": [],
+        "nights_without_allotment": ["2026-09-10"],
     }
 
 
@@ -188,10 +193,58 @@ def test_check_availability_dispatch_reflects_real_inventory(
         "rooms": 5,
     }
 
-    assert dispatch_check_availability(db_conn, args)["available"] is True
+    available = dispatch_check_availability(db_conn, args)
+    assert available["available"] is True
+    assert available["unavailable_nights"] == []
+    assert available["nights_without_allotment"] == []
 
     args["rooms"] = 6
-    assert dispatch_check_availability(db_conn, args)["available"] is False
+    short = dispatch_check_availability(db_conn, args)
+    assert short["available"] is False
+    assert short["unavailable_nights"] == ["2026-09-10", "2026-09-11"]
+    assert short["nights_without_allotment"] == []
+
+
+def test_check_availability_dispatch_lists_nights_not_open_for_booking_apart(
+    db_conn: psycopg.Connection[Any],
+) -> None:
+    """Night one has rooms, night two is sold out, night three has no
+    inventory at all: the model gets each reason separately, dates only."""
+    hotel_id, room_type_id = _seed_stay_with_inventory(db_conn, [(5, 0, 0), (5, 5, 0)])
+    args = _stay_args(hotel_id, room_type_id, nights=3, rooms=1)
+
+    result = dispatch_check_availability(db_conn, args)
+
+    assert result == {
+        "available": False,
+        "hotel_id": hotel_id,
+        "room_type_id": room_type_id,
+        "check_in": args["check_in"],
+        "check_out": args["check_out"],
+        "rooms": 1,
+        "unavailable_nights": [_night(1)],
+        "nights_without_allotment": [_night(2)],
+    }
+
+
+def test_get_quote_dispatch_reports_a_missing_night_even_when_another_is_sold_out(
+    db_conn: psycopg.Connection[Any],
+) -> None:
+    """The reason is no_allotment_for_dates whenever any night is not open
+    for booking -- such a night must never be described as fully booked --
+    and both lists come back."""
+    hotel_id, room_type_id = _seed_stay_with_inventory(db_conn, [(5, 0, 0), (5, 5, 0)])
+    args = _stay_args(hotel_id, room_type_id, nights=3, rooms=1)
+
+    result = dispatch_get_quote(
+        db_conn, args, now=_NOW, customer_phone=None, conversation_id=None
+    )
+
+    assert result["priced"] is False
+    assert result["reason"] == "no_allotment_for_dates"
+    assert result["unavailable_nights"] == [_night(1)]
+    assert result["nights_without_allotment"] == [_night(2)]
+    assert _quote_row_count(db_conn) == 0
 
 
 def test_dispatch_tool_logs_get_quote_result_with_no_cost_fields(
@@ -329,7 +382,9 @@ def _stay_args(
     }
 
 
-def _insufficient_availability_result(args: dict[str, Any]) -> dict[str, Any]:
+def _insufficient_availability_result(
+    args: dict[str, Any], *, unavailable_nights: list[str]
+) -> dict[str, Any]:
     return {
         "priced": False,
         "reason": "insufficient_availability",
@@ -337,7 +392,13 @@ def _insufficient_availability_result(args: dict[str, Any]) -> dict[str, Any]:
         "room_type_id": args["room_type_id"],
         "check_in": args["check_in"],
         "check_out": args["check_out"],
+        "unavailable_nights": unavailable_nights,
+        "nights_without_allotment": [],
     }
+
+
+def _night(offset: int) -> str:
+    return (_STAY_START + timedelta(days=offset)).isoformat()
 
 
 def _quote_row_count(conn: psycopg.Connection[Any]) -> int:
@@ -387,7 +448,9 @@ def test_get_quote_dispatch_declines_a_night_with_no_free_rooms(
         db_conn, args, now=_NOW, customer_phone=None, conversation_id=None
     )
 
-    assert result == _insufficient_availability_result(args)
+    assert result == _insufficient_availability_result(
+        args, unavailable_nights=[_night(0)]
+    )
     assert _quote_row_count(db_conn) == 0
 
 
@@ -403,7 +466,9 @@ def test_get_quote_dispatch_declines_when_more_rooms_are_requested_than_are_free
         db_conn, args, now=_NOW, customer_phone=None, conversation_id=None
     )
 
-    assert result == _insufficient_availability_result(args)
+    assert result == _insufficient_availability_result(
+        args, unavailable_nights=[_night(0)]
+    )
     assert _quote_row_count(db_conn) == 0
 
 
@@ -419,7 +484,9 @@ def test_get_quote_dispatch_declines_when_only_one_night_of_the_stay_is_short(
         db_conn, args, now=_NOW, customer_phone=None, conversation_id=None
     )
 
-    assert result == _insufficient_availability_result(args)
+    assert result == _insufficient_availability_result(
+        args, unavailable_nights=[_night(1)]
+    )
     assert _quote_row_count(db_conn) == 0
 
 
@@ -446,7 +513,9 @@ def test_get_quote_dispatch_declines_a_stay_with_one_fully_booked_night(
         db_conn, args, now=_NOW, customer_phone=None, conversation_id=None
     )
 
-    assert result == _insufficient_availability_result(args)
+    assert result == _insufficient_availability_result(
+        args, unavailable_nights=[_night(sold_out_index)]
+    )
     assert _quote_row_count(db_conn) == 0
 
 
@@ -458,7 +527,11 @@ def test_get_quote_dispatch_prices_a_night_sold_out_after_the_gate_read(
     2026-09-29 this raised NoMatchingBandError and failed the turn; now the
     stay is priced (a quote is not a sale -- create_hold refuses it, see
     test_a_sold_out_night_is_priced_but_a_hold_on_it_is_refused)."""
-    monkeypatch.setattr(dispatch_module, "check_availability", lambda *_a, **_k: True)
+    monkeypatch.setattr(
+        dispatch_module,
+        "stay_availability",
+        lambda *_a, **_k: StayAvailability((), ()),
+    )
     hotel_id, room_type_id = _seed_stay_with_inventory(db_conn, [(5, 5, 0)])
     args = _stay_args(hotel_id, room_type_id, nights=1, rooms=1)
 
@@ -509,7 +582,7 @@ def test_get_quote_dispatch_reports_an_allotment_without_inventory_as_no_allotme
     """The trial database holds a night with an allotments row and no
     room_night_inventory row (migration 0029's comment). compute_quote used
     to report it as no_allotment_for_dates; check_availability returns
-    False for it too, so without the coverage check also requiring the
+    False for it too, so without stay_availability also requiring the
     inventory row it would be reported as insufficient_availability -- a
     night with no inventory is missing inventory, not sold out. Everything
     else pricing needs is in place, so only that distinction is under
@@ -543,6 +616,8 @@ def test_get_quote_dispatch_reports_an_allotment_without_inventory_as_no_allotme
         "room_type_id": room_type_id,
         "check_in": args["check_in"],
         "check_out": args["check_out"],
+        "unavailable_nights": [],
+        "nights_without_allotment": [_night(0)],
     }
     assert _quote_row_count(db_conn) == 0
 
@@ -562,7 +637,9 @@ def test_get_quote_dispatch_declines_a_sold_out_night_even_with_an_active_overri
         db_conn, args, now=_NOW, customer_phone=None, conversation_id=None
     )
 
-    assert result == _insufficient_availability_result(args)
+    assert result == _insufficient_availability_result(
+        args, unavailable_nights=[_night(0)]
+    )
     assert _quote_row_count(db_conn) == 0
 
 

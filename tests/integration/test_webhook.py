@@ -28,6 +28,7 @@ import psycopg
 import pytest
 from fastapi.testclient import TestClient
 
+from services.agent import staff_follow_up as staff_follow_up_module
 from services.agent import webhook as webhook_module
 from services.agent.llm import dispatch as dispatch_module
 from services.agent.llm.caps import record_token_usage
@@ -71,6 +72,7 @@ from services.agent.whatsapp_send import (
     WhatsAppSendError,
     WhatsAppSendSettings,
 )
+from services.inventory.operations import StayAvailability
 from services.pricing.errors import PricingError
 from tests.integration._seed import (
     flat_demand_curve,
@@ -94,13 +96,16 @@ _WA_ID = "966500000001"
 _OTHER_WA_ID = "966500000002"
 
 # A check_availability call that always resolves (to {"available": False},
-# since no matching inventory row exists in this module's fresh test
-# schema) without raising -- used wherever a test needs a real, harmless
-# tool call purely to keep generate_reply's loop going for another
-# iteration. Its ids are only ever valid because every test that uses it
-# seeds exactly one hotel/room type first (_seed_searchable_hotel) --
-# hotels/room_types are both RESTART IDENTITY-truncated before each test
-# (tests/conftest.py), so that first insert is always id 1.
+# since _seed_searchable_hotel seeds its one night sold out) without
+# raising -- used wherever a test needs a real, harmless tool call purely
+# to keep generate_reply's loop going for another iteration. Sold out, not
+# missing: a night with no inventory row is "not open for booking", which
+# opens a staff follow-up escalation (services/agent/staff_follow_up.py) --
+# a side effect a harmless call must not have. Its ids are only ever valid
+# because every test that uses it seeds exactly one hotel/room type first
+# (_seed_searchable_hotel) -- hotels/room_types are both RESTART
+# IDENTITY-truncated before each test (tests/conftest.py), so that first
+# insert is always id 1.
 _HARMLESS_AVAILABILITY_ARGS = {
     "hotel_id": 1,
     "room_type_id": 1,
@@ -122,8 +127,9 @@ _SEARCH_HOTELS_CANDIDATES_TOKENS = 5
 
 def _seed_searchable_hotel(conn: psycopg.Connection[Any]) -> None:
     """A real, active, complete-profile hotel/room type search_hotels can
-    resolve, matching _HARMLESS_AVAILABILITY_ARGS' hardcoded ids. Must be
-    the first hotels/room_types write in the calling test."""
+    resolve, matching _HARMLESS_AVAILABILITY_ARGS' hardcoded ids, with that
+    stay's one night seeded sold out (see _HARMLESS_AVAILABILITY_ARGS). Must
+    be the first hotels/room_types write in the calling test."""
     hotel_id = seed_hotel(
         conn,
         hotel_name=_SEARCHABLE_HOTEL_NAME,
@@ -136,6 +142,14 @@ def _seed_searchable_hotel(conn: psycopg.Connection[Any]) -> None:
     assert hotel_id == _HARMLESS_AVAILABILITY_ARGS["hotel_id"]
     room_type_id = seed_room_type(conn, hotel_id, room_type_name="Standard")
     assert room_type_id == _HARMLESS_AVAILABILITY_ARGS["room_type_id"]
+    seed_allotment_night(
+        conn,
+        hotel_id,
+        room_type_id,
+        date.fromisoformat(str(_HARMLESS_AVAILABILITY_ARGS["check_in"])),
+        total_rooms=1,
+        reserved=1,
+    )
 
 
 def _search_hotels_prefix_call() -> ModelResponse:
@@ -218,11 +232,11 @@ class _NoUsageTransport:
 class _ToolCallingTransport:
     """Calls search_hotels once (to satisfy dispatch_tool's resolved-stays
     guard -- services/agent/llm/dispatch.py), then check_availability
-    repeatedly with the same real, resolved ids -- no allotment/inventory
-    rows exist in this module's fresh, truncated test schema
-    (tests/conftest.py's db_conn fixture), so dispatch_tool runs for real
-    and check_availability returns {"available": False} rather than
-    raising, and generate_reply's tool-calling loop keeps iterating. This
+    repeatedly with the same real, resolved ids -- the night is sold out
+    (_seed_searchable_hotel) or has no inventory row in this module's
+    fresh, truncated test schema, so dispatch_tool runs for real and
+    check_availability returns {"available": False} rather than raising,
+    and generate_reply's tool-calling loop keeps iterating. This
     drives several real model calls in one turn, so the mid-loop
     spend-cap recheck (conversation.py) can be exercised end to end
     through the real webhook against a real, non-mocked
@@ -2421,6 +2435,8 @@ def test_receive_message_answers_normally_for_a_fully_booked_night(
     assert [r for r in caplog.records if r.levelno == logging.ERROR] == []
     quote_count = db_conn.execute("SELECT count(*) FROM quotes").fetchone()
     assert quote_count == (0,)
+    # Sold out is not "not open for booking": no staff follow-up.
+    assert _escalations(db_conn) == []
 
 
 def test_receive_message_quotes_normally_when_the_last_room_is_taken_mid_turn(
@@ -2442,7 +2458,11 @@ def test_receive_message_quotes_normally_when_the_last_room_is_taken_mid_turn(
     real pricing exception stays covered by the
     InconsistentPriceConfigurationError tests below and by
     test_no_exception_type_ends_a_turn_in_silence."""
-    monkeypatch.setattr(dispatch_module, "check_availability", lambda *_a, **_k: True)
+    monkeypatch.setattr(
+        dispatch_module,
+        "stay_availability",
+        lambda *_a, **_k: StayAvailability((), ()),
+    )
     hotel_id, room_type_id = _seed_fully_booked_priceable_night(db_conn)
     _set_llm_settings(monkeypatch, _settings())
     reply_text = "Here is the price for that night."
@@ -2486,6 +2506,134 @@ def test_receive_message_quotes_normally_when_the_last_room_is_taken_mid_turn(
     recorded = db_conn.execute("SELECT nights FROM quotes").fetchall()
     assert len(recorded) == 1
     assert recorded[0][0][0]["occupancy"] == 1.0
+
+
+# A stay whose two nights have no inventory row at all -- not open for
+# booking yet (owner decision, 2026-09-29), for _seed_searchable_hotel's ids.
+_NOT_OPEN_STAY_ARGS = {
+    "hotel_id": 1,
+    "room_type_id": 1,
+    "check_in": "2030-02-01",
+    "check_out": "2030-02-03",
+    "rooms": 1,
+}
+_NOT_OPEN_NIGHTS = ["2030-02-01", "2030-02-02"]
+
+
+def _not_open_for_booking_turn(reply_text: str) -> _ScriptedTransport:
+    """search_hotels, then check_availability and get_quote for the same
+    not-yet-open stay, then the model's reply."""
+    return _ScriptedTransport(
+        [
+            _search_hotels_prefix_call(),
+            _function_call_response(
+                "check_availability",
+                _NOT_OPEN_STAY_ARGS,
+                prompt_tokens=25,
+                candidates_tokens=5,
+            ),
+            _function_call_response(
+                "get_quote", _NOT_OPEN_STAY_ARGS, prompt_tokens=25, candidates_tokens=5
+            ),
+            _text_response(reply_text, prompt_tokens=25, candidates_tokens=5),
+        ]
+    )
+
+
+def _staff_follow_up_events(caplog: pytest.LogCaptureFixture) -> list[dict[str, Any]]:
+    return [
+        json.loads(r.getMessage())
+        for r in caplog.records
+        if r.name == "services.agent.staff_follow_up"
+    ]
+
+
+def test_receive_message_opens_one_staff_follow_up_for_dates_not_open_for_booking(
+    webhook_client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+    db_conn: psycopg.Connection[Any],
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Nights with no inventory row are not open for booking yet: both tools
+    hand the model those dates in nights_without_allotment (never as
+    unavailable_nights, which would read as fully booked), the reply is
+    delivered normally, and staff get exactly one escalation for the turn
+    -- not one per tool call -- listing the nights."""
+    _seed_searchable_hotel(db_conn)
+    _set_llm_settings(monkeypatch, _settings())
+    reply_text = "Those dates are not open for booking yet; a colleague will follow up."
+    transport = _not_open_for_booking_turn(reply_text)
+    _set_transport(monkeypatch, transport)
+    sender = _FakeWhatsAppSender()
+    _set_whatsapp_sender(monkeypatch, sender)
+    caplog.set_level(logging.INFO, logger="services.agent.webhook")
+    caplog.set_level(logging.INFO, logger="services.agent.staff_follow_up")
+    payload = _whatsapp_payload(
+        wa_id=_WA_ID, message_id="wamid.dates-not-open", body="hello"
+    )
+
+    response = _post(
+        webhook_client, payload, signature=_sign(json.dumps(payload).encode())
+    )
+
+    assert response.status_code == 200
+    (availability_result,) = _tool_results_seen_by_call(transport, 2)
+    assert availability_result["available"] is False
+    assert availability_result["unavailable_nights"] == []
+    assert availability_result["nights_without_allotment"] == _NOT_OPEN_NIGHTS
+    (quote_result,) = _tool_results_seen_by_call(transport, 3)
+    assert quote_result["priced"] is False
+    assert quote_result["reason"] == "no_allotment_for_dates"
+    assert quote_result["nights_without_allotment"] == _NOT_OPEN_NIGHTS
+    assert sender.calls == [(_WA_ID, reply_text)]
+    assert _turn_status(caplog) == "processed"
+    assert _escalations(db_conn) == [
+        (
+            "dates_not_open_for_booking",
+            {"stays": [{"hotel_id": 1, "room_type_id": 1, "nights": _NOT_OPEN_NIGHTS}]},
+        )
+    ]
+    (event,) = _staff_follow_up_events(caplog)
+    assert event["event"] == "dates_not_open_escalated"
+    assert event["night_count"] == 2
+
+
+def test_receive_message_still_delivers_the_reply_when_the_staff_follow_up_fails(
+    webhook_client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+    db_conn: psycopg.Connection[Any],
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The follow-up is for staff; a failed insert is logged at ERROR and
+    never costs the customer the answer."""
+    _seed_searchable_hotel(db_conn)
+    _set_llm_settings(monkeypatch, _settings())
+    reply_text = "Those dates are not open for booking yet; a colleague will follow up."
+    _set_transport(monkeypatch, _not_open_for_booking_turn(reply_text))
+    sender = _FakeWhatsAppSender()
+    _set_whatsapp_sender(monkeypatch, sender)
+
+    def _fail_to_open(*_args: Any, **_kwargs: Any) -> int:
+        raise psycopg.OperationalError("simulated connection failure")
+
+    monkeypatch.setattr(staff_follow_up_module, "open_escalation", _fail_to_open)
+    caplog.set_level(logging.INFO, logger="services.agent.webhook")
+    caplog.set_level(logging.INFO, logger="services.agent.staff_follow_up")
+    payload = _whatsapp_payload(
+        wa_id=_WA_ID, message_id="wamid.dates-not-open-insert-fails", body="hello"
+    )
+
+    response = _post(
+        webhook_client, payload, signature=_sign(json.dumps(payload).encode())
+    )
+
+    assert response.status_code == 200
+    assert sender.calls == [(_WA_ID, reply_text)]
+    assert _turn_status(caplog) == "processed"
+    assert _escalations(db_conn) == []
+    (event,) = _staff_follow_up_events(caplog)
+    assert event["event"] == "dates_not_open_escalation_failed"
+    assert event["exception_type"] == "OperationalError"
 
 
 # A cost no other value in these tests can coincide with, and the ask and
