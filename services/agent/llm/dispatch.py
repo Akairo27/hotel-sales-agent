@@ -43,8 +43,8 @@ the wrong one of the two, and unhandled. The except AllotmentNotFoundError
 below stays as a backstop for the narrow TOCTOU window between this
 check and compute_quote's own read. Every other pricing exception (a
 price_rules misconfiguration — IncompletePriceRuleChainError,
-InconsistentPriceConfigurationError — or NoMatchingBandError, whose only
-known trigger is the occupancy-1.0 band gap described below) is a
+InconsistentPriceConfigurationError — or NoMatchingBandError, a value
+outside its band domain that valid data never produces) is a
 business-data problem, not a customer-facing outcome, and is
 deliberately left to propagate: this module has no escalate tool to
 route it to — this PR scopes the agent to check_availability and
@@ -64,20 +64,17 @@ first of all (a check_in in the past is always an InvalidToolArgumentsError,
 whatever the inventory holds), so no inventory decision can ever stand in
 for a date problem. compute_quote itself never looks at
 free rooms: it only turns (reserved + held) / total into a demand
-multiplier, and occupancy of exactly 1.0 (a sold-out or zero-total night
-with no active price override, which skips occupancy entirely) falls
-outside every valid occupancy band, so it raised NoMatchingBandError --
-a failed turn (which, since CLAUDE.md rule 12, sends the customer the
-fallback and opens a pricing_error escalation rather than nothing). The
+multiplier, and prices a sold-out night (occupancy 1.0) at the top
+occupancy band (until 2026-09-29 that value fell outside every band and
+raised NoMatchingBandError, which the gate was masking). The
 gate declines a sold-out night with an override too: an
 override sets the price, not whether a room exists to sell. The check is
 advisory, a read and not a lock: the hold/booking path and the
 inventory_never_oversold constraint remain the only real guarantee
-against overselling, and a last room taken between this read and
-compute_quote's own per-night occupancy reads can still reach
-NoMatchingBandError -- a race whose window grows with the number of
-nights (an admin lowering a night's total to reserved + held triggers it
-today; a booking path would too once one is wired in). The unpriced
+against overselling. A last room taken between this read and
+compute_quote's own per-night occupancy reads -- a race whose window
+grows with the number of nights -- therefore gets a normal price; a quote
+is not a sale, and create_hold refuses the stay if no room is left. The unpriced
 result carries no room counts; its reason literal is the only thing it
 adds to what check_availability already exposes (an owner decision:
 counts stay hidden from the model -- a result-shape decision, not a

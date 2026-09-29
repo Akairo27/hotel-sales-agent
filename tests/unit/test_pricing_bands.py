@@ -65,3 +65,43 @@ def test_lookup_band_value_reusable_for_occupancy_shaped_bands() -> None:
         )
         == 15_000
     )
+
+
+# Occupancy's domain is closed at 1 (migration 0006): the band whose max is 1
+# must contain 1.0 itself -- a sold-out night.
+_OCCUPANCY_BANDS: list[dict[str, Any]] = [
+    {"min": 0.0, "max": 0.5, "multiplier_bps": 10_000},
+    {"min": 0.5, "max": 1, "multiplier_bps": 15_000},
+]
+
+
+def _occupancy_lookup(value: float, *, closed_domain_end: float | None = 1) -> int:
+    return lookup_band_value(
+        _OCCUPANCY_BANDS,
+        value,
+        min_key="min",
+        max_key="max",
+        value_key="multiplier_bps",
+        closed_domain_end=closed_domain_end,
+    )
+
+
+def test_lookup_band_value_closed_domain_end_belongs_to_the_band_ending_there() -> None:
+    assert _occupancy_lookup(1.0) == 15_000
+
+
+def test_lookup_band_value_interior_boundary_stays_exclusive_with_a_closed_end() -> (
+    None
+):
+    assert _occupancy_lookup(0.4999) == 10_000
+    assert _occupancy_lookup(0.5) == 15_000
+
+
+def test_lookup_band_value_domain_end_is_exclusive_unless_declared_closed() -> None:
+    with pytest.raises(NoMatchingBandError):
+        _occupancy_lookup(1.0, closed_domain_end=None)
+
+
+def test_lookup_band_value_raises_above_a_closed_domain_end() -> None:
+    with pytest.raises(NoMatchingBandError):
+        _occupancy_lookup(1.01)

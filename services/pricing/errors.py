@@ -64,8 +64,11 @@ class NoMatchingBandError(PricingError):
     """Raised when an occupancy or lead-time value falls outside every
     band in a demand_curve or min_profit_by_lead_time config.
 
-    Should not happen for a valid config — the price_rules CHECK
-    constraints guarantee full 0-to-open-ended (or 0-to-1) coverage — so
-    this signals either a negative lead time (a check_in in the past) or
-    a genuine data problem, not a normal pricing outcome.
+    Does not happen for a valid config and real inventory: the price_rules
+    CHECK constraints guarantee coverage of lead time from 0 upward and of
+    occupancy from 0 to 1 inclusive (a sold-out night included, since
+    2026-09-29 -- before that, lookup_band_value left occupancy 1.0 outside
+    every band). So this signals a value outside its domain -- a negative
+    lead time (a check_in in the past) or occupancy above 1 -- that is, a
+    genuine data problem, not a normal pricing outcome.
     """
