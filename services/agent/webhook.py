@@ -1314,7 +1314,7 @@ async def _escalate_unexpected_background_failure(
     funnel status. Never raises: there is nothing left to hand a failure
     to.
     """
-    return await _run_funnel_on_own_connection(
+    return await escalate_and_notify_on_own_connection(
         conversation_id=conversation_id,
         customer_phone=customer_phone,
         reason=_REASON_INTERNAL_ERROR,
@@ -1322,7 +1322,7 @@ async def _escalate_unexpected_background_failure(
     )
 
 
-async def _run_funnel_on_own_connection(
+async def escalate_and_notify_on_own_connection(
     *,
     conversation_id: int,
     customer_phone: str,
@@ -1332,11 +1332,12 @@ async def _run_funnel_on_own_connection(
     extra_notes: dict[str, str] | None = None,
 ) -> str:
     """_escalate_and_notify on a connection of its own, for a background
-    job that has none: the last-resort safety net, and the notices the
-    fast path schedules for a message the model never sees (a voice note,
-    an image, other media, the first message past the daily cap). Returns
-    the funnel status, or failed_unrecorded if not even a connection can
-    be opened. Never raises."""
+    job that has none: the last-resort safety net, the notices the fast
+    path schedules for a message the model never sees (a voice note, an
+    image, other media, the first message past the daily cap), and the
+    startup sweep (services/agent/startup_sweep.py). Returns the funnel
+    status, or failed_unrecorded if not even a connection can be opened.
+    Never raises."""
     try:
         with get_db_connection() as conn:
             return await _escalate_and_notify(
@@ -1465,7 +1466,7 @@ async def _send_notice_without_a_model_turn(
     daily cap: the funnel on a connection of its own (CLAUDE.md rule 12),
     then the same reply_turn_finished line every turn logs. Never
     raises."""
-    status = await _run_funnel_on_own_connection(
+    status = await escalate_and_notify_on_own_connection(
         conversation_id=conversation_id,
         customer_phone=customer_phone,
         reason=reason,
