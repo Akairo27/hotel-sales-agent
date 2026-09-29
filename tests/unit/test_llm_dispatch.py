@@ -24,6 +24,7 @@ from services.agent.llm.dispatch import (
     NIGHT_RESULT_KEYS,
     QUOTE_RESULT_KEYS,
     SEARCH_HOTELS_LOG_SUMMARY_KEYS,
+    TOOL_ERROR_RESULT_KEYS,
     StayArgs,
     UnpricedReason,
     _check_availability_log_summary,
@@ -36,8 +37,14 @@ from services.agent.llm.dispatch import (
     dispatch_tool,
     parse_search_hotels_args,
     quote_to_tool_result,
+    tool_error_result,
 )
-from services.agent.llm.errors import InvalidToolArgumentsError, UnknownToolError
+from services.agent.llm.errors import (
+    InvalidToolArgumentsError,
+    ToolErrorCode,
+    UnknownToolError,
+)
+from services.agent.llm.tools import TOOL_ERROR_MESSAGES
 from services.pricing.compute import NightPrice, Quote
 
 _NOT_A_CONNECTION = cast(Any, object())
@@ -375,6 +382,7 @@ def test_dispatch_get_quote_rejects_a_past_check_in_before_any_inventory_read(
         )
 
     assert str(exc_info.value) == "check_in must not be in the past"
+    assert exc_info.value.code == "past_check_in"
 
 
 def test_dispatch_get_quote_accepts_a_check_in_of_today(
@@ -429,6 +437,7 @@ def test_dispatch_tool_logs_and_reraises_invalid_tool_arguments_error(
     assert record["arguments"] == bad_args
     assert record["result_summary"] is None
     assert record["error_type"] == "InvalidToolArgumentsError"
+    assert record["error_code"] == "invalid_arguments"
 
 
 def test_dispatch_tool_logs_and_reraises_unknown_tool_error(
@@ -454,6 +463,45 @@ def test_dispatch_tool_logs_and_reraises_unknown_tool_error(
     assert record["arguments"] == {"anything": "goes"}
     assert record["result_summary"] is None
     assert record["error_type"] == "UnknownToolError"
+    assert record["error_code"] is None
+
+
+def test_dispatch_tool_logs_unresolved_stay_code_for_an_id_search_hotels_never_returned(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The resolved-stays guard raises before the connection is touched,
+    tagged unresolved_stay -- the code that picks the fixed message telling
+    the model to call search_hotels first."""
+    caplog.set_level(logging.INFO, logger="services.agent.llm.dispatch")
+
+    with pytest.raises(InvalidToolArgumentsError) as exc_info:
+        dispatch_tool(
+            _NOT_A_CONNECTION,
+            "check_availability",
+            _VALID_ARGS,
+            now=_UNUSED_NOW,
+            customer_phone=None,
+            conversation_id=None,
+            resolved_stays=set(),
+        )
+
+    assert exc_info.value.code == "unresolved_stay"
+    (record,) = [json.loads(r.getMessage()) for r in caplog.records]
+    assert record["error_code"] == "unresolved_stay"
+
+
+@pytest.mark.parametrize("code", get_args(ToolErrorCode))
+def test_tool_error_result_is_the_fixed_message_for_its_code_and_nothing_else(
+    code: ToolErrorCode,
+) -> None:
+    result = tool_error_result(code)
+
+    assert result.keys() == TOOL_ERROR_RESULT_KEYS
+    assert result == {"error": code, "message": TOOL_ERROR_MESSAGES[code]}
+
+
+def test_invalid_tool_arguments_error_defaults_to_the_generic_code() -> None:
+    assert InvalidToolArgumentsError("anything").code == "invalid_arguments"
 
 
 def test_logging_code_never_references_a_floor_or_cost_field_by_name() -> None:

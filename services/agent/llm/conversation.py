@@ -31,8 +31,8 @@ wrapped in exactly one try/except, which attaches the loop's current
 then re-raises it unchanged. This is deliberately the only place that
 attachment happens: every exception the loop can produce -- the two cap
 errors above, UsageUnavailableError, ModelUnavailableError,
-UnknownToolError, InvalidToolArgumentsError, ToolLoopLimitError, and any
-pricing exception dispatch.py lets propagate -- can follow real,
+UnknownToolError, ToolLoopLimitError, and any pricing exception dispatch.py
+lets propagate -- can follow real,
 already-paid-for model calls, and the caller (webhook.py) needs a single,
 type-agnostic way to ask "was there usage to record before this turn
 died," not a growing list of exception-specific cases to remember.
@@ -61,8 +61,9 @@ from services.agent.llm.context import (
     load_conversation_state,
     load_recent_messages,
 )
-from services.agent.llm.dispatch import ResolvedStay, dispatch_tool
+from services.agent.llm.dispatch import ResolvedStay, dispatch_tool, tool_error_result
 from services.agent.llm.errors import (
+    InvalidToolArgumentsError,
     ToolLoopLimitError,
     TurnCapExceededError,
     attach_usage_so_far,
@@ -171,7 +172,11 @@ async def generate_reply(
             transport could start a new attempt — see
             services.agent.llm.client's per-attempt budget check.
         ModelUnavailableError: the model transport failed.
-        UnknownToolError, InvalidToolArgumentsError: see dispatch.py.
+        UnknownToolError: see dispatch.py. InvalidToolArgumentsError from
+            a tool call is NOT raised: the model is handed
+            dispatch.tool_error_result for it and the loop goes on, so a
+            model that keeps sending bad arguments ends in
+            ToolLoopLimitError (or the turn budget) instead.
         Any exception services.pricing.compute_quote raises for a genuine
             pricing misconfiguration (see dispatch.py's module docstring)
             — deliberately left to propagate, not caught here.
@@ -242,15 +247,23 @@ async def generate_reply(
 
             results: list[ToolResult] = []
             for call in model_turn.tool_calls:
-                result = dispatch_tool(
-                    conn,
-                    call.name,
-                    call.args,
-                    now=now,
-                    customer_phone=state.customer_phone,
-                    conversation_id=state.id,
-                    resolved_stays=resolved_stays,
-                )
+                try:
+                    result = dispatch_tool(
+                        conn,
+                        call.name,
+                        call.args,
+                        now=now,
+                        customer_phone=state.customer_phone,
+                        conversation_id=state.id,
+                        resolved_stays=resolved_stays,
+                    )
+                except InvalidToolArgumentsError as exc:
+                    # A fixable model mistake, not a failed turn: the model
+                    # gets a fixed message for exc.code and its next call
+                    # (one more loop iteration, bounded by
+                    # MAX_TOOL_ITERATIONS and the turn budget like any
+                    # other) can correct itself or ask the customer.
+                    result = tool_error_result(exc.code)
                 tool_calls.append(
                     ToolCallRecord(name=call.name, args=call.args, result=result)
                 )

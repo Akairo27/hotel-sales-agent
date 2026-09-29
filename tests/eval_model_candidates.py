@@ -266,9 +266,11 @@ async def run_scenario(
     """Seeds a fresh database, runs the real generate_reply for the
     scenario's customer message, judges the reply with the real output
     guard, and records the outcome. Only LlmError (the model-side failure
-    family: unavailable, malformed usage, tool-loop limit, bad tool
-    arguments, ...) is recorded as an error; anything else is a bug in the
-    harness or its seed and is left to crash the run."""
+    family: unavailable, malformed usage, tool-loop limit, an unknown
+    tool, ...) is recorded as an error; anything else is a bug in the
+    harness or its seed and is left to crash the run. A bad tool argument
+    is not an error here: generate_reply hands the model a fixed tool
+    error and the turn goes on, as in production."""
     seed_eval_database(conn)
     conversation_id = seed_conversation(conn)
     seed_message(

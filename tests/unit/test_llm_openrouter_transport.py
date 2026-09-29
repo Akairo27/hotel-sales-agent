@@ -28,6 +28,7 @@ from services.agent.llm.client import (
     OpenRouterTransport,
     _OpenRouterAssistantMessage,
 )
+from services.agent.llm.dispatch import tool_error_result
 from services.agent.llm.errors import (
     LlmConfigurationError,
     ModelUnavailableError,
@@ -291,6 +292,24 @@ def test_a_tool_result_turn_becomes_one_tool_message_per_result() -> None:
         {"role": "tool", "tool_call_id": "call_0", "content": '{"priced": true}'},
         {"role": "tool", "tool_call_id": "call_1", "content": '{"ok": 1}'},
     ]
+
+
+def test_a_tool_error_result_is_sent_as_an_ordinary_tool_message() -> None:
+    """conversation.py hands a rejected call's tool_error_result back like
+    any other result -- it must reach OpenRouter intact, under the rejected
+    call's own tool_call_id."""
+    handler, requests = _sequence([_ok()])
+    error = tool_error_result("past_check_in")
+    results = ToolResultTurn(
+        results=(ToolResult(call_id="call_7", name="get_quote", result=error),)
+    )
+
+    _generate(_make_transport(handler), [UserTurn("q"), results])
+
+    (message,) = json.loads(requests[0].content)["messages"][2:]
+    assert message["role"] == "tool"
+    assert message["tool_call_id"] == "call_7"
+    assert json.loads(message["content"]) == error
 
 
 def test_an_unhandled_turn_type_fails_loudly() -> None:

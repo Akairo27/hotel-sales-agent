@@ -8,18 +8,30 @@ enforcement.py).
 
 from __future__ import annotations
 
+import asyncio
+import contextlib
 import hashlib
 import hmac
+from collections.abc import Iterator
+from dataclasses import dataclass, field
 from decimal import Decimal
+from typing import Any, cast
 
+import psycopg
 import pytest
 
+from services.agent import webhook as webhook_module
 from services.agent.llm.client import GeminiTransport, OpenRouterTransport
 from services.agent.llm.config import LlmSettings, OpenRouterRoute, load_llm_settings
 from services.agent.llm.errors import LlmConfigurationError
 from services.agent.llm.pricing import TokenRates
+from services.agent.output_guard.enforcement import (
+    OUTPUT_GUARD_FALLBACK_MESSAGE,
+    GuardVerdict,
+)
 from services.agent.webhook import (
     WebhookConfigurationError,
+    _funnel_status,
     _normalize_phone,
     _parse_inbound_message,
     _signature_is_valid,
@@ -276,3 +288,167 @@ def test_get_model_transport_builds_a_transport_for_the_shipped_glm_route() -> N
     )
 
     assert isinstance(get_model_transport(settings), OpenRouterTransport)
+
+
+# --- the no-silence funnel (CLAUDE.md rule 12) --------------------------------
+
+
+@pytest.mark.parametrize(
+    ("escalated", "delivered", "status"),
+    [
+        (True, True, "escalated"),
+        (True, False, "escalated_undelivered"),
+        (False, True, "notified_no_escalation"),
+        (False, False, "failed_unrecorded"),
+    ],
+)
+def test_funnel_status_names_every_combination_honestly(
+    escalated: bool, delivered: bool, status: str
+) -> None:
+    assert _funnel_status(escalated=escalated, delivered=delivered) == status
+
+
+@dataclass
+class _FakeConnection:
+    """Stands in for a psycopg connection: the funnel only ever asks it
+    whether it is closed. Everything that would run SQL on it is faked by
+    _FunnelFakes below."""
+
+    closed: bool = False
+
+
+@dataclass
+class _FunnelFakes:
+    """Replaces every database and WhatsApp call the funnel makes, and
+    records which connection each ran on. A call on a connection marked
+    closed fails the way psycopg does."""
+
+    fresh: _FakeConnection = field(default_factory=_FakeConnection)
+    close_after_insert: bool = False
+    escalations_on: list[_FakeConnection] = field(default_factory=list)
+    guard_checks_on: list[_FakeConnection] = field(default_factory=list)
+    sends: list[tuple[str, str]] = field(default_factory=list)
+
+    def install(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        def _open_escalation(conn: _FakeConnection, **_kwargs: Any) -> int:
+            self.escalations_on.append(conn)
+            if conn.closed:
+                raise psycopg.OperationalError("the connection is closed")
+            if self.close_after_insert:
+                conn.closed = True
+            return 42
+
+        def _enforce(conn: _FakeConnection, **_kwargs: Any) -> GuardVerdict:
+            self.guard_checks_on.append(conn)
+            if conn.closed:
+                raise psycopg.OperationalError("the connection is closed")
+            return GuardVerdict(
+                allowed=True, findings=(), quote_ids=(), escalation_id=None
+            )
+
+        fakes = self
+
+        class _Sender:
+            async def send_text(self, *, to_phone: str, body: str) -> str:
+                fakes.sends.append((to_phone, body))
+                return "wamid.OUTBOUND-UNIT"
+
+        @contextlib.contextmanager
+        def _fresh_connection() -> Iterator[_FakeConnection]:
+            yield self.fresh
+
+        monkeypatch.setattr(webhook_module, "open_escalation", _open_escalation)
+        monkeypatch.setattr(webhook_module, "enforce_outbound_text", _enforce)
+        monkeypatch.setattr(webhook_module, "get_whatsapp_send_settings", lambda: None)
+        monkeypatch.setattr(webhook_module, "get_whatsapp_sender", lambda _s: _Sender())
+        monkeypatch.setattr(
+            webhook_module, "_insert_outbound_message", lambda *_a, **_k: None
+        )
+        monkeypatch.setattr(webhook_module, "get_db_connection", _fresh_connection)
+
+
+def _run_funnel(conn: _FakeConnection) -> str:
+    return asyncio.run(
+        webhook_module._escalate_and_notify(
+            cast(Any, conn),
+            conversation_id=1,
+            customer_phone="+966500000001",
+            reason="internal_error",
+            exc=RuntimeError("anything"),
+        )
+    )
+
+
+def test_funnel_retries_both_halves_on_a_fresh_connection_when_its_own_died(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The turn's connection is already dead (the database itself is up):
+    the escalation and the fallback both fail on it, and both are retried,
+    once, on a fresh connection -- one lost connection is not a silent
+    turn."""
+    fakes = _FunnelFakes()
+    fakes.install(monkeypatch)
+    dead = _FakeConnection(closed=True)
+
+    status = _run_funnel(dead)
+
+    assert status == "escalated"
+    assert fakes.escalations_on == [dead, fakes.fresh]
+    assert fakes.guard_checks_on == [dead, fakes.fresh]
+    assert fakes.sends == [("966500000001", OUTPUT_GUARD_FALLBACK_MESSAGE)]
+
+
+def test_funnel_retries_only_the_failed_half_so_nothing_is_opened_or_sent_twice(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The escalation was opened, then the connection died before the
+    fallback: only the fallback is retried -- a second escalation for the
+    same turn would be noise for the human handling it."""
+    fakes = _FunnelFakes(close_after_insert=True)
+    fakes.install(monkeypatch)
+    conn = _FakeConnection()
+
+    status = _run_funnel(conn)
+
+    assert status == "escalated"
+    assert fakes.escalations_on == [conn]
+    assert fakes.guard_checks_on == [conn, fakes.fresh]
+    assert len(fakes.sends) == 1
+
+
+def test_funnel_does_not_reconnect_when_its_connection_is_fine(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A failure that is not a lost connection (here the send itself) is
+    reported honestly and not retried on a new connection."""
+    fakes = _FunnelFakes()
+    fakes.install(monkeypatch)
+
+    async def _refused(*_args: Any, **_kwargs: Any) -> None:
+        return None
+
+    monkeypatch.setattr(webhook_module, "_send_or_log_failure", _refused)
+
+    def _no_reconnect() -> Any:
+        raise AssertionError("the funnel must not reconnect for this failure")
+
+    monkeypatch.setattr(webhook_module, "get_db_connection", _no_reconnect)
+
+    assert _run_funnel(_FakeConnection()) == "escalated_undelivered"
+
+
+def test_funnel_reports_failed_unrecorded_when_no_fresh_connection_opens(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The database is really down: the retry cannot open a connection
+    either. Logged, never raised -- the documented residual."""
+    fakes = _FunnelFakes()
+    fakes.install(monkeypatch)
+
+    def _database_down() -> Any:
+        raise psycopg.OperationalError("connection refused")
+
+    monkeypatch.setattr(webhook_module, "get_db_connection", _database_down)
+
+    assert _run_funnel(_FakeConnection(closed=True)) == "failed_unrecorded"
+    assert fakes.sends == []
