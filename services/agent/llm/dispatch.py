@@ -111,7 +111,7 @@ from typing import Any, Literal
 
 import psycopg
 
-from lib.money import format_halalas_as_sar
+from lib.money import format_halalas_as_arabic_riyal, format_halalas_as_sar
 from services.agent.hotel_profile import is_hotel_profile_complete
 from services.agent.llm.errors import (
     InvalidToolArgumentsError,
@@ -245,14 +245,24 @@ QUOTE_RESULT_KEYS = frozenset(
         "check_out",
         "rooms",
         "total_price_display",
+        "total_price_display_ar",
         "nights",
         "negotiation_open",
     }
 )
 UNPRICED_RESULT_KEYS = frozenset(
-    {"priced", "reason", "hotel_id", "room_type_id", "check_in", "check_out"}
+    {
+        "priced",
+        "reason",
+        "hotel_id",
+        "room_type_id",
+        "check_in",
+        "check_out",
+        "unavailable_nights",
+        "nights_without_allotment",
+    }
 )
-NIGHT_RESULT_KEYS = frozenset({"date", "price_display"})
+NIGHT_RESULT_KEYS = frozenset({"date", "price_display", "price_display_ar"})
 TOOL_ERROR_RESULT_KEYS = frozenset({"error", "message"})
 
 
@@ -530,7 +540,12 @@ def dispatch_search_hotels(
 
 def quote_to_tool_result(quote: Quote) -> dict[str, Any]:
     """Converts a priced Quote into the exact, cost-free dict shape sent
-    to the model. See the module docstring for why this exists.
+    to the model. See the module docstring for why this exists. Every
+    price comes twice, the same number with a different currency word:
+    *_display ("1,250.00 SAR") for English and Indonesian replies and
+    *_display_ar ("1,250.00 ريال") for Arabic ones (prompt.py's
+    price_currency_word) -- so the model copies a finished string in
+    either language and never relabels a price itself.
     """
     return {
         "priced": True,
@@ -541,10 +556,12 @@ def quote_to_tool_result(quote: Quote) -> dict[str, Any]:
         "check_out": quote.check_out.isoformat(),
         "rooms": quote.rooms,
         "total_price_display": format_halalas_as_sar(quote.ask_price_total),
+        "total_price_display_ar": format_halalas_as_arabic_riyal(quote.ask_price_total),
         "nights": [
             {
                 "date": night.stay_date.isoformat(),
                 "price_display": format_halalas_as_sar(night.ask),
+                "price_display_ar": format_halalas_as_arabic_riyal(night.ask),
             }
             for night in quote.nights
         ],
@@ -593,11 +610,22 @@ def _unpriced_result(
 
 
 def dispatch_check_availability(
-    conn: psycopg.Connection[Any], args: dict[str, Any]
+    conn: psycopg.Connection[Any], args: dict[str, Any], *, now: datetime
 ) -> dict[str, Any]:
     """Executes check_availability. Never touches cost — this tool never
-    returns anything price-related at all."""
+    returns anything price-related at all.
+
+    A check_in before today is rejected before any inventory read, the
+    same as get_quote (owner decision, 2026-09-30): a date without a year
+    that has already passed this year must be confirmed with the customer,
+    never answered with the availability of a past night.
+
+    Raises:
+        InvalidToolArgumentsError: the arguments fail validation, or
+            check_in is in the past (code past_check_in).
+    """
     stay = parse_stay_args(args)
+    _require_check_in_not_past(stay, now)
     availability = _stay_availability_for(conn, stay)
     return {
         "available": availability.is_available,
@@ -814,7 +842,7 @@ def dispatch_tool(
             return result
         if name == CHECK_AVAILABILITY_TOOL:
             _require_resolved_stay(parse_stay_args(args), resolved_stays)
-            result = dispatch_check_availability(conn, args)
+            result = dispatch_check_availability(conn, args, now=now)
             _log_tool_call(
                 conversation_id=conversation_id,
                 tool_name=name,

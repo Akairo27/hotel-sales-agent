@@ -193,13 +193,13 @@ def test_check_availability_dispatch_reflects_real_inventory(
         "rooms": 5,
     }
 
-    available = dispatch_check_availability(db_conn, args)
+    available = dispatch_check_availability(db_conn, args, now=_NOW)
     assert available["available"] is True
     assert available["unavailable_nights"] == []
     assert available["nights_without_allotment"] == []
 
     args["rooms"] = 6
-    short = dispatch_check_availability(db_conn, args)
+    short = dispatch_check_availability(db_conn, args, now=_NOW)
     assert short["available"] is False
     assert short["unavailable_nights"] == ["2026-09-10", "2026-09-11"]
     assert short["nights_without_allotment"] == []
@@ -213,7 +213,7 @@ def test_check_availability_dispatch_lists_nights_not_open_for_booking_apart(
     hotel_id, room_type_id = _seed_stay_with_inventory(db_conn, [(5, 0, 0), (5, 5, 0)])
     args = _stay_args(hotel_id, room_type_id, nights=3, rooms=1)
 
-    result = dispatch_check_availability(db_conn, args)
+    result = dispatch_check_availability(db_conn, args, now=_NOW)
 
     assert result == {
         "available": False,

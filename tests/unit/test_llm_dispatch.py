@@ -25,6 +25,7 @@ from services.agent.llm.dispatch import (
     QUOTE_RESULT_KEYS,
     SEARCH_HOTELS_LOG_SUMMARY_KEYS,
     TOOL_ERROR_RESULT_KEYS,
+    UNPRICED_RESULT_KEYS,
     StayArgs,
     UnpricedReason,
     _check_availability_log_summary,
@@ -76,13 +77,47 @@ def test_dispatch_check_availability_rejects_bad_args_without_touching_conn(
 ) -> None:
     args = {**_VALID_ARGS, **mutation}
     with pytest.raises(InvalidToolArgumentsError, match=match):
-        dispatch_check_availability(_NOT_A_CONNECTION, args)
+        dispatch_check_availability(_NOT_A_CONNECTION, args, now=_UNUSED_NOW)
 
 
 def test_dispatch_check_availability_rejects_missing_field() -> None:
     args = {k: v for k, v in _VALID_ARGS.items() if k != "rooms"}
     with pytest.raises(InvalidToolArgumentsError, match="rooms"):
-        dispatch_check_availability(_NOT_A_CONNECTION, args)
+        dispatch_check_availability(_NOT_A_CONNECTION, args, now=_UNUSED_NOW)
+
+
+def test_dispatch_check_availability_rejects_a_past_check_in_before_any_read(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The same backstop as get_quote (owner decision, 2026-09-30): a past
+    date without a year must be confirmed with the customer, never answered
+    with the availability of a night that has gone."""
+    monkeypatch.setattr(dispatch_module, "stay_availability", _must_not_be_called)
+
+    with pytest.raises(InvalidToolArgumentsError) as exc_info:
+        dispatch_check_availability(
+            _NOT_A_CONNECTION,
+            _VALID_ARGS,  # check_in 2026-09-01
+            now=datetime(2026, 10, 1, tzinfo=UTC),
+        )
+
+    assert exc_info.value.code == "past_check_in"
+
+
+def test_unpriced_result_keys_match_the_whitelist(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _stub_stay_availability(monkeypatch, unavailable_nights=(date(2026, 9, 2),))
+
+    result = dispatch_get_quote(
+        _NOT_A_CONNECTION,
+        _VALID_ARGS,
+        now=_UNUSED_NOW,
+        customer_phone=None,
+        conversation_id=None,
+    )
+
+    assert result.keys() == UNPRICED_RESULT_KEYS
 
 
 def test_dispatch_get_quote_rejects_bad_args_without_touching_conn() -> None:
@@ -198,6 +233,8 @@ def test_quote_to_tool_result_formats_prices_as_display_strings_not_raw_integers
     result = quote_to_tool_result(_quote_with_full_cost_detail())
     assert result["total_price_display"] == "150.00 SAR"
     assert result["nights"][0]["price_display"] == "150.00 SAR"
+    assert result["total_price_display_ar"] == "150.00 ريال"
+    assert result["nights"][0]["price_display_ar"] == "150.00 ريال"
     assert isinstance(result["total_price_display"], str)
 
 

@@ -59,6 +59,7 @@ from services.agent.llm.config import (
 from services.agent.llm.context import (
     build_contents,
     load_conversation_state,
+    load_current_stay,
     load_recent_messages,
 )
 from services.agent.llm.dispatch import ResolvedStay, dispatch_tool, tool_error_result
@@ -201,7 +202,10 @@ async def generate_reply(
     turns: list[Turn] = build_contents(messages)
     today = riyadh_calendar_day(now)
     system_instruction = render_system_instruction(
-        customer_name=customer_name, today=today, today_hijri=to_hijri(today)
+        customer_name=customer_name,
+        today=today,
+        today_hijri=to_hijri(today),
+        current_stay=load_current_stay(conn, conversation_id),
     )
 
     tool_calls: list[ToolCallRecord] = []

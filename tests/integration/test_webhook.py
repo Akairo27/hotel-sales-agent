@@ -109,8 +109,10 @@ _OTHER_WA_ID = "966500000002"
 _HARMLESS_AVAILABILITY_ARGS = {
     "hotel_id": 1,
     "room_type_id": 1,
-    "check_in": "2026-01-01",
-    "check_out": "2026-01-02",
+    # In the future: check_availability rejects a past check_in
+    # (past_check_in) before reading any inventory.
+    "check_in": "2031-01-01",
+    "check_out": "2031-01-02",
     "rooms": 1,
 }
 
@@ -276,8 +278,8 @@ class _ToolCallingTransport:
                 args={
                     "hotel_id": self.hotel_id,
                     "room_type_id": self.room_type_id,
-                    "check_in": "2026-01-01",
-                    "check_out": "2026-01-02",
+                    "check_in": _HARMLESS_AVAILABILITY_ARGS["check_in"],
+                    "check_out": _HARMLESS_AVAILABILITY_ARGS["check_out"],
                     "rooms": 1,
                 },
             )

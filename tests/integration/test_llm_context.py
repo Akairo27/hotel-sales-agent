@@ -6,7 +6,7 @@ number never reaches the model's context.
 
 from __future__ import annotations
 
-from datetime import date
+from datetime import UTC, date, datetime, timedelta
 from typing import Any
 
 import psycopg
@@ -14,13 +14,20 @@ import pytest
 
 from lib.hijri import to_hijri
 from services.agent.llm.context import (
+    CurrentStay,
     build_contents,
     load_conversation_state,
+    load_current_stay,
     load_recent_messages,
 )
 from services.agent.llm.model_types import ModelTurn, UserTurn
 from services.agent.llm.prompt import render_system_instruction
-from tests.integration._seed import seed_conversation, seed_message
+from tests.integration._seed import (
+    seed_conversation,
+    seed_hotel_and_room_type,
+    seed_message,
+    seed_quote,
+)
 
 pytestmark = pytest.mark.usefixtures("db_conn")
 
@@ -87,7 +94,10 @@ def test_customer_phone_never_appears_in_any_built_content_or_the_system_instruc
 
     haystacks: list[str] = [
         render_system_instruction(
-            customer_name="Ahmed", today=_TODAY, today_hijri=to_hijri(_TODAY)
+            customer_name="Ahmed",
+            today=_TODAY,
+            today_hijri=to_hijri(_TODAY),
+            current_stay=load_current_stay(db_conn, conversation_id),
         )
     ]
     for turn in turns:
@@ -99,3 +109,92 @@ def test_customer_phone_never_appears_in_any_built_content_or_the_system_instruc
     for haystack in haystacks:
         for variant in _PHONE_VARIANTS:
             assert variant not in haystack
+
+
+def test_load_current_stay_is_none_before_any_quote(
+    db_conn: psycopg.Connection[Any],
+) -> None:
+    conversation_id = seed_conversation(db_conn, customer_phone=_PHONE)
+    seed_message(db_conn, conversation_id, direction="inbound", body="hello")
+
+    assert load_current_stay(db_conn, conversation_id) is None
+
+
+def test_load_current_stay_is_the_sessions_latest_quote(
+    db_conn: psycopg.Connection[Any],
+) -> None:
+    """The stay the customer last got a price for, with the hotel and room
+    type names the model can say -- the dates changed between the two
+    quotes, and the newer ones win."""
+    hotel_id, room_type_id = seed_hotel_and_room_type(db_conn)
+    conversation_id = seed_conversation(db_conn, customer_phone=_PHONE)
+    now = datetime.now(UTC)
+    seed_message(
+        db_conn,
+        conversation_id,
+        direction="inbound",
+        body="a room please",
+        created_at=now - timedelta(minutes=5),
+    )
+    seed_quote(
+        db_conn,
+        hotel_id,
+        room_type_id,
+        conversation_id=conversation_id,
+        created_at=now - timedelta(minutes=2),
+        check_in=date(2026, 10, 20),
+        check_out=date(2026, 10, 22),
+    )
+    seed_quote(
+        db_conn,
+        hotel_id,
+        room_type_id,
+        conversation_id=conversation_id,
+        created_at=now - timedelta(minutes=1),
+        check_in=date(2026, 10, 21),
+        check_out=date(2026, 10, 24),
+        rooms=2,
+    )
+
+    assert load_current_stay(db_conn, conversation_id) == CurrentStay(
+        hotel_name="Test Hotel",
+        room_type_name="Standard",
+        check_in=date(2026, 10, 21),
+        check_out=date(2026, 10, 24),
+        rooms=2,
+    )
+
+
+def test_load_current_stay_ignores_a_quote_from_an_earlier_session(
+    db_conn: psycopg.Connection[Any],
+) -> None:
+    """A stay priced before an idle gap never comes back as "current"."""
+    hotel_id, room_type_id = seed_hotel_and_room_type(db_conn)
+    conversation_id = seed_conversation(db_conn, customer_phone=_PHONE)
+    now = datetime.now(UTC)
+    earlier = now - timedelta(hours=10)
+    seed_message(
+        db_conn, conversation_id, direction="inbound", body="then", created_at=earlier
+    )
+    seed_quote(
+        db_conn,
+        hotel_id,
+        room_type_id,
+        conversation_id=conversation_id,
+        created_at=earlier + timedelta(minutes=1),
+    )
+    seed_message(
+        db_conn, conversation_id, direction="inbound", body="now", created_at=now
+    )
+
+    assert load_current_stay(db_conn, conversation_id) is None
+
+
+def test_load_current_stay_is_none_for_a_conversation_without_messages(
+    db_conn: psycopg.Connection[Any],
+) -> None:
+    hotel_id, room_type_id = seed_hotel_and_room_type(db_conn)
+    conversation_id = seed_conversation(db_conn, customer_phone=_PHONE)
+    seed_quote(db_conn, hotel_id, room_type_id, conversation_id=conversation_id)
+
+    assert load_current_stay(db_conn, conversation_id) is None

@@ -27,6 +27,7 @@ generate_reply from that payload, never write it to the database.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import date
 from typing import Any
 
 import psycopg
@@ -104,6 +105,60 @@ def load_recent_messages(
     messages = [MessageRecord(direction=row[0], body=row[1]) for row in rows]
     messages.reverse()
     return messages
+
+
+@dataclass(frozen=True)
+class CurrentStay:
+    """The stay the session's latest quote priced -- what the system prompt
+    names as the current stay (prompt.render_system_instruction). No
+    price and no cost: only what the customer asked for."""
+
+    hotel_name: str
+    room_type_name: str
+    check_in: date
+    check_out: date
+    rooms: int
+
+
+_CURRENT_STAY_SQL = """
+    SELECT h.hotel_name, rt.room_type_name, q.check_in, q.check_out, q.rooms
+    FROM quotes AS q
+    JOIN hotels AS h ON h.id = q.hotel_id
+    JOIN room_types AS rt ON rt.id = q.room_type_id
+    WHERE q.conversation_id = %s AND q.created_at >= %s
+    ORDER BY q.created_at DESC, q.id DESC
+    LIMIT 1
+"""
+
+
+def load_current_stay(
+    conn: psycopg.Connection[Any], conversation_id: int
+) -> CurrentStay | None:
+    """The current session's most recently quoted stay, or None when the
+    session has no quote yet (or no messages at all).
+
+    Why this exists: the model sees only the last MESSAGE_WINDOW messages
+    and never the tool arguments of earlier turns, so once replies stop
+    repeating the stay's dates (owner decision, 2026-09-30, prompt.py's
+    relative_date_resolution) this line is what keeps the stay in view.
+    Session-scoped like the message window and the output guard's quotes
+    (session.load_session_start), so a stay from an earlier session never
+    comes back.
+    """
+    session_start = load_session_start(conn, conversation_id)
+    if session_start is None:
+        return None
+    row = conn.execute(_CURRENT_STAY_SQL, (conversation_id, session_start)).fetchone()
+    if row is None:
+        return None
+    hotel_name, room_type_name, check_in, check_out, rooms = row
+    return CurrentStay(
+        hotel_name=hotel_name,
+        room_type_name=room_type_name,
+        check_in=check_in,
+        check_out=check_out,
+        rooms=int(rooms),
+    )
 
 
 def build_contents(messages: list[MessageRecord]) -> list[Turn]:

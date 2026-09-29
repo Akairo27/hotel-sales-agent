@@ -1,7 +1,8 @@
 """Unit tests for the tool-calling loop itself, with no database and no
-network: load_conversation_state, load_recent_messages, and dispatch_tool
-are monkeypatched to fakes, and the model transport is a fake driven by a
-canned list of provider-neutral responses (services.agent.llm.model_types).
+network: load_conversation_state, load_recent_messages, load_current_stay
+and dispatch_tool are monkeypatched to fakes, and the model transport is a
+fake driven by a canned list of provider-neutral responses
+(services.agent.llm.model_types).
 What this file actually exercises is conversation.py's own orchestration —
 the turn cap, the tool-call -> tool-result round trip, usage accumulation,
 and the loop-iteration limit — not context.py or dispatch.py, which have
@@ -14,7 +15,7 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from decimal import Decimal
 from typing import Any, get_args
 
@@ -22,7 +23,7 @@ import pytest
 
 from services.agent.llm import conversation as conversation_module
 from services.agent.llm.config import MAX_TOOL_ITERATIONS, LlmSettings
-from services.agent.llm.context import ConversationState
+from services.agent.llm.context import ConversationState, CurrentStay
 from services.agent.llm.conversation import UsageTotals, generate_reply
 from services.agent.llm.dispatch import tool_error_result
 from services.agent.llm.errors import (
@@ -125,6 +126,9 @@ def _stub_conversation_state(
         conversation_module,
         "load_recent_messages",
         lambda _conn, _conversation_id, **_kwargs: [],
+    )
+    monkeypatch.setattr(
+        conversation_module, "load_current_stay", lambda _conn, _conversation_id: None
     )
     monkeypatch.setattr(
         conversation_module,
@@ -664,3 +668,58 @@ def test_max_tool_iterations_is_the_owner_approved_six() -> None:
     """A deliberate owner decision (2026-09-29), not a tuning knob to
     change in passing: the turn budget, not this count, bounds the wait."""
     assert MAX_TOOL_ITERATIONS == 6
+
+
+@dataclass
+class _InstructionRecordingTransport:
+    """Answers with plain text and records every system instruction."""
+
+    instructions: list[str] = field(default_factory=list)
+
+    async def generate(
+        self, *, turns: list[Turn], system_instruction: str, deadline: float
+    ) -> ModelResponse:
+        del turns, deadline
+        self.instructions.append(system_instruction)
+        return _text_response("hello")
+
+
+def test_generate_reply_names_the_sessions_current_stay_in_the_system_instruction(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Replies no longer repeat the stay's dates, so the stay the session's
+    latest quote priced is what keeps it in the model's view."""
+    _stub_conversation_state(monkeypatch, turn_count=0)
+    stay = CurrentStay(
+        hotel_name="Test Hotel",
+        room_type_name="Deluxe",
+        check_in=date(2026, 10, 20),
+        check_out=date(2026, 10, 22),
+        rooms=2,
+    )
+    loaded_for: list[int] = []
+
+    def _load_current_stay(_conn: Any, conversation_id: int) -> CurrentStay:
+        loaded_for.append(conversation_id)
+        return stay
+
+    monkeypatch.setattr(conversation_module, "load_current_stay", _load_current_stay)
+    transport = _InstructionRecordingTransport()
+
+    asyncio.run(
+        generate_reply(
+            _NOT_A_CONNECTION,
+            conversation_id=7,
+            customer_name=None,
+            transport=transport,
+            settings=_SETTINGS,
+            now=_NOW,
+        )
+    )
+
+    assert loaded_for == [7]
+    (instruction,) = transport.instructions
+    assert (
+        "The current stay in this conversation, from its latest quote: Test Hotel, "
+        "Deluxe, check-in 2026-10-20, check-out 2026-10-22, 2 rooms."
+    ) in instruction
