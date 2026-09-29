@@ -64,6 +64,19 @@ of whether tests pass.
     Add the `FOR SELECT` policy in the same migration as the write policy,
     never as an afterthought once a write mysteriously no-ops.
 
+12. **Never leave a customer in silence.** A customer message the agent
+    accepts ends in one of two ways: the reply is delivered, or the turn
+    goes through the one funnel (`services/agent/webhook.py`'s
+    `_escalate_and_notify`), which always attempts BOTH the standard
+    fallback message to the customer AND a human escalation, each
+    independently of the other. A failed turn -- any exception, a blank or
+    unsendable reply, a failed send -- is never allowed to end any other
+    way; never add a code path that ends a turn with neither a reply nor
+    that funnel. What no code can fix (WhatsApp refusing every send, the
+    database being down, a hard kill) and the few deliberate silences are
+    listed in `ARCHITECTURE.md` §7 ("لا صمت"), each with the owner's
+    approval; a new entry needs the same.
+
 ---
 
 ## 1. Forbidden Shortcuts

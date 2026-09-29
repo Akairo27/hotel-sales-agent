@@ -26,6 +26,9 @@ whichever provider's wire format a transport actually needs.
 
 from __future__ import annotations
 
+from collections.abc import Mapping
+
+from services.agent.llm.errors import ToolErrorCode
 from services.agent.llm.model_types import ToolDeclaration
 
 # Mirrors the closed lists migration 0028 enforces on hotels.city/hotels.zone
@@ -156,3 +159,29 @@ AGENT_TOOLS: tuple[ToolDeclaration, ...] = (
     CHECK_AVAILABILITY,
     GET_QUOTE,
 )
+
+# The only text the model ever receives when a tool call's arguments are
+# rejected (services.agent.llm.dispatch.tool_error_result) -- one fixed,
+# reviewed message per ToolErrorCode, owner-approved as three distinct
+# messages (2026-09-29) so the model can tell a date problem from an id
+# problem. Never the exception's own text: that can quote the model's (or
+# a customer's) argument values back verbatim, which would hand injected
+# text a second route into the model's context.
+TOOL_ERROR_MESSAGES: Mapping[ToolErrorCode, str] = {
+    "past_check_in": (
+        "Not done: the check-in date is before today. Confirm the dates with "
+        "the customer, then call the tool again with a check-in date of today "
+        "or later."
+    ),
+    "unresolved_stay": (
+        "Not done: this hotel_id and room_type_id were not returned by "
+        "search_hotels in this conversation turn. Call search_hotels to find "
+        "the real ids first; never guess an id or reuse one the customer "
+        "typed."
+    ),
+    "invalid_arguments": (
+        "Not done: the arguments for this tool call were invalid. Check every "
+        "required field and its format, and ask the customer for anything you "
+        "do not know instead of guessing."
+    ),
+}

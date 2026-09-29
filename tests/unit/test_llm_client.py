@@ -33,6 +33,7 @@ from services.agent.llm.client import (
     _retry_delay_seconds,
 )
 from services.agent.llm.config import LlmSettings
+from services.agent.llm.dispatch import tool_error_result
 from services.agent.llm.errors import (
     ModelUnavailableError,
     TurnBudgetExceededError,
@@ -577,6 +578,45 @@ def test_generate_treats_absent_thinking_tokens_as_zero(
     )
 
     assert response.usage.candidates_tokens == 2
+
+
+def test_generate_sends_a_tool_error_result_as_a_function_response(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """conversation.py hands a rejected call's tool_error_result back like
+    any other result -- it must reach Gemini intact, as the function
+    response for that tool's name."""
+    transport = GeminiTransport(_SETTINGS)
+    captured_contents: list[list[types.Content]] = []
+
+    async def _capture(
+        *, model: str, contents: list[types.Content], config: object
+    ) -> types.GenerateContentResponse:
+        del model, config
+        captured_contents.append(contents)
+        return _text_response("ok")
+
+    monkeypatch.setattr(transport._client.aio.models, "generate_content", _capture)
+    error = tool_error_result("unresolved_stay")
+    turns: list[Turn] = [
+        UserTurn(text="a room please"),
+        ToolResultTurn(
+            results=(ToolResult(call_id="call_0", name="get_quote", result=error),)
+        ),
+    ]
+
+    asyncio.run(
+        transport.generate(
+            turns=turns, system_instruction="be helpful", deadline=_FAR_FUTURE_DEADLINE
+        )
+    )
+
+    result_content = captured_contents[0][1]
+    assert result_content.parts is not None
+    function_response = result_content.parts[0].function_response
+    assert function_response is not None
+    assert function_response.name == "get_quote"
+    assert function_response.response == error
 
 
 def test_generate_translates_conversation_history_into_gemini_contents(

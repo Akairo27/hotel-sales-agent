@@ -27,7 +27,10 @@ consumer (this log) is protected by for free.
 Arguments come from the model, which can hallucinate types, omit
 required fields, or send a date range that fails the underlying
 services' own validation — all of that is InvalidToolArgumentsError, an
-expected failure mode of a function-calling model, not a bug here. A
+expected failure mode of a function-calling model, not a bug here. This
+module still raises it (and logs it with its ToolErrorCode); the loop in
+conversation.py turns it into tool_error_result's fixed message for the
+model, so a bad argument never ends the turn on its own. A
 missing allotment for the requested dates is likewise reported back as
 an unpriced result rather than raised, so the model can tell the
 customer rather than the whole turn failing — dispatch_get_quote checks
@@ -64,8 +67,9 @@ free rooms: it only turns (reserved + held) / total into a demand
 multiplier, and occupancy of exactly 1.0 (a sold-out or zero-total night
 with no active price override, which skips occupancy entirely) falls
 outside every valid occupancy band, so it raised NoMatchingBandError --
-which would reach a customer as silence (a turn_failed turn sends
-nothing). The gate declines a sold-out night with an override too: an
+a failed turn (which, since CLAUDE.md rule 12, sends the customer the
+fallback and opens a pricing_error escalation rather than nothing). The
+gate declines a sold-out night with an override too: an
 override sets the price, not whether a room exists to sell. The check is
 advisory, a read and not a lock: the hold/booking path and the
 inventory_never_oversold constraint remain the only real guarantee
@@ -105,7 +109,12 @@ import psycopg
 
 from lib.money import format_halalas_as_sar
 from services.agent.hotel_profile import is_hotel_profile_complete
-from services.agent.llm.errors import InvalidToolArgumentsError, UnknownToolError
+from services.agent.llm.errors import (
+    InvalidToolArgumentsError,
+    ToolErrorCode,
+    UnknownToolError,
+)
+from services.agent.llm.tools import TOOL_ERROR_MESSAGES
 from services.inventory.operations import check_availability
 from services.pricing.compute import Quote, compute_quote
 from services.pricing.errors import AllotmentNotFoundError
@@ -240,6 +249,7 @@ UNPRICED_RESULT_KEYS = frozenset(
     {"priced", "reason", "hotel_id", "room_type_id", "check_in", "check_out"}
 )
 NIGHT_RESULT_KEYS = frozenset({"date", "price_display"})
+TOOL_ERROR_RESULT_KEYS = frozenset({"error", "message"})
 
 
 @dataclass(frozen=True)
@@ -618,7 +628,9 @@ def _require_check_in_not_past(stay: StayArgs, now: datetime) -> None:
         InvalidToolArgumentsError: check_in is earlier than now's date.
     """
     if stay.check_in < now.date():
-        raise InvalidToolArgumentsError("check_in must not be in the past")
+        raise InvalidToolArgumentsError(
+            "check_in must not be in the past", code="past_check_in"
+        )
 
 
 def dispatch_get_quote(
@@ -711,8 +723,17 @@ def _require_resolved_stay(stay: StayArgs, resolved_stays: set[ResolvedStay]) ->
     if (stay.hotel_id, stay.room_type_id) not in resolved_stays:
         raise InvalidToolArgumentsError(
             f"hotel_id={stay.hotel_id}, room_type_id={stay.room_type_id} was not "
-            "returned by search_hotels in this conversation turn"
+            "returned by search_hotels in this conversation turn",
+            code="unresolved_stay",
         )
+
+
+def tool_error_result(code: ToolErrorCode) -> dict[str, Any]:
+    """The result handed back to the model in place of a rejected tool
+    call's output -- built only from the closed ToolErrorCode set and its
+    fixed message (tools.TOOL_ERROR_MESSAGES), never from the exception's
+    own text or the call's arguments. Key set is TOOL_ERROR_RESULT_KEYS."""
+    return {"error": code, "message": TOOL_ERROR_MESSAGES[code]}
 
 
 def _log_tool_call(
@@ -722,12 +743,16 @@ def _log_tool_call(
     args: dict[str, Any],
     result_summary: dict[str, Any] | None,
     error_type: str | None,
+    error_code: ToolErrorCode | None = None,
 ) -> None:
     """The one place a model tool call is logged — CLAUDE.md rule 8. Never
     logs cost or any other floor-related pricing field: `args` is the
     tool's own input (verified free of those by every declared tool's
     schema in tools.py), and `result_summary` is always one of the two
     hand-built whitelists above, never a spread of the tool's result dict.
+    error_code is set only for an InvalidToolArgumentsError -- one of the
+    closed ToolErrorCode literals, so the journal shows which fixed message
+    the model was handed without logging the exception's text.
     """
     logger.info(
         json.dumps(
@@ -738,6 +763,7 @@ def _log_tool_call(
                 "arguments": args,
                 "result_summary": result_summary,
                 "error_type": error_type,
+                "error_code": error_code,
             }
         )
     )
@@ -821,5 +847,6 @@ def dispatch_tool(
             args=args,
             result_summary=None,
             error_type=type(exc).__name__,
+            error_code=exc.code if isinstance(exc, InvalidToolArgumentsError) else None,
         )
         raise

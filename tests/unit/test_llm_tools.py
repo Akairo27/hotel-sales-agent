@@ -1,15 +1,19 @@
 from __future__ import annotations
 
+from typing import get_args
+
 from services.agent.llm.dispatch import (
     CHECK_AVAILABILITY_TOOL,
     GET_QUOTE_TOOL,
     SEARCH_HOTELS_TOOL,
 )
+from services.agent.llm.errors import ToolErrorCode
 from services.agent.llm.tools import (
     AGENT_TOOLS,
     CHECK_AVAILABILITY,
     GET_QUOTE,
     SEARCH_HOTELS,
+    TOOL_ERROR_MESSAGES,
 )
 
 _EXPECTED_STAY_ARGS = {"hotel_id", "room_type_id", "check_in", "check_out", "rooms"}
@@ -79,6 +83,15 @@ def test_get_quote_description_says_it_checks_availability_itself() -> None:
     description = GET_QUOTE.description
     assert "checks availability itself" in description
     assert "priced=false" in description
+
+
+def test_tool_error_messages_cover_exactly_the_tool_error_codes() -> None:
+    """One fixed message per ToolErrorCode (owner decision: three messages)
+    -- a code added without a message would KeyError mid-turn, and a
+    message without a code could never be sent."""
+    assert set(TOOL_ERROR_MESSAGES) == set(get_args(ToolErrorCode))
+    for message in TOOL_ERROR_MESSAGES.values():
+        assert message.startswith("Not done:")
 
 
 def test_agent_tools_declares_exactly_the_three_read_only_tools() -> None:

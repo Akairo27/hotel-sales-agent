@@ -33,6 +33,14 @@ WHATSAPP_GRAPH_API_VERSION = "v21.0"
 # indefinitely if the Graph API itself hangs (CLAUDE.md §8).
 _DEFAULT_TIMEOUT_MS = 10_000
 
+# The Cloud API's limit on text.body, from Meta's "Text messages" reference
+# ("Maximum 4096 characters", checked 2026-09-29). services/agent/webhook.py
+# compares it with len() -- Unicode code points; whether Meta counts code
+# points or UTF-16 units is not stated, so a reply within this limit can in
+# principle still be rejected, and that rejection is handled like any other
+# failed send.
+WHATSAPP_TEXT_BODY_MAX_CHARS = 4096
+
 
 class WhatsAppSendConfigurationError(Exception):
     """Raised when WHATSAPP_PHONE_NUMBER_ID or WHATSAPP_ACCESS_TOKEN is

@@ -20,12 +20,19 @@ bookkeeping this design exists to avoid.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Final
+from typing import TYPE_CHECKING, Final, Literal
 
 if TYPE_CHECKING:
     from services.agent.llm.conversation import UsageTotals
 
 USAGE_SO_FAR_ATTR: Final[str] = "usage_so_far"
+
+# Why a tool call's arguments were rejected, as the model is told it
+# (services.agent.llm.tools.TOOL_ERROR_MESSAGES holds the fixed text for
+# each). A closed set so the result handed back to the model is always one
+# of three reviewed messages, never the exception's own text -- which can
+# quote model- or customer-supplied argument values back verbatim.
+ToolErrorCode = Literal["past_check_in", "unresolved_stay", "invalid_arguments"]
 
 
 class LlmError(Exception):
@@ -94,7 +101,18 @@ class InvalidToolArgumentsError(LlmError):
 
     The model produced these arguments; malformed ones are an expected
     failure mode of a function-calling model, not a bug in this code.
+    conversation.py therefore does not let this end the turn: it hands
+    the model a fixed tool-error result chosen by `code` (see
+    ToolErrorCode above) so it can correct the call or ask the customer.
+    The exception's own message is for the journal's error_type trail and
+    for tests, never for the model.
     """
+
+    def __init__(
+        self, message: str, *, code: ToolErrorCode = "invalid_arguments"
+    ) -> None:
+        super().__init__(message)
+        self.code: ToolErrorCode = code
 
 
 class TurnCapExceededError(LlmError):

@@ -54,21 +54,13 @@ response can take without this split). Order matters and is deliberate:
    per-exception-type checklist — a new exception type added to
    generate_reply's loop in the future is covered automatically, without
    touching this module.
-5a. Any exception in _handle_generate_reply_failure's _ESCALATION_REASONS
-    — CLAUDE.md §9's three caps (TurnCapExceededError,
-    TokenSpendCapExceededError, DailySpendCapExceededError),
-    ModelUnavailableError once the transport's own retries are exhausted,
-    or TurnBudgetExceededError once the turn's own shared time budget
-    (services.agent.llm.config.TURN_BUDGET_SECONDS) runs out
-    — after step 5's recording above, is escalated to a human and
-    answered with the exact same bilingual fallback message a blocked
-    reply gets in step 6 (_escalate_and_notify), rather than just a
-    logged status — CLAUDE.md §9's "beyond the cap, escalate to a
-    human" applied literally, and the same "never leave a customer with
-    silence" reasoning extended to a transient failure the customer has
-    no way to distinguish from one. Every other exception falls through
-    to the generic, loudly-logged status in
-    _status_for_generate_reply_error instead.
+5a. EVERY exception from generate_reply -- whatever its type -- is then,
+    after step 5's recording, escalated to a human and answered with the
+    bilingual fallback message (_escalate_and_notify), with a reason from
+    _escalation_reason. CLAUDE.md rule 12: no failed turn ends in
+    silence. (A bad tool argument is not a failure at all:
+    conversation.py hands the model a fixed tool error and the turn goes
+    on.)
 6. Run services.agent.output_guard.enforcement.enforce_outbound_text on
    the candidate reply. Allowed: send it. Blocked: never send it, never
    ask the model to rephrase it (a second, unmanipulated attempt is not
@@ -77,15 +69,19 @@ response can take without this split). Order matters and is deliberate:
    non-LLM-generated string, through the exact same enforce_outbound_text
    call (its own module docstring already names this as a canned
    template's intended path, not a bypass). enforce_outbound_text already
-   opens the escalation for the blocked reply on its own — this module
-   adds nothing to that, just acts on the verdict.
-7. Send via services.agent.whatsapp_send. A failure here — or the
-   fallback itself somehow being blocked, which test_output_guard_
-   fallback_message_is_always_allowed (tests/integration/
-   test_output_guard.py) exists specifically to make structurally
-   impossible, not just unlikely — is handled the same way as every
-   other failure in this module: logged loudly, never a 500 (moot for
-   the background job anyway — see below).
+   opens the escalation for the blocked reply on its own, so the funnel
+   sends the fallback without opening a second one.
+7. Send via services.agent.whatsapp_send. A reply that cannot be sent (blank,
+   or over the Cloud API's length limit), a guard or send-setup error, and
+   a failed send all go to the same funnel as 5a. The funnel attempts the
+   escalation and the fallback independently and reports which of the two
+   happened (_funnel_status), so a failure is never labelled "escalated"
+   when the customer got nothing; a half that failed because the turn's
+   connection died is retried once on a fresh connection. What no code can
+   fix is listed as residuals in ARCHITECTURE.md §7 ("لا صمت"): the
+   database being unavailable (rule 8 sends even the fallback through the
+   guard, which reads the database), WhatsApp refusing every send, and a
+   hard kill of the process.
 
 Background-job reliability: FastAPI's BackgroundTasks runs as part of
 the same ASGI call Starlette is already handling — after the response is
@@ -114,10 +110,13 @@ fixed by the retry it provokes, and can only turn an already-spent,
 unrecorded, or undelivered turn into a *permanently* unrecorded or
 undelivered one. Turning every such failure into a 200 instead is not the
 same as hiding it: everything that is not one of the expected, named
-outcomes is logged at ERROR with the exception's own type name, message,
-and full traceback — a real bug or a database outage stays exactly as
-visible in the logs as it would be behind a 500, it just stops provoking
-a retry that cannot help.
+outcomes is logged at ERROR with the exception's type name and traceback
+— a real bug or a database outage stays exactly as visible in the logs as
+it would be behind a 500, it just stops provoking a retry that cannot
+help. For a generate_reply failure the traceback is frames-only and the
+message is left out (_safe_exception_log_fields): a services.pricing
+error's message holds cost and floor values, which CLAUDE.md §8 keeps out
+of every log.
 """
 
 from __future__ import annotations
@@ -128,6 +127,7 @@ import hmac
 import json
 import logging
 import os
+import traceback
 from collections.abc import Iterator
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -149,13 +149,15 @@ from services.agent.llm.client import (
     OpenRouterTransport,
 )
 from services.agent.llm.config import LlmSettings, load_llm_settings
-from services.agent.llm.conversation import UsageTotals, generate_reply
+from services.agent.llm.conversation import AgentReply, UsageTotals, generate_reply
 from services.agent.llm.errors import (
     DailySpendCapExceededError,
     ModelUnavailableError,
     TokenSpendCapExceededError,
+    ToolLoopLimitError,
     TurnBudgetExceededError,
     TurnCapExceededError,
+    UnknownToolError,
     UsageUnavailableError,
     read_usage_so_far,
 )
@@ -165,16 +167,19 @@ from services.agent.llm.session import (
 )
 from services.agent.output_guard.enforcement import (
     OUTPUT_GUARD_FALLBACK_MESSAGE,
+    GuardVerdict,
     enforce_outbound_text,
     open_escalation,
 )
 from services.agent.whatsapp_send import (
+    WHATSAPP_TEXT_BODY_MAX_CHARS,
     WhatsAppCloudApiSender,
     WhatsAppSender,
     WhatsAppSendSettings,
     load_whatsapp_send_settings,
     to_whatsapp_formatting,
 )
+from services.pricing.errors import PricingError
 
 logger = logging.getLogger(__name__)
 
@@ -545,131 +550,190 @@ def _increment_turn_count_or_log_failure(
 
 
 _STATUS_ACCEPTED = "accepted"
-_STATUS_CAPPED = "capped"
-_STATUS_USAGE_UNAVAILABLE = "usage_unavailable"
-_STATUS_TURN_FAILED = "turn_failed"
+_STATUS_PROCESSED = "processed"
+
+# The four outcomes of _escalate_and_notify, one per combination of "was a
+# human escalation opened" and "did the customer get the fallback". Named
+# honestly on purpose: before CLAUDE.md rule 12, a failed fallback send
+# still reported "escalated", hiding a silent customer behind a
+# success-sounding status.
 _STATUS_ESCALATED = "escalated"
+_STATUS_ESCALATED_UNDELIVERED = "escalated_undelivered"
+_STATUS_NOTIFIED_NO_ESCALATION = "notified_no_escalation"
+_STATUS_FAILED_UNRECORDED = "failed_unrecorded"
+
+# The five anticipated stops -- CLAUDE.md §9's three caps, a transport
+# failure after client.py's own retries (ModelUnavailableError), and the
+# turn's time budget running out (TurnBudgetExceededError). Their messages
+# are vetted: they carry counts, USD spend estimates, or an HTTP status,
+# never hotel cost or a price floor, so they alone may be stored in
+# escalations.notes. Every other exception is recorded by type only (see
+# _escalation_notes).
+_ANTICIPATED_STOPS: tuple[type[Exception], ...] = (
+    TurnCapExceededError,
+    TokenSpendCapExceededError,
+    DailySpendCapExceededError,
+    ModelUnavailableError,
+    TurnBudgetExceededError,
+)
 
 # One exception type, one reason -- a human reading escalations must be
 # able to tell what actually stopped the conversation without
-# re-deriving it from notes. Covers CLAUDE.md §9's three caps plus
-# ModelUnavailableError (raised only after client.py's own retries are
-# exhausted -- see that module's constants for why retrying again here
-# would just stack a second layer on the SDK's) and
-# TurnBudgetExceededError (the turn's own shared time budget ran out --
-# see services.agent.llm.config.TURN_BUDGET_SECONDS -- a distinct cause
-# from a single call's transient failure, so it gets its own reason
-# rather than being folded into model_unavailable).
+# re-deriving it from notes. Matched with isinstance, in order, so a
+# subclass of any of these gets its parent's reason rather than falling
+# through to internal_error.
 _ESCALATION_REASONS: dict[type[Exception], str] = {
     TurnCapExceededError: "turn_cap_exceeded",
     TokenSpendCapExceededError: "token_spend_cap_exceeded",
     DailySpendCapExceededError: "daily_spend_cap_exceeded",
     ModelUnavailableError: "model_unavailable",
     TurnBudgetExceededError: "turn_budget_exceeded",
+    UsageUnavailableError: "usage_unavailable",
+    ToolLoopLimitError: "tool_loop_limit_exceeded",
+    UnknownToolError: "unknown_tool",
 }
-
-# Used only by _escalate_unexpected_background_failure -- not in
-# _ESCALATION_REASONS above, since it is not keyed off any one exception
-# class: it is whatever _generate_and_deliver_reply's outermost catch
-# receives, a category deliberately left open the same way migration
-# 0024's comment on escalations.reason leaves the full set of reasons
-# open rather than guessing at it ahead of the code that raises each one.
+# Every services.pricing exception compute_quote lets propagate -- a
+# price_rules misconfiguration, or the occupancy-1.0 band gap -- shares
+# one reason; the exception type in escalations.notes says which.
+_REASON_PRICING_ERROR = "pricing_error"
+# Not keyed off any exception class: the model produced a reply that
+# cannot be sent (blank, or longer than WhatsApp accepts), the guard or
+# send setup raised, or the send itself failed.
+_REASON_EMPTY_REPLY = "empty_reply"
+_REASON_REPLY_TOO_LONG = "reply_too_long"
+_REASON_DELIVERY_FAILED = "delivery_failed"
+# A log label only, never stored: the output guard opens (and names) its
+# own escalation for a blocked reply before the fallback is sent.
+_REASON_OUTPUT_GUARD_BLOCKED = "output_guard_blocked"
+# Anything else -- a bug, a database error inside the turn -- deliberately
+# left as one open category, the same way migration 0024's comment on
+# escalations.reason leaves the full set of reasons open.
 _REASON_INTERNAL_ERROR = "internal_error"
 
 
-def _status_for_generate_reply_error(exc: Exception) -> str:
-    """Maps a generate_reply exception to this endpoint's response
-    status. Purely a label for the response body and for which extra log
-    event (if any) to emit — never a factor in whether usage gets
-    recorded, which is unconditional in _handle_generate_reply_failure
-    below, driven by whether the exception is carrying usage at all, not
-    by its type.
-
-    None of the exception types in _ESCALATION_REASONS above are named
-    here: all of them are intercepted earlier, in
-    _handle_generate_reply_failure, before this function is ever called
-    for them — see _escalate_and_notify below.
-
-    An exception type not named here still gets its usage recorded and
-    still never produces a 500; it only falls into the generic
-    _STATUS_TURN_FAILED bucket instead of a specific one — logged loudly
-    enough (event, exception type, message, full traceback) to be found
-    the moment it happens. The point of always returning 200 is to stop
-    Meta's retry-into-a-permanent-gap trap, not to make a real bug quiet.
-    """
-    if isinstance(exc, UsageUnavailableError):
-        return _STATUS_USAGE_UNAVAILABLE
-    return _STATUS_TURN_FAILED
+def _escalation_reason(exc: Exception) -> str:
+    """The escalations.reason for a generate_reply exception: its entry in
+    _ESCALATION_REASONS, pricing_error for any services.pricing exception,
+    otherwise internal_error. Never raises -- every exception maps to a
+    reason, so no exception type can leave a turn without an escalation."""
+    for exception_type, reason in _ESCALATION_REASONS.items():
+        if isinstance(exc, exception_type):
+            return reason
+    if isinstance(exc, PricingError):
+        return _REASON_PRICING_ERROR
+    return _REASON_INTERNAL_ERROR
 
 
-async def _escalate_and_notify(
+def _escalation_notes(exc: Exception | None) -> dict[str, Any]:
+    """escalations.notes for a failed turn: always the exception's type,
+    and its message only for the vetted _ANTICIPATED_STOPS. A
+    services.pricing message can carry cost_per_night, the margin and the
+    price floor (compute.py's InconsistentPriceConfigurationError), and
+    notes are read by humans and back-office tooling -- CLAUDE.md §8 keeps
+    cost out of anything logged or stored for inspection outside the
+    pricing audit trail."""
+    if exc is None:
+        return {}
+    notes: dict[str, Any] = {"exception_type": type(exc).__name__}
+    if isinstance(exc, _ANTICIPATED_STOPS):
+        notes["detail"] = str(exc)
+    return notes
+
+
+def _safe_exception_log_fields(exc: BaseException) -> dict[str, str]:
+    """The exception's type and a frames-only traceback, for an exception
+    whose message is not vetted (see _ANTICIPATED_STOPS). Deliberately not
+    exc_info=exc on the log record: the standard traceback rendering ends
+    with the exception's own message, and a services.pricing message
+    carries cost and floor values (CLAUDE.md §8: never log cost).
+    traceback.format_tb renders file, line, function and source line only."""
+    return {
+        "exception_type": type(exc).__name__,
+        "traceback": "".join(traceback.format_tb(exc.__traceback__)),
+    }
+
+
+def _funnel_status(*, escalated: bool, delivered: bool) -> str:
+    if escalated:
+        return _STATUS_ESCALATED if delivered else _STATUS_ESCALATED_UNDELIVERED
+    return _STATUS_NOTIFIED_NO_ESCALATION if delivered else _STATUS_FAILED_UNRECORDED
+
+
+def _open_escalation_or_log_failure(
     conn: psycopg.Connection[Any],
-    exc: Exception,
     *,
     conversation_id: int,
-    customer_phone: str,
     reason: str,
-) -> str:
-    """Opens an escalation and sends the bilingual fallback message
-    through the exact same guard-checked send path a guard block uses
-    (CLAUDE.md §9's "beyond the cap, escalate to a human" plus rule 8's
-    "never leave a customer with silence"). reason is the caller's to
-    supply, not derived here: _handle_generate_reply_failure passes
-    _ESCALATION_REASONS[type(exc)] for CLAUDE.md §9's three caps or a
-    transport failure (ModelUnavailableError);
-    _escalate_unexpected_background_failure passes
-    _REASON_INTERNAL_ERROR for anything else that escapes every other
-    handler in this module. A customer waiting with nobody notified is
-    the same outcome regardless of which of these stopped the
-    conversation, so all of them get identical treatment.
+    exc: Exception | None,
+) -> int | None:
+    """Opens the escalation for a failed turn and logs it; on any failure
+    logs conversation_escalation_failed and returns None instead of
+    raising, so the fallback send that follows is still attempted.
 
-    Whatever usage this turn incurred is the caller's responsibility to
-    have already recorded before this runs (or there was none, for
-    TurnCapExceededError -- it fires before any model call this turn,
-    errors.read_usage_so_far's own docstring -- or for a failure with no
-    prior model call this turn); this function only ever escalates and
-    notifies, never records usage itself.
-
-    Never raises: any failure along this path (opening the escalation,
-    the guard check, loading WhatsApp send settings, the send itself) is
-    logged at ERROR and falls back to _STATUS_CAPPED, the same
-    never-a-500 posture as every other write in this module.
+    exception_message appears in the conversation_escalated event only for
+    ModelUnavailableError: client.py's message carries just the exception
+    name plus the provider's HTTP code/status. The cap errors' messages
+    hold USD spend estimates and every other message is unvetted, so the
+    event carries their type only.
     """
     try:
         escalation_id = open_escalation(
             conn,
             conversation_id=conversation_id,
             reason=reason,
-            notes={"detail": str(exc)},
+            notes=_escalation_notes(exc),
         )
-        # exception_type is always safe to log. exception_message is
-        # included only for ModelUnavailableError: client.py's own
-        # message carries just the exception name plus Google's HTTP
-        # code/status (never the raw response body -- see client.py's
-        # comment on why), while TokenSpendCapExceededError/
-        # DailySpendCapExceededError's messages include the account's
-        # estimated USD spend, and an internal_error's message is
-        # unvetted by definition -- neither belongs in this log event.
-        log_fields: dict[str, Any] = {
-            "event": "conversation_escalated",
-            "conversation_id": conversation_id,
-            "reason": reason,
-            "escalation_id": escalation_id,
-            "exception_type": type(exc).__name__,
-        }
-        if isinstance(exc, ModelUnavailableError):
-            log_fields["exception_message"] = str(exc)
-        logger.error(json.dumps(log_fields))
+    except Exception as open_exc:
+        logger.error(
+            json.dumps(
+                {
+                    "event": "conversation_escalation_failed",
+                    "conversation_id": conversation_id,
+                    "reason": reason,
+                    "exception_type": type(open_exc).__name__,
+                    "exception_message": str(open_exc),
+                }
+            ),
+            exc_info=open_exc,
+        )
+        return None
+    log_fields: dict[str, Any] = {
+        "event": "conversation_escalated",
+        "conversation_id": conversation_id,
+        "reason": reason,
+        "escalation_id": escalation_id,
+        "exception_type": type(exc).__name__ if exc is not None else None,
+    }
+    if isinstance(exc, ModelUnavailableError):
+        log_fields["exception_message"] = str(exc)
+    logger.error(json.dumps(log_fields))
+    return escalation_id
 
+
+async def _send_fallback_or_log_failure(
+    conn: psycopg.Connection[Any],
+    *,
+    conversation_id: int,
+    customer_phone: str,
+    reason: str,
+    escalation_id: int | None,
+) -> bool:
+    """Sends OUTPUT_GUARD_FALLBACK_MESSAGE through the output guard like
+    any other outbound text (CLAUDE.md rule 8 -- the guard is never
+    bypassed, even for this fixed string). Returns whether it was
+    delivered; never raises.
+
+    A blocked fallback is structurally impossible -- test_output_guard_
+    fallback_message_is_always_allowed (tests/integration/
+    test_output_guard.py) exists to prove it -- and is not routed around
+    with a second attempt, the infinite-regress trap this design avoids.
+    It is logged loudly if it ever happens.
+    """
+    try:
         verdict = enforce_outbound_text(
             conn, conversation_id=conversation_id, text=OUTPUT_GUARD_FALLBACK_MESSAGE
         )
         if not verdict.allowed:
-            # Structurally impossible -- the same guarantee
-            # test_output_guard_fallback_message_is_always_allowed
-            # (tests/integration/test_output_guard.py) exists to prove.
-            # Logged loudly if it ever isn't, mirroring the
-            # fallback_message_blocked branch in _process_turn below.
             logger.error(
                 json.dumps(
                     {
@@ -681,33 +745,131 @@ async def _escalate_and_notify(
                     }
                 )
             )
-            return _STATUS_CAPPED
-
-        whatsapp_settings = get_whatsapp_send_settings()
-        sender = get_whatsapp_sender(whatsapp_settings)
-        await _send_or_log_failure(
-            sender,
-            conn=conn,
-            conversation_id=conversation_id,
-            customer_phone=customer_phone,
-            text=OUTPUT_GUARD_FALLBACK_MESSAGE,
-        )
-    except Exception as unexpected_exc:
+            return False
+        sender = get_whatsapp_sender(get_whatsapp_send_settings())
+    except Exception as setup_exc:
         logger.error(
             json.dumps(
                 {
-                    "event": "conversation_escalation_failed",
+                    "event": "fallback_delivery_failed",
                     "conversation_id": conversation_id,
                     "reason": reason,
-                    "exception_type": type(unexpected_exc).__name__,
-                    "exception_message": str(unexpected_exc),
+                    "escalation_id": escalation_id,
+                    "exception_type": type(setup_exc).__name__,
+                    "exception_message": str(setup_exc),
                 }
             ),
-            exc_info=unexpected_exc,
+            exc_info=setup_exc,
         )
-        return _STATUS_CAPPED
+        return False
+    whatsapp_message_id = await _send_or_log_failure(
+        sender,
+        conn=conn,
+        conversation_id=conversation_id,
+        customer_phone=customer_phone,
+        text=OUTPUT_GUARD_FALLBACK_MESSAGE,
+    )
+    return whatsapp_message_id is not None
 
-    return _STATUS_ESCALATED
+
+async def _escalate_and_notify(
+    conn: psycopg.Connection[Any],
+    *,
+    conversation_id: int,
+    customer_phone: str,
+    reason: str,
+    exc: Exception | None,
+    existing_escalation_id: int | None = None,
+) -> str:
+    """The one funnel every failed turn goes through (CLAUDE.md rule 12,
+    "never leave a customer in silence", and §9's "beyond the cap,
+    escalate to a human"): opens an escalation for a human and sends the
+    customer the bilingual fallback message.
+
+    The two are attempted independently -- a failure to open the
+    escalation no longer stops the fallback from being sent, and a failed
+    send is reported as such (escalated_undelivered) instead of as
+    "escalated". existing_escalation_id is for a caller whose escalation
+    already exists (the output guard opens its own for a blocked reply):
+    no second one is opened, only the fallback is sent.
+
+    If either half failed because the turn's own connection died partway
+    through (psycopg reports a broken connection as closed), the failed
+    half -- only that half, so the customer is never sent a second
+    fallback -- is retried once on a fresh connection: one lost
+    connection, with the database itself still up, must not become a
+    silent turn.
+
+    Returns one of the four _STATUS_ESCALATED* / _STATUS_NOTIFIED_* /
+    _STATUS_FAILED_UNRECORDED labels. Whatever usage the turn incurred is
+    the caller's to have recorded before this runs; this function never
+    records usage. Never raises.
+    """
+    escalation_id = existing_escalation_id
+    if escalation_id is None:
+        escalation_id = _open_escalation_or_log_failure(
+            conn, conversation_id=conversation_id, reason=reason, exc=exc
+        )
+    delivered = await _send_fallback_or_log_failure(
+        conn,
+        conversation_id=conversation_id,
+        customer_phone=customer_phone,
+        reason=reason,
+        escalation_id=escalation_id,
+    )
+    if (escalation_id is None or not delivered) and conn.closed:
+        escalation_id, delivered = await _retry_funnel_on_a_fresh_connection(
+            conversation_id=conversation_id,
+            customer_phone=customer_phone,
+            reason=reason,
+            exc=exc,
+            escalation_id=escalation_id,
+            delivered=delivered,
+        )
+    return _funnel_status(escalated=escalation_id is not None, delivered=delivered)
+
+
+async def _retry_funnel_on_a_fresh_connection(
+    *,
+    conversation_id: int,
+    customer_phone: str,
+    reason: str,
+    exc: Exception | None,
+    escalation_id: int | None,
+    delivered: bool,
+) -> tuple[int | None, bool]:
+    """Re-attempts whichever of the escalation and the fallback send has
+    not succeeded yet, on a new connection, and returns the updated pair.
+    A database that cannot be reached at all stays the documented
+    residual (ARCHITECTURE.md §7, "لا صمت"): logged, not raised."""
+    try:
+        with get_db_connection() as fresh_conn:
+            if escalation_id is None:
+                escalation_id = _open_escalation_or_log_failure(
+                    fresh_conn, conversation_id=conversation_id, reason=reason, exc=exc
+                )
+            if not delivered:
+                delivered = await _send_fallback_or_log_failure(
+                    fresh_conn,
+                    conversation_id=conversation_id,
+                    customer_phone=customer_phone,
+                    reason=reason,
+                    escalation_id=escalation_id,
+                )
+    except Exception as connect_exc:
+        logger.error(
+            json.dumps(
+                {
+                    "event": "funnel_reconnect_failed",
+                    "conversation_id": conversation_id,
+                    "reason": reason,
+                    "exception_type": type(connect_exc).__name__,
+                    "exception_message": str(connect_exc),
+                }
+            ),
+            exc_info=connect_exc,
+        )
+    return escalation_id, delivered
 
 
 async def _handle_generate_reply_failure(
@@ -718,7 +880,7 @@ async def _handle_generate_reply_failure(
     customer_phone: str,
     now: datetime,
 ) -> str:
-    """The single funnel for everything generate_reply can raise.
+    """The single path for everything generate_reply can raise.
 
     Records whatever usage the exception is carrying — present only when
     one or more real model calls already happened this turn before it
@@ -726,16 +888,21 @@ async def _handle_generate_reply_failure(
     docstring — and increments turn_count alongside it (same condition,
     same reasoning as caps.increment_turn_count's own docstring: a real
     model call happened, so this turn counts, regardless of how it
-    ends). Any exception in _ESCALATION_REASONS -- CLAUDE.md §9's three
-    caps, or ModelUnavailableError once client.py's own retries are
-    exhausted -- is then handled separately by _escalate_and_notify
-    above, after that recording (TurnCapExceededError carries no usage
-    to record; the others might).
+    ends). Then EVERY exception, of any type, goes through
+    _escalate_and_notify with _escalation_reason's reason -- CLAUDE.md
+    rule 12: no exception type may end a turn in silence.
 
-    Adding a new exception type to generate_reply's tool-calling loop in
-    the future needs no change here: read_usage_so_far works on any
-    exception, and an unnamed type simply falls into the loudly-logged
-    _STATUS_TURN_FAILED bucket in _status_for_generate_reply_error above.
+    Anything other than an anticipated stop is also logged at ERROR:
+    usage_unavailable (just the event) for UsageUnavailableError, and
+    turn_failed for the rest, with the type and a frames-only traceback,
+    never the message (see _safe_exception_log_fields). Adding a new
+    exception type to generate_reply's loop in the future needs no change
+    here.
+
+    Must be called outside any `except` block for exc: an exception
+    raised while this runs must not carry exc as its __context__, or a
+    rendered traceback would print exc's message after all (see
+    _generate_reply_or_exception).
     """
     usage_so_far = read_usage_so_far(exc)
     if usage_so_far is not None and usage_so_far.total_tokens > 0:
@@ -748,54 +915,34 @@ async def _handle_generate_reply_failure(
         )
         _increment_turn_count_or_log_failure(conn, conversation_id=conversation_id)
 
-    if isinstance(
-        exc,
-        (
-            TurnCapExceededError,
-            TokenSpendCapExceededError,
-            DailySpendCapExceededError,
-            ModelUnavailableError,
-            TurnBudgetExceededError,
-        ),
-    ):
-        return await _escalate_and_notify(
-            conn,
-            exc,
-            conversation_id=conversation_id,
-            customer_phone=customer_phone,
-            reason=_ESCALATION_REASONS[type(exc)],
-        )
-
-    status = _status_for_generate_reply_error(exc)
-    if status == _STATUS_USAGE_UNAVAILABLE:
+    if isinstance(exc, UsageUnavailableError):
         logger.error(
             json.dumps(
                 {"event": "usage_unavailable", "conversation_id": conversation_id}
             )
         )
-    else:
-        # _status_for_generate_reply_error now only ever returns
-        # _STATUS_USAGE_UNAVAILABLE or _STATUS_TURN_FAILED -- every cap
-        # exceeded exception is handled above before this line is ever
-        # reached. Deliberately loud: CLAUDE.md forbids folding a real
-        # bug or a database outage quietly into a generic bucket.
-        # exc_info=exc attaches the full traceback to the log record —
-        # the type name and message are also in the JSON body so they
-        # are greppable without needing the traceback rendered alongside
-        # them.
+    elif not isinstance(exc, _ANTICIPATED_STOPS):
+        # Deliberately loud: CLAUDE.md forbids folding a real bug or a
+        # database outage quietly into a generic bucket -- but loud
+        # without the exception's text, which for a services.pricing error
+        # holds cost and floor values.
         logger.error(
             json.dumps(
                 {
                     "event": "turn_failed",
                     "conversation_id": conversation_id,
-                    "exception_type": type(exc).__name__,
-                    "exception_message": str(exc),
+                    **_safe_exception_log_fields(exc),
                 }
-            ),
-            exc_info=exc,
+            )
         )
 
-    return status
+    return await _escalate_and_notify(
+        conn,
+        conversation_id=conversation_id,
+        customer_phone=customer_phone,
+        reason=_escalation_reason(exc),
+        exc=exc,
+    )
 
 
 async def _process_turn(
@@ -808,16 +955,69 @@ async def _process_turn(
     now: datetime,
 ) -> str:
     """Steps 4-7 of the module docstring: the model call through the
-    output-guard-checked send. Unchanged internally from what
-    receive_message ran synchronously before the fast-ack/background
-    split -- only the caller and the connection's lifetime moved.
-    Returns the same status labels the old inline response body used;
-    _generate_and_deliver_reply logs whatever this returns, since no
-    caller reads it as an HTTP response anymore.
+    output-guard-checked send. Returns a status label that
+    _generate_and_deliver_reply logs; no caller reads it as an HTTP
+    response anymore. Every path ends in either the reply delivered
+    ("processed") or _escalate_and_notify (CLAUDE.md rule 12).
     """
     transport = get_model_transport(llm_settings)
+    outcome = await _generate_reply_or_exception(
+        conn,
+        conversation_id=conversation_id,
+        customer_name=customer_name,
+        transport=transport,
+        llm_settings=llm_settings,
+        now=now,
+    )
+    if isinstance(outcome, Exception):
+        return await _handle_generate_reply_failure(
+            conn,
+            outcome,
+            conversation_id=conversation_id,
+            customer_phone=customer_phone,
+            now=now,
+        )
+
+    # A failed usage write is its own ERROR event (record_token_usage_
+    # failed); it no longer overwrites the delivery status, which would
+    # hide whether the customer got an answer.
+    _record_usage_or_log_failure(
+        conn,
+        conversation_id=conversation_id,
+        customer_phone=customer_phone,
+        usage=outcome.usage,
+        now=now,
+    )
+    _increment_turn_count_or_log_failure(conn, conversation_id=conversation_id)
+
+    return await _deliver_reply(
+        conn,
+        conversation_id=conversation_id,
+        customer_phone=customer_phone,
+        reply_text=outcome.text,
+    )
+
+
+async def _generate_reply_or_exception(
+    conn: psycopg.Connection[Any],
+    *,
+    conversation_id: int,
+    customer_name: str | None,
+    transport: ModelTransport,
+    llm_settings: LlmSettings,
+    now: datetime,
+) -> AgentReply | Exception:
+    """generate_reply, with any exception returned rather than raised.
+
+    Returned, not handled here, so the caller can pass it to
+    _handle_generate_reply_failure OUTSIDE this `except` block: anything
+    raised while an exception is being handled gets it as __context__,
+    and a rendered traceback of that later exception would print this
+    one's message -- which for a services.pricing error holds cost and
+    floor values (CLAUDE.md §8).
+    """
     try:
-        reply = await generate_reply(
+        return await generate_reply(
             conn,
             conversation_id=conversation_id,
             customer_name=customer_name,
@@ -826,132 +1026,172 @@ async def _process_turn(
             now=now,
         )
     except Exception as exc:
-        return await _handle_generate_reply_failure(
-            conn,
-            exc,
-            conversation_id=conversation_id,
-            customer_phone=customer_phone,
-            now=now,
-        )
+        return exc
 
-    usage_recorded = _record_usage_or_log_failure(
-        conn,
-        conversation_id=conversation_id,
-        customer_phone=customer_phone,
-        usage=reply.usage,
-        now=now,
-    )
-    _increment_turn_count_or_log_failure(conn, conversation_id=conversation_id)
 
+def _undeliverable_reply_reason(text: str) -> str | None:
+    """Why a model reply cannot be sent as it is, or None if it can: blank
+    (the model returned no text, or only whitespace -- nothing to send),
+    or longer than the Cloud API's text.body limit."""
+    if not text.strip():
+        return _REASON_EMPTY_REPLY
+    if len(text) > WHATSAPP_TEXT_BODY_MAX_CHARS:
+        return _REASON_REPLY_TOO_LONG
+    return None
+
+
+def _check_reply_and_prepare_sender(
+    conn: psycopg.Connection[Any], *, conversation_id: int, text: str
+) -> WhatsAppSender | GuardVerdict | Exception:
+    """Runs the output guard on the reply, then builds the WhatsApp sender
+    for an allowed one. Returns the sender (allowed), the blocking
+    GuardVerdict (blocked -- the guard has already opened its escalation),
+    or the exception if the guard or the send setup raised. Returned
+    rather than raised for the same reason as
+    _generate_reply_or_exception: the caller hands it to the funnel
+    outside this `except` block."""
     try:
-        # Converted before the guard check runs, not after -- the guard
-        # must validate exactly what will be sent, and a Markdown-bold
-        # span around a price (e.g. "**343.85 SAR**") must not be checked
-        # in a form the customer will never actually see.
-        formatted_text = to_whatsapp_formatting(reply.text)
         verdict = enforce_outbound_text(
-            conn, conversation_id=conversation_id, text=formatted_text
+            conn, conversation_id=conversation_id, text=text
         )
-        if verdict.allowed:
-            text_to_send = formatted_text
-        else:
-            text_to_send = OUTPUT_GUARD_FALLBACK_MESSAGE
-            fallback_verdict = enforce_outbound_text(
-                conn,
-                conversation_id=conversation_id,
-                text=OUTPUT_GUARD_FALLBACK_MESSAGE,
-            )
-            if not fallback_verdict.allowed:
-                # Should be structurally impossible -- see the module
-                # docstring and test_output_guard_fallback_message_
-                # is_always_allowed (tests/integration/
-                # test_output_guard.py). Not routed around with a
-                # second fallback attempt: that is the exact
-                # infinite-regress trap this design avoids. Both
-                # escalations already exist (enforce_outbound_text
-                # opened one for each call); this log is what makes
-                # the second one impossible to miss immediately.
-                logger.error(
-                    json.dumps(
-                        {
-                            "event": "fallback_message_blocked",
-                            "conversation_id": conversation_id,
-                            "original_escalation_id": verdict.escalation_id,
-                            "fallback_escalation_id": (fallback_verdict.escalation_id),
-                        }
-                    )
-                )
-                return "fallback_blocked" if usage_recorded else "usage_not_recorded"
-
-        whatsapp_settings = get_whatsapp_send_settings()
-        sender = get_whatsapp_sender(whatsapp_settings)
-        whatsapp_message_id = await _send_or_log_failure(
-            sender,
-            conn=conn,
-            conversation_id=conversation_id,
-            customer_phone=customer_phone,
-            text=text_to_send,
-        )
+        if not verdict.allowed:
+            return verdict
+        return get_whatsapp_sender(get_whatsapp_send_settings())
     except Exception as exc:
-        # Everything above this point -- both enforce_outbound_text
-        # calls, loading WhatsApp send settings, constructing the
-        # sender -- can in principle fail (a DB blip, a missing env
-        # var). _send_or_log_failure itself never raises (see its own
-        # docstring), but is included here too as defense in depth,
-        # the same reasoning as everywhere else in this module: any
-        # exception after real spend must be loud, never a 500.
+        return exc
+
+
+@dataclass(frozen=True)
+class _DeliveryFailure:
+    """Why a model reply was not delivered, in the terms
+    _escalate_and_notify takes."""
+
+    reason: str
+    exc: Exception | None = None
+    existing_escalation_id: int | None = None
+
+
+async def _send_reply(
+    conn: psycopg.Connection[Any],
+    *,
+    conversation_id: int,
+    customer_phone: str,
+    reply_text: str,
+) -> _DeliveryFailure | None:
+    """Sends a model reply; returns None when it was delivered, otherwise
+    why not: blank or over-length (not sendable at all), a guard or
+    send-setup error, a guard block, or a failed send. Never raises.
+
+    The reply is converted to WhatsApp formatting before the guard checks
+    it: the guard must validate exactly what will be sent, and a
+    Markdown-bold price ("**343.85 SAR**") must not be checked in a form
+    the customer will never see.
+    """
+    formatted_text = to_whatsapp_formatting(reply_text)
+    undeliverable_reason = _undeliverable_reply_reason(formatted_text)
+    if undeliverable_reason is not None:
+        logger.error(
+            json.dumps(
+                {
+                    "event": "reply_undeliverable",
+                    "conversation_id": conversation_id,
+                    "reason": undeliverable_reason,
+                    "length": len(formatted_text),
+                }
+            )
+        )
+        return _DeliveryFailure(reason=undeliverable_reason)
+
+    prepared = _check_reply_and_prepare_sender(
+        conn, conversation_id=conversation_id, text=formatted_text
+    )
+    if isinstance(prepared, Exception):
         logger.error(
             json.dumps(
                 {
                     "event": "reply_delivery_failed",
                     "conversation_id": conversation_id,
-                    "exception_type": type(exc).__name__,
-                    "exception_message": str(exc),
+                    "exception_type": type(prepared).__name__,
+                    "exception_message": str(prepared),
                 }
             ),
-            exc_info=exc,
+            exc_info=prepared,
         )
-        return "delivery_failed" if usage_recorded else "usage_not_recorded"
+        return _DeliveryFailure(reason=_REASON_DELIVERY_FAILED, exc=prepared)
+    if isinstance(prepared, GuardVerdict):
+        return _DeliveryFailure(
+            reason=_REASON_OUTPUT_GUARD_BLOCKED,
+            existing_escalation_id=prepared.escalation_id,
+        )
 
+    whatsapp_message_id = await _send_or_log_failure(
+        prepared,
+        conn=conn,
+        conversation_id=conversation_id,
+        customer_phone=customer_phone,
+        text=formatted_text,
+    )
     if whatsapp_message_id is None:
-        return "send_failed" if usage_recorded else "usage_not_recorded"
+        return _DeliveryFailure(reason=_REASON_DELIVERY_FAILED)
+    return None
 
-    if not usage_recorded:
-        return "usage_not_recorded"
-    return "processed" if verdict.allowed else _STATUS_ESCALATED
+
+async def _deliver_reply(
+    conn: psycopg.Connection[Any],
+    *,
+    conversation_id: int,
+    customer_phone: str,
+    reply_text: str,
+) -> str:
+    """Delivers a model reply ("processed"), or hands the turn to
+    _escalate_and_notify for whatever stopped it (_send_reply). Never
+    raises."""
+    failure = await _send_reply(
+        conn,
+        conversation_id=conversation_id,
+        customer_phone=customer_phone,
+        reply_text=reply_text,
+    )
+    if failure is None:
+        return _STATUS_PROCESSED
+    return await _escalate_and_notify(
+        conn,
+        conversation_id=conversation_id,
+        customer_phone=customer_phone,
+        reason=failure.reason,
+        exc=failure.exc,
+        existing_escalation_id=failure.existing_escalation_id,
+    )
 
 
 async def _escalate_unexpected_background_failure(
     exc: Exception, *, conversation_id: int, customer_phone: str
-) -> None:
+) -> str:
     """Last-resort safety net for _generate_and_deliver_reply: something
-    escaped every handler already in this module -- a bug, or the fresh
-    DB connection _process_turn was using itself failing partway
-    through. Before the fast-ack/background split, that would have
-    surfaced as an HTTP 500 Meta could see and retry -- moot even then,
-    since idempotent dedup means a retry can never reach generate_reply
-    again (see the module docstring) -- but now there is no response at
-    all left to carry it, so this is the one place that must still open
-    an escalation and attempt the fallback send. Uses a fresh connection
-    of its own, since the one the failing turn was using may itself be
-    why this failed.
+    escaped every handler already in this module -- a bug, the model
+    transport failing to build (get_model_transport), or the turn's own
+    DB connection failing to open. Before the fast-ack/background split,
+    that would have surfaced as an HTTP 500 Meta could see and retry --
+    moot even then, since idempotent dedup means a retry can never reach
+    generate_reply again (see the module docstring) -- but now there is no
+    response at all left to carry it, so this is the one place that must
+    still open an escalation and attempt the fallback send. Uses a fresh
+    connection of its own, since the turn's may be why this failed.
 
-    Mirrors _escalate_and_notify's own shape via reuse, not duplication
-    (CLAUDE.md §2's "one way to do each thing") -- reason is
-    _REASON_INTERNAL_ERROR, the one case that dict-keyed function's
-    reason parameter exists to let a caller supply directly rather than
-    derive from the exception's type.
-
-    Never raises: there is nothing left to hand a failure to.
+    Reuses _escalate_and_notify rather than duplicating it (CLAUDE.md §2's
+    "one way to do each thing"), with reason _REASON_INTERNAL_ERROR.
+    Returns the funnel status, or failed_unrecorded if not even a fresh
+    connection can be opened. Never raises: there is nothing left to hand
+    a failure to.
     """
     try:
         with get_db_connection() as conn:
-            await _escalate_and_notify(
+            return await _escalate_and_notify(
                 conn,
-                exc,
                 conversation_id=conversation_id,
                 customer_phone=customer_phone,
                 reason=_REASON_INTERNAL_ERROR,
+                exc=exc,
             )
     except Exception as unexpected_exc:
         logger.error(
@@ -965,6 +1205,33 @@ async def _escalate_unexpected_background_failure(
             ),
             exc_info=unexpected_exc,
         )
+        return _STATUS_FAILED_UNRECORDED
+
+
+async def _process_turn_or_exception(
+    *,
+    conversation_id: int,
+    customer_name: str | None,
+    customer_phone: str,
+    llm_settings: LlmSettings,
+    now: datetime,
+) -> str | Exception:
+    """_process_turn on a connection of its own, with anything it raises
+    returned rather than raised -- so the caller handles it outside this
+    `except` block, for the same __context__ reason as
+    _generate_reply_or_exception."""
+    try:
+        with get_db_connection() as conn:
+            return await _process_turn(
+                conn,
+                conversation_id=conversation_id,
+                customer_name=customer_name,
+                customer_phone=customer_phone,
+                llm_settings=llm_settings,
+                now=now,
+            )
+    except Exception as exc:
+        return exc
 
 
 async def _generate_and_deliver_reply(
@@ -979,54 +1246,54 @@ async def _generate_and_deliver_reply(
     docstring, run via FastAPI BackgroundTasks after the fast ack.
     Opens its own DB connection -- the one receive_message used for the
     fast path is already closed by the time Starlette runs this job
-    (after the response is sent).
+    (after the response is sent). Logs the turn's status as
+    reply_turn_finished.
 
     Never raises: unlike the request this used to run inside, there is
     no HTTP response left downstream to carry a failure back to Meta
     once this is scheduled -- nothing reads an exception from here.
     Every known failure mode is already handled inside _process_turn
-    (_handle_generate_reply_failure, the output-guard/send try/except);
-    this function's own outermost try/except exists only for what none
-    of those catch -- e.g. get_db_connection() itself failing -- so it
-    still gets an ERROR log and a best-effort escalation
-    (_escalate_unexpected_background_failure) instead of vanishing into
+    (_handle_generate_reply_failure and _deliver_reply, both ending in
+    _escalate_and_notify); anything that still escapes it -- e.g.
+    get_db_connection() or get_model_transport() failing -- gets an
+    ERROR log and the same funnel through
+    _escalate_unexpected_background_failure, instead of vanishing into
     Starlette's own background-task exception log with no trace and no
     customer notification.
     """
-    try:
-        with get_db_connection() as conn:
-            status = await _process_turn(
-                conn,
-                conversation_id=conversation_id,
-                customer_name=customer_name,
-                customer_phone=customer_phone,
-                llm_settings=llm_settings,
-                now=now,
-            )
-        logger.info(
-            json.dumps(
-                {
-                    "event": "reply_turn_finished",
-                    "conversation_id": conversation_id,
-                    "status": status,
-                }
-            )
-        )
-    except Exception as exc:
+    outcome = await _process_turn_or_exception(
+        conversation_id=conversation_id,
+        customer_name=customer_name,
+        customer_phone=customer_phone,
+        llm_settings=llm_settings,
+        now=now,
+    )
+    if isinstance(outcome, Exception):
         logger.error(
             json.dumps(
                 {
                     "event": "background_reply_failed",
                     "conversation_id": conversation_id,
-                    "exception_type": type(exc).__name__,
-                    "exception_message": str(exc),
+                    "exception_type": type(outcome).__name__,
+                    "exception_message": str(outcome),
                 }
             ),
-            exc_info=exc,
+            exc_info=outcome,
         )
-        await _escalate_unexpected_background_failure(
-            exc, conversation_id=conversation_id, customer_phone=customer_phone
+        status = await _escalate_unexpected_background_failure(
+            outcome, conversation_id=conversation_id, customer_phone=customer_phone
         )
+    else:
+        status = outcome
+    logger.info(
+        json.dumps(
+            {
+                "event": "reply_turn_finished",
+                "conversation_id": conversation_id,
+                "status": status,
+            }
+        )
+    )
 
 
 @router.get("/webhook/whatsapp")

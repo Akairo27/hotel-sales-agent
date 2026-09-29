@@ -90,10 +90,14 @@ SESSION_IDLE_GAP = timedelta(hours=6)
 # older than the start, so this can never pull it in.
 SESSION_CLOCK_SKEW_TOLERANCE = timedelta(minutes=1)
 
-# A customer turn against check_availability/get_quote resolves in at most
-# a couple of tool calls. Beyond this, the loop stops and raises rather
+# Model calls allowed in one turn before the loop stops and raises rather
 # than continuing to spend tokens (CLAUDE.md §9's per-conversation cap).
-MAX_TOOL_ITERATIONS = 4
+# Raised from 4 to 6 by the owner (2026-09-29): since a bad tool argument
+# became a tool error the model corrects, the correction path alone
+# (rejected call, search_hotels, retry, answer) used all 4, so any extra
+# step failed the turn. TURN_BUDGET_SECONDS below remains the real bound
+# on how long a customer waits.
+MAX_TOOL_ITERATIONS = 6
 
 # The customer's WhatsApp display name is customer-controlled text that
 # ends up inside the model's SYSTEM instruction (prompt.py), not inside a
