@@ -29,6 +29,7 @@ from services.agent.output_guard.enforcement import (
     enforce_outbound_text,
 )
 from services.agent.output_guard.quotes import load_allowed_amounts
+from services.agent.webhook import PLEASE_TYPE_MESSAGE
 from services.agent.whatsapp_send import to_whatsapp_formatting
 from tests.integration._seed import (
     flat_demand_curve,
@@ -630,6 +631,36 @@ def test_output_guard_fallback_message_is_always_allowed(
         db_conn,
         conversation_id=with_quote_conversation,
         text=OUTPUT_GUARD_FALLBACK_MESSAGE,
+    )
+    assert with_quote_verdict.allowed is True
+    assert with_quote_verdict.escalation_id is None
+
+
+def test_please_type_message_is_always_allowed(
+    db_conn: psycopg.Connection[Any],
+) -> None:
+    """webhook.py's fixed reply to a voice note or an image goes through
+    this exact function too (CLAUDE.md rule 8) and must never be blocked --
+    the same two conversation shapes as the fallback test above."""
+    no_quotes_conversation = seed_conversation(db_conn, customer_phone="+966544444443")
+    no_quotes_verdict = enforce_outbound_text(
+        db_conn, conversation_id=no_quotes_conversation, text=PLEASE_TYPE_MESSAGE
+    )
+    assert no_quotes_verdict.allowed is True
+    assert no_quotes_verdict.escalation_id is None
+
+    hotel_id, room_type_id = seed_hotel_and_room_type(db_conn)
+    with_quote_conversation = seed_conversation(db_conn, customer_phone="+966544444444")
+    seed_quote(
+        db_conn,
+        hotel_id,
+        room_type_id,
+        conversation_id=with_quote_conversation,
+        ask_price_total=135_000,
+        min_allowed_total=90_000,
+    )
+    with_quote_verdict = enforce_outbound_text(
+        db_conn, conversation_id=with_quote_conversation, text=PLEASE_TYPE_MESSAGE
     )
     assert with_quote_verdict.allowed is True
     assert with_quote_verdict.escalation_id is None

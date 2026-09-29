@@ -56,12 +56,14 @@ from services.agent.llm.model_types import (
     Turn,
     UserTurn,
 )
+from services.agent.llm.session import touch_last_message_at
 from services.agent.main import app
 from services.agent.output_guard.enforcement import (
     OUTPUT_GUARD_FALLBACK_MESSAGE,
     REASON_MISMATCH,
     GuardVerdict,
 )
+from services.agent.webhook import PLEASE_TYPE_MESSAGE
 from services.agent.whatsapp_send import (
     WHATSAPP_TEXT_BODY_MAX_CHARS,
     WhatsAppSendConfigurationError,
@@ -502,6 +504,19 @@ def _turn_status(caplog: pytest.LogCaptureFixture) -> str:
     ]
     status: str = finished["status"]
     return status
+
+
+def _signature_rejections(caplog: pytest.LogCaptureFixture) -> list[dict[str, Any]]:
+    """Every webhook_signature_rejected WARNING, parsed."""
+    return [
+        entry
+        for entry in (
+            json.loads(r.getMessage())
+            for r in caplog.records
+            if r.levelno == logging.WARNING and r.name == "services.agent.webhook"
+        )
+        if entry.get("event") == "webhook_signature_rejected"
+    ]
 
 
 def _assert_fallback_sent_and_escalated(
@@ -1245,29 +1260,45 @@ def test_receive_message_with_invalid_signature_is_rejected_with_no_trace(
     webhook_client: TestClient,
     monkeypatch: pytest.MonkeyPatch,
     db_conn: psycopg.Connection[Any],
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
     _set_llm_settings(monkeypatch, _settings())
     transport = _FakeTransport()
     _set_transport(monkeypatch, transport)
     payload = _whatsapp_payload(wa_id=_WA_ID, message_id="wamid.bad-sig", body="hello")
 
-    response = _post(webhook_client, payload, signature=_sign(b"not-the-real-body"))
+    signature = _sign(b"not-the-real-body")
+    caplog.set_level(logging.WARNING, logger="services.agent.webhook")
+
+    response = _post(webhook_client, payload, signature=signature)
 
     assert response.status_code == 401
     assert _message_count(db_conn) == 0
     assert _conversation_count(db_conn) == 0
     assert transport.calls == []
+    assert _signature_rejections(caplog) == [
+        {
+            "event": "webhook_signature_rejected",
+            "problem": "mismatch",
+            "body_bytes": len(json.dumps(payload).encode()),
+        }
+    ]
+    assert signature.removeprefix("sha256=") not in caplog.text
+    assert _APP_SECRET not in caplog.text
 
 
 def test_receive_message_with_missing_signature_is_rejected_with_no_trace(
     webhook_client: TestClient,
     monkeypatch: pytest.MonkeyPatch,
     db_conn: psycopg.Connection[Any],
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
     _set_llm_settings(monkeypatch, _settings())
     transport = _FakeTransport()
     _set_transport(monkeypatch, transport)
     payload = _whatsapp_payload(wa_id=_WA_ID, message_id="wamid.no-sig", body="hello")
+
+    caplog.set_level(logging.WARNING, logger="services.agent.webhook")
 
     response = _post(webhook_client, payload, signature=None)
 
@@ -1275,6 +1306,7 @@ def test_receive_message_with_missing_signature_is_rejected_with_no_trace(
     assert _message_count(db_conn) == 0
     assert _conversation_count(db_conn) == 0
     assert transport.calls == []
+    assert [e["problem"] for e in _signature_rejections(caplog)] == ["missing"]
 
 
 def test_receive_message_escalates_and_sends_fallback_when_the_spend_cap_is_exceeded(
@@ -2876,17 +2908,22 @@ def test_no_exception_type_ends_a_turn_in_silence(
         assert sentinel not in caplog.text
 
 
-def test_receive_message_stores_message_but_skips_model_when_daily_rate_cap_exceeded(
+def test_receive_message_answers_the_first_message_past_the_daily_rate_cap(
     webhook_client: TestClient,
     monkeypatch: pytest.MonkeyPatch,
     db_conn: psycopg.Connection[Any],
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
+    """Owner decision B: the first message past the cap is stored, never
+    reaches the model, and gets the fallback plus an escalation."""
     settings = _settings(max_messages_per_number_per_day=1)
     _set_llm_settings(monkeypatch, settings)
     transport = _FakeTransport()
     _set_transport(monkeypatch, transport)
+    sender = _FakeWhatsAppSender()
+    _set_whatsapp_sender(monkeypatch, sender)
     conversation_id = seed_conversation(db_conn, customer_phone=_PHONE)
-    # One inbound message already logged today, seeded directly — the
+    # One inbound message already logged today, seeded directly -- the
     # webhook itself never ran for it, so the fake transport's call count
     # below reflects only what happens to the *next* message.
     seed_message(
@@ -2896,6 +2933,7 @@ def test_receive_message_stores_message_but_skips_model_when_daily_rate_cap_exce
         body="earlier",
         customer_phone=_PHONE,
     )
+    caplog.set_level(logging.INFO, logger="services.agent.webhook")
     payload = _whatsapp_payload(
         wa_id=_WA_ID, message_id="wamid.rate-limited", body="one too many"
     )
@@ -2913,6 +2951,347 @@ def test_receive_message_stores_message_but_skips_model_when_daily_rate_cap_exce
         (conversation_id,),
     ).fetchone()
     assert row is not None
+    notes = _assert_fallback_sent_and_escalated(
+        db_conn, sender, reason="message_rate_cap_exceeded"
+    )
+    assert notes == {}
+    assert _turn_status(caplog) == "escalated"
+
+
+def test_receive_message_stays_silent_for_later_messages_past_the_rate_cap(
+    webhook_client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+    db_conn: psycopg.Connection[Any],
+) -> None:
+    """Only the first blocked message of the day is answered: a customer
+    who keeps writing past the cap must not get a fallback per message."""
+    settings = _settings(max_messages_per_number_per_day=1)
+    _set_llm_settings(monkeypatch, settings)
+    transport = _FakeTransport()
+    _set_transport(monkeypatch, transport)
+    sender = _FakeWhatsAppSender()
+    _set_whatsapp_sender(monkeypatch, sender)
+    conversation_id = seed_conversation(db_conn, customer_phone=_PHONE)
+    for body in ("earlier", "the first one past the cap"):
+        seed_message(
+            db_conn,
+            conversation_id,
+            direction="inbound",
+            body=body,
+            customer_phone=_PHONE,
+        )
+    payload = _whatsapp_payload(
+        wa_id=_WA_ID, message_id="wamid.rate-limited-again", body="still here"
+    )
+
+    response = _post(
+        webhook_client, payload, signature=_sign(json.dumps(payload).encode())
+    )
+
+    assert response.status_code == 200
+    assert response.json() == {"status": "rate_limited"}
+    assert transport.calls == []
+    assert sender.calls == []
+    assert _escalations(db_conn) == []
+    assert _message_count(db_conn) == 3
+
+
+def test_receive_message_still_answers_the_message_exactly_at_the_rate_cap(
+    webhook_client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The cap-th message itself is allowed (an off-by-one blocked it until
+    2026-09-29)."""
+    _set_llm_settings(monkeypatch, _settings(max_messages_per_number_per_day=1))
+    transport = _FakeTransport()
+    _set_transport(monkeypatch, transport)
+    payload = _whatsapp_payload(wa_id=_WA_ID, message_id="wamid.at-cap", body="hi")
+
+    response = _post(
+        webhook_client, payload, signature=_sign(json.dumps(payload).encode())
+    )
+
+    assert response.status_code == 200
+    assert response.json() == {"status": "accepted"}
+    assert len(transport.calls) == 1
+
+
+def _payload_with_messages(messages: list[dict[str, Any]]) -> dict[str, Any]:
+    """_whatsapp_payload's envelope around the given messages array."""
+    payload = _whatsapp_payload(wa_id=_WA_ID, message_id="unused", body="unused")
+    payload["entry"][0]["changes"][0]["value"]["messages"] = messages
+    return payload
+
+
+def _media_message(message_id: str, message_type: str) -> dict[str, Any]:
+    return {
+        "from": _WA_ID,
+        "id": message_id,
+        "timestamp": "1700000000",
+        "type": message_type,
+        message_type: {},
+    }
+
+
+def _text_message(message_id: str, body: str) -> dict[str, Any]:
+    return {
+        "from": _WA_ID,
+        "id": message_id,
+        "timestamp": "1700000000",
+        "type": "text",
+        "text": {"body": body},
+    }
+
+
+def _post_messages(client: TestClient, messages: list[dict[str, Any]]) -> Any:
+    payload = _payload_with_messages(messages)
+    return _post(client, payload, signature=_sign(json.dumps(payload).encode()))
+
+
+def _inbound_bodies(db_conn: psycopg.Connection[Any]) -> list[str]:
+    rows = db_conn.execute(
+        "SELECT body FROM messages WHERE customer_phone = %s "
+        "AND direction = 'inbound' ORDER BY id",
+        (_PHONE,),
+    ).fetchall()
+    return [body for (body,) in rows]
+
+
+@pytest.mark.parametrize("message_type", ["audio", "image"])
+def test_receive_message_asks_the_customer_to_type_after_a_voice_note_or_image(
+    webhook_client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+    db_conn: psycopg.Connection[Any],
+    caplog: pytest.LogCaptureFixture,
+    message_type: str,
+) -> None:
+    """Owner decision A: stored, never sent to the model, answered with
+    PLEASE_TYPE_MESSAGE through the guard, and escalated for staff."""
+    _set_llm_settings(monkeypatch, _settings())
+    transport = _FakeTransport()
+    _set_transport(monkeypatch, transport)
+    sender = _FakeWhatsAppSender()
+    _set_whatsapp_sender(monkeypatch, sender)
+    caplog.set_level(logging.INFO, logger="services.agent.webhook")
+
+    response = _post_messages(
+        webhook_client, [_media_message("wamid.media", message_type)]
+    )
+
+    assert response.status_code == 200
+    assert response.json() == {"status": "unsupported_type"}
+    assert transport.calls == []
+    assert _inbound_bodies(db_conn) == [f"[{message_type} message]"]
+    assert sender.calls == [(_WA_ID, PLEASE_TYPE_MESSAGE)]
+    assert _outbound_bodies(db_conn) == [PLEASE_TYPE_MESSAGE]
+    assert _escalations(db_conn) == [
+        ("unsupported_message_type", {"message_type": message_type})
+    ]
+    assert _turn_status(caplog) == "escalated"
+
+
+@pytest.mark.parametrize(
+    "message_type", ["video", "document", "location", "contacts", "interactive"]
+)
+def test_receive_message_answers_other_media_with_the_fallback(
+    webhook_client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+    db_conn: psycopg.Connection[Any],
+    message_type: str,
+) -> None:
+    _set_llm_settings(monkeypatch, _settings())
+    transport = _FakeTransport()
+    _set_transport(monkeypatch, transport)
+    sender = _FakeWhatsAppSender()
+    _set_whatsapp_sender(monkeypatch, sender)
+
+    response = _post_messages(
+        webhook_client, [_media_message("wamid.media", message_type)]
+    )
+
+    assert response.status_code == 200
+    assert response.json() == {"status": "unsupported_type"}
+    assert transport.calls == []
+    notes = _assert_fallback_sent_and_escalated(
+        db_conn, sender, reason="unsupported_message_type"
+    )
+    assert notes == {"message_type": message_type}
+
+
+@pytest.mark.parametrize(
+    "message_type", ["reaction", "sticker", "unsupported", "a_future_type"]
+)
+def test_receive_message_ignores_reactions_stickers_and_unknown_types(
+    webhook_client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+    db_conn: psycopg.Connection[Any],
+    message_type: str,
+) -> None:
+    _set_llm_settings(monkeypatch, _settings())
+    transport = _FakeTransport()
+    _set_transport(monkeypatch, transport)
+    sender = _FakeWhatsAppSender()
+    _set_whatsapp_sender(monkeypatch, sender)
+
+    response = _post_messages(
+        webhook_client, [_media_message("wamid.ignored", message_type)]
+    )
+
+    assert response.status_code == 200
+    assert response.json() == {"status": "ignored"}
+    assert _message_count(db_conn) == 0
+    assert _conversation_count(db_conn) == 0
+    assert transport.calls == []
+    assert sender.calls == []
+
+
+def test_receive_message_processes_every_message_in_a_batch(
+    webhook_client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+    db_conn: psycopg.Connection[Any],
+) -> None:
+    """Before 2026-09-29 only the first message of a delivery was read and
+    the rest were dropped without a trace."""
+    _set_llm_settings(monkeypatch, _settings())
+    transport = _FakeTransport()
+    _set_transport(monkeypatch, transport)
+    sender = _FlakyWhatsAppSender(failures=0)
+    _set_whatsapp_sender(monkeypatch, sender)
+
+    response = _post_messages(
+        webhook_client,
+        [
+            _text_message("wamid.batch-1", "first"),
+            _text_message("wamid.batch-2", "second"),
+            _media_message("wamid.batch-3", "reaction"),
+        ],
+    )
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "status": "batch",
+        "results": ["accepted", "accepted", "ignored"],
+    }
+    assert _inbound_bodies(db_conn) == ["first", "second"]
+    assert len(transport.calls) == 2
+    assert _outbound_bodies(db_conn) == ["hello from the model"] * 2
+
+
+def test_receive_message_retries_only_the_message_that_could_not_be_stored(
+    webhook_client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+    db_conn: psycopg.Connection[Any],
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A failure before a message is stored answers 500 so Meta redelivers
+    the batch -- while the message that was stored is still answered (the
+    job scheduled for it runs on a 500 too) and comes back as a duplicate
+    on the retry, which then stores and answers the other one."""
+    _set_llm_settings(monkeypatch, _settings())
+    transport = _FakeTransport()
+    _set_transport(monkeypatch, transport)
+    sender = _FlakyWhatsAppSender(failures=0)
+    _set_whatsapp_sender(monkeypatch, sender)
+    real_insert = webhook_module._insert_inbound_message
+    failed_once: list[str] = []
+
+    def _fail_the_second_message_once(
+        conn: psycopg.Connection[Any], **kwargs: Any
+    ) -> int | None:
+        if kwargs["whatsapp_message_id"] == "wamid.retry-2" and not failed_once:
+            failed_once.append("failed")
+            raise psycopg.OperationalError("simulated insert failure")
+        return real_insert(conn, **kwargs)
+
+    monkeypatch.setattr(
+        webhook_module, "_insert_inbound_message", _fail_the_second_message_once
+    )
+    caplog.set_level(logging.ERROR, logger="services.agent.webhook")
+    messages = [
+        _text_message("wamid.retry-1", "first"),
+        _text_message("wamid.retry-2", "second"),
+    ]
+
+    first_response = _post_messages(webhook_client, messages)
+
+    assert first_response.status_code == 500
+    assert first_response.json() == {
+        "status": "batch",
+        "results": ["accepted", "not_stored"],
+    }
+    assert _inbound_bodies(db_conn) == ["first"]
+    assert len(transport.calls) == 1
+    assert [e["event"] for e in _error_events(caplog)] == ["inbound_message_not_stored"]
+
+    retry_response = _post_messages(webhook_client, messages)
+
+    assert retry_response.status_code == 200
+    assert retry_response.json() == {
+        "status": "batch",
+        "results": ["duplicate", "accepted"],
+    }
+    assert _inbound_bodies(db_conn) == ["first", "second"]
+    assert len(transport.calls) == 2
+
+
+def test_receive_message_still_answers_when_touching_last_message_at_fails(
+    webhook_client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A failure after the message is stored must not become a 500: the
+    retry would be dropped as a duplicate and the message lost for good."""
+    _set_llm_settings(monkeypatch, _settings())
+    transport = _FakeTransport()
+    _set_transport(monkeypatch, transport)
+    calls: list[int] = []
+
+    def _fail_the_first_touch(
+        conn: psycopg.Connection[Any], *, conversation_id: int
+    ) -> None:
+        calls.append(conversation_id)
+        if len(calls) == 1:
+            raise psycopg.OperationalError("simulated connection failure")
+        touch_last_message_at(conn, conversation_id=conversation_id)
+
+    monkeypatch.setattr(webhook_module, "touch_last_message_at", _fail_the_first_touch)
+    caplog.set_level(logging.ERROR, logger="services.agent.webhook")
+
+    response = _post_messages(webhook_client, [_text_message("wamid.touch", "hi")])
+
+    assert response.status_code == 200
+    assert response.json() == {"status": "accepted"}
+    assert len(transport.calls) == 1
+    assert [e["event"] for e in _error_events(caplog)] == [
+        "touch_last_message_at_failed"
+    ]
+
+
+def test_receive_message_lets_a_message_through_when_the_rate_cap_check_fails(
+    webhook_client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Fails open: one message over the cap is a smaller harm than a
+    message lost for good (see the test above)."""
+    _set_llm_settings(monkeypatch, _settings())
+    transport = _FakeTransport()
+    _set_transport(monkeypatch, transport)
+
+    def _raise_db_error(_conn: psycopg.Connection[Any], **_kwargs: Any) -> None:
+        raise psycopg.OperationalError("simulated connection failure")
+
+    monkeypatch.setattr(webhook_module, "check_message_rate_cap", _raise_db_error)
+    caplog.set_level(logging.ERROR, logger="services.agent.webhook")
+
+    response = _post_messages(webhook_client, [_text_message("wamid.cap-check", "hi")])
+
+    assert response.status_code == 200
+    assert response.json() == {"status": "accepted"}
+    assert len(transport.calls) == 1
+    assert [e["event"] for e in _error_events(caplog)] == [
+        "message_rate_cap_check_failed"
+    ]
 
 
 def test_receive_message_second_message_hits_the_cap_from_the_first_recording(

@@ -432,13 +432,10 @@ def test_check_message_rate_cap_allows_one_message_under_the_cap(
     check_message_rate_cap(db_conn, customer_phone=_PHONE, now=now, settings=settings)
 
 
-def test_check_message_rate_cap_raises_at_the_exact_cap(
-    db_conn: psycopg.Connection[Any],
+def _seed_inbound_messages(
+    db_conn: psycopg.Connection[Any], conversation_id: int, count: int
 ) -> None:
-    settings = _settings(max_messages_per_number_per_day=3)
-    now = datetime.now(UTC)
-    conversation_id = seed_conversation(db_conn, customer_phone=_PHONE)
-    for _ in range(3):
+    for _ in range(count):
         seed_message(
             db_conn,
             conversation_id,
@@ -447,10 +444,48 @@ def test_check_message_rate_cap_raises_at_the_exact_cap(
             customer_phone=_PHONE,
         )
 
-    with pytest.raises(MessageRateCapExceededError):
+
+def test_check_message_rate_cap_allows_exactly_the_cap(
+    db_conn: psycopg.Connection[Any],
+) -> None:
+    """The count includes the message just stored, so the cap-th message
+    itself is still allowed (it was blocked by an off-by-one until
+    2026-09-29)."""
+    settings = _settings(max_messages_per_number_per_day=3)
+    conversation_id = seed_conversation(db_conn, customer_phone=_PHONE)
+    _seed_inbound_messages(db_conn, conversation_id, 3)
+
+    check_message_rate_cap(
+        db_conn, customer_phone=_PHONE, now=datetime.now(UTC), settings=settings
+    )
+
+
+def test_check_message_rate_cap_marks_the_first_message_past_the_cap(
+    db_conn: psycopg.Connection[Any],
+) -> None:
+    settings = _settings(max_messages_per_number_per_day=3)
+    conversation_id = seed_conversation(db_conn, customer_phone=_PHONE)
+    _seed_inbound_messages(db_conn, conversation_id, 4)
+
+    with pytest.raises(MessageRateCapExceededError) as raised:
         check_message_rate_cap(
-            db_conn, customer_phone=_PHONE, now=now, settings=settings
+            db_conn, customer_phone=_PHONE, now=datetime.now(UTC), settings=settings
         )
+    assert raised.value.first_of_day is True
+
+
+def test_check_message_rate_cap_does_not_mark_later_messages_past_the_cap(
+    db_conn: psycopg.Connection[Any],
+) -> None:
+    settings = _settings(max_messages_per_number_per_day=3)
+    conversation_id = seed_conversation(db_conn, customer_phone=_PHONE)
+    _seed_inbound_messages(db_conn, conversation_id, 5)
+
+    with pytest.raises(MessageRateCapExceededError) as raised:
+        check_message_rate_cap(
+            db_conn, customer_phone=_PHONE, now=datetime.now(UTC), settings=settings
+        )
+    assert raised.value.first_of_day is False
 
 
 def test_check_message_rate_cap_only_counts_inbound_messages(
@@ -472,9 +507,7 @@ def test_check_message_rate_cap_is_isolated_per_phone_number(
     settings = _settings(max_messages_per_number_per_day=1)
     now = datetime.now(UTC)
     conversation_id = seed_conversation(db_conn, customer_phone=_PHONE)
-    seed_message(
-        db_conn, conversation_id, direction="inbound", body="hi", customer_phone=_PHONE
-    )
+    _seed_inbound_messages(db_conn, conversation_id, 2)
 
     with pytest.raises(MessageRateCapExceededError):
         check_message_rate_cap(

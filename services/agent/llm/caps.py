@@ -15,10 +15,9 @@ itself). Three checks, two writes:
   this is never gated on the output guard or the send.
 - increment_turn_count: called by the webhook at the same two points as
   record_token_usage above, for the same reason — see its own docstring.
-- check_message_rate_cap: called by the webhook, before conversation
-  state is even loaded — gates an inbound message before a conversation
-  turn even starts, so it lives here rather than as a
-  generate_reply-raised LlmError.
+- check_message_rate_cap: called by the webhook right after it stores an
+  inbound message, before any conversation turn starts — so it lives
+  here rather than as a generate_reply-raised LlmError.
 """
 
 from __future__ import annotations
@@ -51,14 +50,20 @@ _INBOUND = "inbound"
 
 
 class MessageRateCapExceededError(Exception):
-    """Raised when a phone number has already sent
-    settings.max_messages_per_number_per_day inbound messages on the
-    current Asia/Riyadh calendar day.
+    """Raised when a phone number's inbound messages on the current
+    Asia/Riyadh calendar day go past settings.max_messages_per_number_per_day.
+
+    first_of_day is True only for the first message past the cap that
+    day -- the one that gets the fallback and an escalation.
 
     Not an LlmError: this gates an inbound WhatsApp message before a
     conversation turn even starts (the webhook layer), not something
     generate_reply itself can raise.
     """
+
+    def __init__(self, message: str, *, first_of_day: bool) -> None:
+        super().__init__(message)
+        self.first_of_day = first_of_day
 
 
 def check_token_spend_caps(
@@ -246,10 +251,18 @@ def check_message_rate_cap(
     now: datetime,
     settings: LlmSettings,
 ) -> None:
-    """Raises MessageRateCapExceededError if customer_phone has already
-    sent settings.max_messages_per_number_per_day inbound messages on the
-    current Asia/Riyadh calendar day. Called by the webhook, before
-    conversation state is even loaded.
+    """Raises MessageRateCapExceededError if the inbound message just
+    stored takes customer_phone past settings.max_messages_per_number_per_day
+    inbound messages on the current Asia/Riyadh calendar day. Called by the
+    webhook right after it stores the message, so the count below includes
+    that message: messages 1..cap are allowed, cap+1 onward are blocked
+    (until 2026-09-29 the check used >= and blocked the cap-th message
+    itself). The exception's first_of_day is True for exactly the cap+1-th
+    message, the one the webhook answers with the fallback and an
+    escalation; later blocked messages stay silent (owner decision B).
+
+    Raises:
+        MessageRateCapExceededError: see above.
     """
     day = riyadh_calendar_day(now)
     day_start_utc, day_end_utc = riyadh_day_bounds_utc(day)
@@ -261,9 +274,10 @@ def check_message_rate_cap(
     if row is None:
         raise RuntimeError("SELECT COUNT(*) with no GROUP BY returned no row")
     message_count: int = row[0]
-    if message_count >= settings.max_messages_per_number_per_day:
+    cap = settings.max_messages_per_number_per_day
+    if message_count > cap:
         raise MessageRateCapExceededError(
             f"{customer_phone} has sent {message_count} messages on "
-            f"{day.isoformat()}, at or above the cap "
-            f"({settings.max_messages_per_number_per_day})"
+            f"{day.isoformat()}, past the cap ({cap})",
+            first_of_day=message_count == cap + 1,
         )

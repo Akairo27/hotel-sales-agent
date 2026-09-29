@@ -2,8 +2,10 @@
 
 Health-check plus the WhatsApp Cloud API webhook (services/agent/webhook.py)
 — signature verification, idempotent inbound logging, and spend/rate-cap
-enforcement. No booking/payment code path here — CLAUDE.md rule 10 requires
-asking about before adding anything touching payment/booking confirmation.
+enforcement. The lifespan handler refuses to start with a missing setting
+(validate_startup_configuration). No booking/payment code path here —
+CLAUDE.md rule 10 requires asking about before adding anything touching
+payment/booking confirmation.
 
 Run locally with: uvicorn services.agent.main:app --reload
 """
@@ -18,7 +20,10 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 
+from services.agent.llm.config import load_llm_settings
+from services.agent.webhook import get_model_transport, load_webhook_settings
 from services.agent.webhook import router as webhook_router
+from services.agent.whatsapp_send import load_whatsapp_send_settings
 
 # httpx/httpcore log every request URL at INFO/DEBUG -- this app's own
 # webhook and WhatsApp-send calls carry a live API key or access token in
@@ -87,10 +92,42 @@ def configure_logging() -> None:
         logging.getLogger(name).setLevel(logging.WARNING)
 
 
+class StartupConfigurationError(Exception):
+    """Raised at startup when a setting the webhook needs is missing and no
+    other loader already reports it (today: DATABASE_URL)."""
+
+
+def validate_startup_configuration() -> None:
+    """Loads every setting a webhook request needs, once, at startup, so a
+    broken environment stops the service instead of letting it start
+    "healthy" and fail on the first customer message (owner decision E,
+    2026-09-29). Each loader already runs per request; this only moves the
+    first failure to boot. The model transport is built too, which is what
+    checks an OpenRouter route's provider allowlist and key.
+
+    Deliberately no database connection: a brief outage at boot would then
+    crash-loop the service (systemd's Restart=on-failure) instead of
+    letting it recover on the next request. Only DATABASE_URL's presence is
+    checked. No setting's value is ever logged or put in an error message
+    here.
+
+    Raises:
+        WebhookConfigurationError, LlmConfigurationError,
+        WhatsAppSendConfigurationError: from the respective loaders.
+        StartupConfigurationError: DATABASE_URL is unset or empty.
+    """
+    load_webhook_settings()
+    get_model_transport(load_llm_settings())
+    load_whatsapp_send_settings()
+    if not os.environ.get("DATABASE_URL"):
+        raise StartupConfigurationError("DATABASE_URL is not set")
+
+
 @asynccontextmanager
 async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
-    del app  # unused: configure_logging() takes no arguments
+    del app  # unused: neither call below takes the app
     configure_logging()
+    validate_startup_configuration()
     yield
 
 

@@ -1,5 +1,5 @@
 """Unit tests for services/agent/webhook.py's pure helpers — no database,
-no network. _signature_is_valid, _parse_inbound_message, and
+no network. _signature_problem, _parse_inbound_messages, and
 load_webhook_settings each have their own dedicated tests here rather than
 being exercised only incidentally through the integration tests, matching
 this repo's usual layering (e.g. output_guard/extraction.py vs.
@@ -33,8 +33,8 @@ from services.agent.webhook import (
     WebhookConfigurationError,
     _funnel_status,
     _normalize_phone,
-    _parse_inbound_message,
-    _signature_is_valid,
+    _parse_inbound_messages,
+    _signature_problem,
     get_llm_settings,
     get_model_transport,
     get_webhook_settings,
@@ -49,41 +49,52 @@ def _signature_for(body: bytes, secret: str = _SECRET) -> str:
     return f"sha256={digest}"
 
 
-def test_signature_is_valid_accepts_a_correctly_signed_body() -> None:
+def test_signature_problem_is_none_for_a_correctly_signed_body() -> None:
     body = b'{"hello": "world"}'
-    assert _signature_is_valid(
-        body=body, signature_header=_signature_for(body), app_secret=_SECRET
+    assert (
+        _signature_problem(
+            body=body, signature_header=_signature_for(body), app_secret=_SECRET
+        )
+        is None
     )
 
 
-def test_signature_is_valid_rejects_a_signature_from_a_different_secret() -> None:
+def test_signature_problem_is_a_mismatch_for_a_different_secret() -> None:
     body = b'{"hello": "world"}'
     wrong_signature = _signature_for(body, secret="a-different-secret")
-    assert not _signature_is_valid(
-        body=body, signature_header=wrong_signature, app_secret=_SECRET
+    assert (
+        _signature_problem(
+            body=body, signature_header=wrong_signature, app_secret=_SECRET
+        )
+        == "mismatch"
     )
 
 
-def test_signature_is_valid_rejects_a_signature_for_a_different_body() -> None:
+def test_signature_problem_is_a_mismatch_for_a_different_body() -> None:
     signed_for_other_body = _signature_for(b'{"other": "body"}')
-    assert not _signature_is_valid(
-        body=b'{"hello": "world"}',
-        signature_header=signed_for_other_body,
-        app_secret=_SECRET,
+    assert (
+        _signature_problem(
+            body=b'{"hello": "world"}',
+            signature_header=signed_for_other_body,
+            app_secret=_SECRET,
+        )
+        == "mismatch"
     )
 
 
-def test_signature_is_valid_rejects_a_missing_header() -> None:
-    assert not _signature_is_valid(
-        body=b"anything", signature_header=None, app_secret=_SECRET
+def test_signature_problem_reports_a_missing_header() -> None:
+    assert (
+        _signature_problem(body=b"anything", signature_header=None, app_secret=_SECRET)
+        == "missing"
     )
 
 
-def test_signature_is_valid_rejects_a_header_without_the_sha256_prefix() -> None:
+def test_signature_problem_reports_a_header_without_the_sha256_prefix() -> None:
     body = b'{"hello": "world"}'
     bare_digest = hmac.new(_SECRET.encode("utf-8"), body, hashlib.sha256).hexdigest()
-    assert not _signature_is_valid(
-        body=body, signature_header=bare_digest, app_secret=_SECRET
+    assert (
+        _signature_problem(body=body, signature_header=bare_digest, app_secret=_SECRET)
+        == "malformed"
     )
 
 
@@ -112,21 +123,21 @@ def _payload(**value_overrides: object) -> dict[str, object]:
     return {"entry": [{"changes": [{"value": value}]}]}
 
 
-def test_parse_inbound_message_extracts_phone_name_id_and_body() -> None:
-    inbound = _parse_inbound_message(_payload())
+def test_parse_inbound_messages_extracts_phone_name_id_type_and_body() -> None:
+    (inbound,) = _parse_inbound_messages(_payload())
 
-    assert inbound is not None
     assert inbound.customer_phone == "+966500000001"
     assert inbound.customer_name == "Test Customer"
     assert inbound.whatsapp_message_id == "wamid.1"
+    assert inbound.message_type == "text"
     assert inbound.body == "hello"
 
 
-def test_parse_inbound_message_returns_none_when_there_are_no_messages() -> None:
-    assert _parse_inbound_message(_payload(messages=[])) is None
+def test_parse_inbound_messages_returns_nothing_when_there_are_no_messages() -> None:
+    assert _parse_inbound_messages(_payload(messages=[])) == []
 
 
-def test_parse_inbound_message_returns_none_for_a_status_callback_payload() -> None:
+def test_parse_inbound_messages_returns_nothing_for_a_status_callback() -> None:
     """A delivery/read status callback has no "messages" key at all —
     Meta sends these to the same URL as inbound messages."""
     payload = {
@@ -134,28 +145,121 @@ def test_parse_inbound_message_returns_none_for_a_status_callback_payload() -> N
             {"changes": [{"value": {"messaging_product": "whatsapp", "statuses": []}}]}
         ]
     }
-    assert _parse_inbound_message(payload) is None
+    assert _parse_inbound_messages(payload) == []
 
 
-def test_parse_inbound_message_returns_none_for_a_non_text_message() -> None:
+def test_parse_inbound_messages_keeps_a_media_message_with_a_placeholder_body() -> None:
+    """Which types get answered is receive_message's decision; the parser
+    keeps every well-formed message, with a placeholder body (plus the
+    caption, when there is one) standing in for the media."""
     payload = _payload(
-        messages=[{"from": "966500000001", "id": "wamid.2", "type": "image"}]
+        messages=[
+            {"from": "966500000001", "id": "wamid.2", "type": "audio", "audio": {}},
+            {
+                "from": "966500000001",
+                "id": "wamid.3",
+                "type": "image",
+                "image": {"caption": "is this room free?"},
+            },
+            {"from": "966500000001", "id": "wamid.4", "type": "reaction"},
+        ]
     )
-    assert _parse_inbound_message(payload) is None
+
+    parsed = _parse_inbound_messages(payload)
+
+    assert [(m.message_type, m.body) for m in parsed] == [
+        ("audio", "[audio message]"),
+        ("image", "[image message] is this room free?"),
+        ("reaction", "[reaction message]"),
+    ]
 
 
-def test_parse_inbound_message_falls_back_to_from_field_without_contacts() -> None:
+def test_parse_inbound_messages_returns_every_message_in_every_entry_and_change() -> (
+    None
+):
+    """A delivery can batch several messages -- all of them are returned,
+    in order, not just the first; each sender's display name comes from
+    the contact whose wa_id matches."""
+    second_value = {
+        "contacts": [{"profile": {"name": "Other"}, "wa_id": "966500000002"}],
+        "messages": [
+            {
+                "from": "966500000002",
+                "id": "wamid.b",
+                "type": "text",
+                "text": {"body": "second"},
+            }
+        ],
+    }
+    payload = _payload(
+        messages=[
+            {
+                "from": "966500000001",
+                "id": "wamid.a1",
+                "type": "text",
+                "text": {"body": "first"},
+            },
+            {
+                "from": "966500000001",
+                "id": "wamid.a2",
+                "type": "text",
+                "text": {"body": "again"},
+            },
+        ]
+    )
+    entries = payload["entry"]
+    assert isinstance(entries, list)
+    entries.append({"changes": [{"value": second_value}]})
+
+    parsed = _parse_inbound_messages(payload)
+
+    assert [(m.whatsapp_message_id, m.customer_name, m.body) for m in parsed] == [
+        ("wamid.a1", "Test Customer", "first"),
+        ("wamid.a2", "Test Customer", "again"),
+        ("wamid.b", "Other", "second"),
+    ]
+
+
+def test_parse_inbound_messages_skips_a_malformed_message_but_keeps_the_rest() -> None:
+    payload = _payload(
+        messages=[
+            {"from": "966500000001", "type": "text", "text": {"body": "no id"}},
+            {"from": "966500000001", "id": "wamid.x", "type": "text"},
+            {
+                "from": "966500000001",
+                "id": "wamid.ok",
+                "type": "text",
+                "text": {"body": "fine"},
+            },
+        ]
+    )
+
+    parsed = _parse_inbound_messages(payload)
+
+    assert [m.whatsapp_message_id for m in parsed] == ["wamid.ok"]
+
+
+def test_parse_inbound_messages_falls_back_to_the_only_contact_without_from() -> None:
+    payload = _payload(
+        messages=[{"id": "wamid.1", "type": "text", "text": {"body": "hello"}}]
+    )
+    (inbound,) = _parse_inbound_messages(payload)
+
+    assert inbound.customer_phone == "+966500000001"
+
+
+def test_parse_inbound_messages_has_no_name_without_a_matching_contact() -> None:
     payload = _payload(contacts=[])
-    inbound = _parse_inbound_message(payload)
+    (inbound,) = _parse_inbound_messages(payload)
 
-    assert inbound is not None
     assert inbound.customer_phone == "+966500000001"
     assert inbound.customer_name is None
 
 
-def test_parse_inbound_message_returns_none_for_a_malformed_payload() -> None:
-    assert _parse_inbound_message({"entry": []}) is None
-    assert _parse_inbound_message({}) is None
+def test_parse_inbound_messages_returns_nothing_for_a_malformed_payload() -> None:
+    assert _parse_inbound_messages({"entry": []}) == []
+    assert _parse_inbound_messages({}) == []
+    assert _parse_inbound_messages({"entry": "not-a-list"}) == []
 
 
 def test_load_webhook_settings_with_a_valid_env(
