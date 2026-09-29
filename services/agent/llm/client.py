@@ -76,7 +76,7 @@ logger = logging.getLogger(__name__)
 # The numbers below are deliberately tighter than the SDK's own defaults
 # (5 attempts, up to 60s between them): those are tuned for one isolated
 # call, but this transport sits inside conversation.py's tool-calling
-# loop, which can make up to MAX_TOOL_ITERATIONS (4) of these in a single
+# loop, which can make up to MAX_TOOL_ITERATIONS (6) of these in a single
 # turn. This is a WhatsApp conversation, not a batch job -- a customer
 # waiting silently past ~30 seconds assumes the bot is broken, and
 # escalating to a human at that point (webhook.py's _escalate_and_notify)

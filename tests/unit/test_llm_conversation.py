@@ -633,3 +633,34 @@ def test_an_unknown_tool_still_ends_the_turn(
         _run(transport)
 
     assert len(transport.calls) == 1
+
+
+def test_a_correction_path_of_five_model_calls_still_ends_in_a_reply(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Four rejected tool calls in a row, then an answer: five model calls
+    in one turn. Under the old MAX_TOOL_ITERATIONS of 4 this ended in
+    ToolLoopLimitError; the owner's limit of 6 leaves room for it."""
+    assert MAX_TOOL_ITERATIONS >= 5
+    _stub_conversation_state(monkeypatch, turn_count=0)
+
+    def _reject(*_args: Any, **_kwargs: Any) -> dict[str, Any]:
+        raise InvalidToolArgumentsError("wrong again")
+
+    monkeypatch.setattr(conversation_module, "dispatch_tool", _reject)
+    responses: list[ModelResponse | Exception] = [
+        _function_call_response("get_quote", {"hotel_id": 1}) for _ in range(4)
+    ]
+    responses.append(_text_response("could you confirm your dates?"))
+    transport = FakeTransport(responses)
+
+    reply = _run(transport)
+
+    assert reply.text == "could you confirm your dates?"
+    assert len(transport.calls) == 5
+
+
+def test_max_tool_iterations_is_the_owner_approved_six() -> None:
+    """A deliberate owner decision (2026-09-29), not a tuning knob to
+    change in passing: the turn budget, not this count, bounds the wait."""
+    assert MAX_TOOL_ITERATIONS == 6

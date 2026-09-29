@@ -1973,8 +1973,7 @@ def test_receive_message_lets_the_model_resolve_an_unsearched_hotel_and_answer(
     """The model skips search_hotels and uses an id directly: the
     resolved-stays guard rejects it with the unresolved_stay tool error,
     the model then calls search_hotels, retries, and answers -- one turn,
-    delivered, no escalation. That recovery takes four model calls, the
-    whole per-turn MAX_TOOL_ITERATIONS budget today."""
+    delivered, no escalation. That recovery takes four model calls."""
     assert MAX_TOOL_ITERATIONS >= 4, "the recovery below needs four model calls"
     _seed_searchable_hotel(db_conn)
     _set_llm_settings(monkeypatch, _settings())
@@ -2014,6 +2013,70 @@ def test_receive_message_lets_the_model_resolve_an_unsearched_hotel_and_answer(
         tool_error_result("unresolved_stay")
     ]
     assert _tool_results_seen_by_call(transport, 3)[0]["available"] is False
+    assert sender.calls == [(_WA_ID, reply_text)]
+    assert _escalations(db_conn) == []
+
+
+def test_receive_message_completes_a_correction_path_that_needs_five_model_calls(
+    webhook_client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+    db_conn: psycopg.Connection[Any],
+) -> None:
+    """Two separate mistakes in one turn: an id search_hotels never
+    returned (unresolved_stay), then, after the search, a malformed date
+    (invalid_arguments). Recovering takes five model calls -- one more than
+    the old MAX_TOOL_ITERATIONS of 4 allowed, which would have ended this
+    turn in a tool_loop_limit_exceeded escalation. With the owner's limit
+    of 6 the reply is delivered and nothing is escalated."""
+    assert MAX_TOOL_ITERATIONS >= 5, "the recovery below needs five model calls"
+    _seed_searchable_hotel(db_conn)
+    _set_llm_settings(monkeypatch, _settings())
+    malformed_date = dict(_HARMLESS_AVAILABILITY_ARGS, check_in="1 January")
+    reply_text = "That room is not available for those dates, sorry."
+    transport = _ScriptedTransport(
+        [
+            _function_call_response(
+                "check_availability",
+                _HARMLESS_AVAILABILITY_ARGS,
+                prompt_tokens=25,
+                candidates_tokens=5,
+            ),
+            _search_hotels_prefix_call(),
+            _function_call_response(
+                "check_availability",
+                malformed_date,
+                prompt_tokens=25,
+                candidates_tokens=5,
+            ),
+            _function_call_response(
+                "check_availability",
+                _HARMLESS_AVAILABILITY_ARGS,
+                prompt_tokens=25,
+                candidates_tokens=5,
+            ),
+            _text_response(reply_text, prompt_tokens=25, candidates_tokens=5),
+        ]
+    )
+    _set_transport(monkeypatch, transport)
+    sender = _FakeWhatsAppSender()
+    _set_whatsapp_sender(monkeypatch, sender)
+    payload = _whatsapp_payload(
+        wa_id=_WA_ID, message_id="wamid.five-call-correction", body="hello"
+    )
+
+    response = _post(
+        webhook_client, payload, signature=_sign(json.dumps(payload).encode())
+    )
+
+    assert response.status_code == 200
+    assert len(transport.calls) == 5
+    assert _tool_results_seen_by_call(transport, 1) == [
+        tool_error_result("unresolved_stay")
+    ]
+    assert _tool_results_seen_by_call(transport, 3) == [
+        tool_error_result("invalid_arguments")
+    ]
+    assert _tool_results_seen_by_call(transport, 4)[0]["available"] is False
     assert sender.calls == [(_WA_ID, reply_text)]
     assert _escalations(db_conn) == []
 
