@@ -3,24 +3,32 @@
 Health-check plus the WhatsApp Cloud API webhook (services/agent/webhook.py)
 — signature verification, idempotent inbound logging, and spend/rate-cap
 enforcement. The lifespan handler refuses to start with a missing setting
-(validate_startup_configuration). No booking/payment code path here —
-CLAUDE.md rule 10 requires asking about before adding anything touching
-payment/booking confirmation.
+(validate_startup_configuration), then starts the startup sweep for
+messages lost to a hard kill (services/agent/startup_sweep.py) in the
+background. No booking/payment code path here — CLAUDE.md rule 10 requires
+asking about before adding anything touching payment/booking confirmation.
 
 Run locally with: uvicorn services.agent.main:app --reload
 """
 
 from __future__ import annotations
 
+import asyncio
+import contextlib
 import logging
 import os
 import sys
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from datetime import UTC, datetime
 
 from fastapi import FastAPI
 
 from services.agent.llm.config import load_llm_settings
+from services.agent.startup_sweep import (
+    load_startup_sweep_settings,
+    run_startup_sweep,
+)
 from services.agent.webhook import get_model_transport, load_webhook_settings
 from services.agent.webhook import router as webhook_router
 from services.agent.whatsapp_send import load_whatsapp_send_settings
@@ -113,22 +121,36 @@ def validate_startup_configuration() -> None:
 
     Raises:
         WebhookConfigurationError, LlmConfigurationError,
-        WhatsAppSendConfigurationError: from the respective loaders.
+        WhatsAppSendConfigurationError, StartupSweepConfigurationError:
+            from the respective loaders.
         StartupConfigurationError: DATABASE_URL is unset or empty.
     """
     load_webhook_settings()
     get_model_transport(load_llm_settings())
     load_whatsapp_send_settings()
+    load_startup_sweep_settings()
     if not os.environ.get("DATABASE_URL"):
         raise StartupConfigurationError("DATABASE_URL is not set")
 
 
 @asynccontextmanager
 async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
-    del app  # unused: neither call below takes the app
+    """Validates the configuration, then runs the startup sweep as a
+    background task, so neither a slow sweep nor a database outage delays
+    or fails the start (owner decision, 2026-09-29). A sweep still running
+    at shutdown is cancelled; whatever it had not reached is still
+    unanswered at the next start."""
+    del app  # unused: nothing below takes the app
+    started_at = datetime.now(UTC)
     configure_logging()
     validate_startup_configuration()
-    yield
+    sweep = asyncio.create_task(run_startup_sweep(started_at=started_at))
+    try:
+        yield
+    finally:
+        sweep.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await sweep
 
 
 app = FastAPI(title="hotel-sales-agent", lifespan=_lifespan)

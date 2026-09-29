@@ -26,6 +26,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from collections.abc import Iterator
+from datetime import UTC, datetime
 
 import pytest
 from fastapi.testclient import TestClient
@@ -40,6 +41,10 @@ from services.agent.main import (
     configure_logging,
     health,
     validate_startup_configuration,
+)
+from services.agent.startup_sweep import (
+    STARTUP_SWEEP_LOOKBACK_HOURS_ENV,
+    StartupSweepConfigurationError,
 )
 from services.agent.webhook import WebhookConfigurationError
 from services.agent.whatsapp_send import WhatsAppSendConfigurationError
@@ -125,12 +130,18 @@ def test_configure_logging_writes_to_stdout_not_stderr(
     assert "probe-message" not in captured.err
 
 
+async def _no_sweep(*, started_at: datetime) -> None:
+    del started_at
+
+
 def test_lifespan_configures_logging_only_when_the_asgi_server_actually_starts(
     monkeypatch: pytest.MonkeyPatch, _clean_root_logger: None
 ) -> None:
     monkeypatch.setenv("LOG_LEVEL", "DEBUG")
-    # Startup validation has its own tests below; this one is about logging.
+    # Startup validation and the sweep have their own tests below; this one
+    # is about logging.
     monkeypatch.setattr(main_module, "validate_startup_configuration", lambda: None)
+    monkeypatch.setattr(main_module, "run_startup_sweep", _no_sweep)
     root = logging.getLogger()
     root.setLevel(logging.WARNING)
 
@@ -168,6 +179,8 @@ _VALID_ENV = {
 def _valid_env(monkeypatch: pytest.MonkeyPatch) -> None:
     for key, value in _VALID_ENV.items():
         monkeypatch.setenv(key, value)
+    # Optional, with a default: left unset unless a test sets it.
+    monkeypatch.delenv(STARTUP_SWEEP_LOOKBACK_HOURS_ENV, raising=False)
 
 
 @pytest.mark.usefixtures("_valid_env")
@@ -225,3 +238,61 @@ def test_the_app_refuses_to_start_with_a_broken_environment(
 
     with pytest.raises(WebhookConfigurationError), TestClient(app):
         pass
+
+
+@pytest.mark.usefixtures("_valid_env")
+def test_validate_startup_configuration_refuses_an_invalid_sweep_lookback(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv(STARTUP_SWEEP_LOOKBACK_HOURS_ENV, "0")
+
+    with pytest.raises(StartupSweepConfigurationError):
+        validate_startup_configuration()
+
+
+@pytest.mark.usefixtures("_clean_root_logger")
+def test_the_app_runs_the_startup_sweep_in_the_background_from_its_start_time(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(main_module, "validate_startup_configuration", lambda: None)
+    sweep_started_at: list[datetime] = []
+
+    async def _record_sweep(*, started_at: datetime) -> None:
+        sweep_started_at.append(started_at)
+
+    monkeypatch.setattr(main_module, "run_startup_sweep", _record_sweep)
+    before = datetime.now(UTC)
+
+    with TestClient(app) as client:
+        response = client.get("/health")
+
+    assert response.status_code == 200
+    (started_at,) = sweep_started_at
+    assert before <= started_at <= datetime.now(UTC)
+
+
+@pytest.mark.usefixtures("_clean_root_logger")
+def test_the_app_serves_requests_while_the_sweep_runs_and_cancels_it_at_shutdown(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A sweep that never finishes (a hung send, a slow database) must
+    neither hold up the start nor keep the process from stopping."""
+    monkeypatch.setattr(main_module, "validate_startup_configuration", lambda: None)
+    cancelled: list[bool] = []
+
+    async def _never_finishing_sweep(*, started_at: datetime) -> None:
+        del started_at
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            cancelled.append(True)
+            raise
+
+    monkeypatch.setattr(main_module, "run_startup_sweep", _never_finishing_sweep)
+
+    with TestClient(app) as client:
+        response = client.get("/health")
+        assert cancelled == []
+
+    assert response.status_code == 200
+    assert cancelled == [True]
