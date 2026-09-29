@@ -2237,14 +2237,15 @@ def test_receive_message_records_partial_usage_for_a_missing_price_rule_chain(
     """The first of three pricing exceptions dispatch.py deliberately
     lets propagate -- IncompletePriceRuleChainError, here, from no
     price_rule being configured at all. Tested separately from
-    NoMatchingBandError and InconsistentPriceConfigurationError below
-    even though dispatch.py's own docstring treats all three as one
-    undifferentiated "business-data problem" category with no distinct
-    handling anywhere in this codebase today: that shared-code-path
-    reasoning is exactly the kind of thing a future change could
-    invalidate for one of the three without anyone noticing, if only one
-    of them had a test. Each ends in the funnel with reason
-    pricing_error."""
+    InconsistentPriceConfigurationError below even though dispatch.py's own
+    docstring treats all three as one undifferentiated "business-data
+    problem" category with no distinct handling anywhere in this codebase
+    today: that shared-code-path reasoning is exactly the kind of thing a
+    future change could invalidate for one of the three without anyone
+    noticing, if only one of them had a test. The third, NoMatchingBandError,
+    has no end-to-end trigger left since the 2026-09-29 pricing fix (valid
+    data never produces it); test_no_exception_type_ends_a_turn_in_silence
+    covers it. Each ends in the funnel with reason pricing_error."""
     hotel_id = seed_hotel(
         db_conn,
         hotel_name=_SEARCHABLE_HOTEL_NAME,
@@ -2328,8 +2329,8 @@ def _seed_fully_booked_priceable_night(
 ) -> tuple[int, int]:
     """Everything get_quote needs to price 2030-01-10 -- searchable hotel,
     room type, season, price rule -- except a free room: reserved == total,
-    so occupancy resolves to exactly 1.0, one past the flat_demand_curve()
-    occupancy band's exclusive upper bound of 1."""
+    so occupancy resolves to exactly 1.0 (the top of flat_demand_curve()'s
+    single occupancy band, which closes at 1)."""
     hotel_id = seed_hotel(
         db_conn,
         hotel_name=_SEARCHABLE_HOTEL_NAME,
@@ -2371,7 +2372,7 @@ def test_receive_message_answers_normally_for_a_fully_booked_night(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     """A night booked to full capacity used to fail the whole turn with
-    NoMatchingBandError (the test below) -- the customer got nothing.
+    NoMatchingBandError -- the customer got nothing.
     dispatch_get_quote's availability gate now declines it as an ordinary
     unpriced result before any price is computed, the model's next call
     answers, and that reply is delivered. No `quotes` row is written."""
@@ -2422,31 +2423,29 @@ def test_receive_message_answers_normally_for_a_fully_booked_night(
     assert quote_count == (0,)
 
 
-def test_receive_message_records_partial_usage_when_the_last_room_is_taken_mid_turn(
+def test_receive_message_quotes_normally_when_the_last_room_is_taken_mid_turn(
     webhook_client: TestClient,
     monkeypatch: pytest.MonkeyPatch,
     db_conn: psycopg.Connection[Any],
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    """The second pricing exception: NoMatchingBandError. A demand_curve's
-    occupancy_bands top band is conventionally {"min": 0, "max": 1} --
-    but lookup_band_value's range check is [min, max), so occupancy
-    exactly 1.0 (a night booked to full capacity) falls outside every
-    band despite the config satisfying migration 0006's "full coverage"
-    CHECK constraint. dispatch_get_quote's availability gate now declines
-    a fully booked night before compute_quote runs
-    (test_receive_message_answers_normally_for_a_fully_booked_night), so
-    this path is reachable only when the last room is taken between the
-    gate's read and compute_quote's own occupancy read -- a narrow race.
-    Simulated here by making the gate report availability over data that
-    is in fact fully booked, so the webhook-level contract for a pricing
-    exception (partial usage recorded, turn_failed logged with a
-    frames-only traceback, fallback + pricing_error escalation) stays
-    covered even though the ordinary fully-booked path no longer reaches
-    it."""
+    """The race between dispatch_get_quote's availability gate and
+    compute_quote's own occupancy read: the last room is taken after the
+    gate said yes. Simulated by a gate that reports availability over data
+    that is in fact fully booked. Until 2026-09-29 occupancy 1.0 fell
+    outside every valid band, so this failed the turn with
+    NoMatchingBandError (fallback + pricing_error escalation). The night is
+    now priced at the top occupancy band and the reply delivered normally --
+    a quote is not a sale: create_hold still refuses the stay
+    (test_a_sold_out_night_is_priced_but_a_hold_on_it_is_refused, in
+    tests/integration/test_pricing_compute.py). The webhook's contract for a
+    real pricing exception stays covered by the
+    InconsistentPriceConfigurationError tests below and by
+    test_no_exception_type_ends_a_turn_in_silence."""
     monkeypatch.setattr(dispatch_module, "check_availability", lambda *_a, **_k: True)
     hotel_id, room_type_id = _seed_fully_booked_priceable_night(db_conn)
     _set_llm_settings(monkeypatch, _settings())
+    reply_text = "Here is the price for that night."
     transport = _ScriptedTransport(
         [
             _search_hotels_prefix_call(),
@@ -2462,14 +2461,15 @@ def test_receive_message_records_partial_usage_when_the_last_room_is_taken_mid_t
                 prompt_tokens=25,
                 candidates_tokens=5,
             ),
+            _text_response(reply_text, prompt_tokens=25, candidates_tokens=5),
         ]
     )
     _set_transport(monkeypatch, transport)
     sender = _FakeWhatsAppSender()
     _set_whatsapp_sender(monkeypatch, sender)
-    caplog.set_level(logging.ERROR, logger="services.agent.webhook")
+    caplog.set_level(logging.INFO, logger="services.agent.webhook")
     payload = _whatsapp_payload(
-        wa_id=_WA_ID, message_id="wamid.fully-booked-night", body="hello"
+        wa_id=_WA_ID, message_id="wamid.last-room-taken-mid-turn", body="hello"
     )
 
     response = _post(
@@ -2478,22 +2478,14 @@ def test_receive_message_records_partial_usage_when_the_last_room_is_taken_mid_t
 
     assert response.status_code == 200
     assert response.json() == {"status": "accepted"}
-    assert len(transport.calls) == 2
-    usage_row = db_conn.execute(
-        "SELECT prompt_tokens, candidates_tokens, total_tokens FROM token_usage "
-        "WHERE customer_phone = %s",
-        (_PHONE,),
-    ).fetchone()
-    assert usage_row == (50, 10, 60)
-    notes = _assert_fallback_sent_and_escalated(db_conn, sender, reason="pricing_error")
-    assert notes == {"exception_type": "NoMatchingBandError"}
-    logged = _error_events(caplog)
-    assert [entry["event"] for entry in logged] == [
-        "turn_failed",
-        "conversation_escalated",
-    ]
-    assert logged[0]["exception_type"] == "NoMatchingBandError"
-    assert "in lookup_band_value" in logged[0]["traceback"]
+    assert len(transport.calls) == 3
+    assert sender.calls == [(_WA_ID, reply_text)]
+    assert _turn_status(caplog) == "processed"
+    assert _escalations(db_conn) == []
+    assert _error_events(caplog) == []
+    recorded = db_conn.execute("SELECT nights FROM quotes").fetchall()
+    assert len(recorded) == 1
+    assert recorded[0][0][0]["occupancy"] == 1.0
 
 
 # A cost no other value in these tests can coincide with, and the ask and
@@ -2549,8 +2541,8 @@ def test_receive_message_never_logs_or_stores_cost_for_a_price_floor_above_the_a
         is_default=True,
     )
     stay_date = date(2030, 1, 10)
-    # Unoccupied (occupancy 0, safely inside the flat_demand_curve()'s
-    # [0, 1) band -- this test is not about NoMatchingBandError).
+    # Unoccupied (occupancy 0, inside flat_demand_curve()'s single band --
+    # this test is not about occupancy).
     seed_allotment_nights(
         db_conn,
         hotel_id,

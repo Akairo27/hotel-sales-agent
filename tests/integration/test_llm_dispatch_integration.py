@@ -17,6 +17,7 @@ from typing import Any
 import psycopg
 import pytest
 
+from services.agent.llm import dispatch as dispatch_module
 from services.agent.llm.dispatch import (
     QUOTE_RESULT_KEYS,
     dispatch_check_availability,
@@ -374,11 +375,11 @@ def test_get_quote_dispatch_prices_when_free_rooms_exactly_equal_the_rooms_reque
 def test_get_quote_dispatch_declines_a_night_with_no_free_rooms(
     db_conn: psycopg.Connection[Any], inventory: list[tuple[int, int, int]]
 ) -> None:
-    """Before the gate, occupancy of exactly 1.0 (every one of these nights)
-    fell outside the demand curve's [0, 1) band and raised
-    NoMatchingBandError -- a turn that sent the customer nothing. Now it is
-    an ordinary unpriced result, with no `quotes` row and no room count in
-    it (the exact-dict comparison is what proves the latter)."""
+    """Every one of these nights has no free room (occupancy exactly 1.0):
+    the gate declines it as an ordinary unpriced result, with no `quotes`
+    row and no room count in it (the exact-dict comparison is what proves
+    the latter). Before the gate -- and before the 2026-09-29 pricing fix
+    -- such a night raised NoMatchingBandError instead."""
     hotel_id, room_type_id = _seed_stay_with_inventory(db_conn, inventory)
     args = _stay_args(hotel_id, room_type_id, nights=1, rooms=1)
 
@@ -420,6 +421,53 @@ def test_get_quote_dispatch_declines_when_only_one_night_of_the_stay_is_short(
 
     assert result == _insufficient_availability_result(args)
     assert _quote_row_count(db_conn) == 0
+
+
+@pytest.mark.parametrize(
+    "sold_out_index",
+    [
+        pytest.param(0, id="first-night"),
+        pytest.param(1, id="middle-night"),
+        pytest.param(2, id="last-night"),
+    ],
+)
+def test_get_quote_dispatch_declines_a_stay_with_one_fully_booked_night(
+    db_conn: psycopg.Connection[Any], sold_out_index: int
+) -> None:
+    """Pricing can price a sold-out night now (at the top occupancy band),
+    but whether a room is left to sell is the gate's decision: one full
+    night anywhere in the stay still declines the whole stay, unpriced."""
+    inventory = [(5, 0, 0)] * 3
+    inventory[sold_out_index] = (5, 5, 0)
+    hotel_id, room_type_id = _seed_stay_with_inventory(db_conn, inventory)
+    args = _stay_args(hotel_id, room_type_id, nights=3, rooms=1)
+
+    result = dispatch_get_quote(
+        db_conn, args, now=_NOW, customer_phone=None, conversation_id=None
+    )
+
+    assert result == _insufficient_availability_result(args)
+    assert _quote_row_count(db_conn) == 0
+
+
+def test_get_quote_dispatch_prices_a_night_sold_out_after_the_gate_read(
+    db_conn: psycopg.Connection[Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The race: the last room goes between the gate's read and pricing,
+    simulated by a gate that reports availability over sold-out data. Until
+    2026-09-29 this raised NoMatchingBandError and failed the turn; now the
+    stay is priced (a quote is not a sale -- create_hold refuses it, see
+    test_a_sold_out_night_is_priced_but_a_hold_on_it_is_refused)."""
+    monkeypatch.setattr(dispatch_module, "check_availability", lambda *_a, **_k: True)
+    hotel_id, room_type_id = _seed_stay_with_inventory(db_conn, [(5, 5, 0)])
+    args = _stay_args(hotel_id, room_type_id, nights=1, rooms=1)
+
+    result = dispatch_get_quote(
+        db_conn, args, now=_NOW, customer_phone=None, conversation_id=None
+    )
+
+    assert result["priced"] is True
+    assert _quote_row_count(db_conn) == 1
 
 
 _PAST_STAY_START = date(2026, 8, 20)  # before _NOW (2026-09-01)

@@ -276,9 +276,11 @@ def compute_quote(
         AllotmentNotFoundError: a night in the range has no allotment.
         IncompletePriceRuleChainError: no complete price rule resolves
             for some night (most commonly, no global price_rules row).
-        NoMatchingBandError: a resolved band config doesn't cover the
-            actual occupancy or lead time (shouldn't happen for a validly
-            stored config — see price_rules_is_valid_lead_time_bands).
+        NoMatchingBandError: occupancy or lead time is outside its band
+            domain -- not for a validly stored config and real inventory
+            (see errors.NoMatchingBandError). A sold-out night is priced,
+            at the top occupancy band: whether a room is left to sell is
+            the inventory's decision (create_hold), not pricing's.
         InconsistentPriceConfigurationError: a computed night's floor
             exceeds its ceiling — the resolved margin/demand don't clear
             the resolved minimum profit, a price_rules misconfiguration.

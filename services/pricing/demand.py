@@ -19,6 +19,11 @@ from services.pricing.errors import AllotmentNotFoundError
 
 _BPS_SCALE = 10_000
 
+# Occupancy runs from 0 to 1 inclusive: 1.0 is a sold-out night (or one with
+# no rooms at all), and it belongs to the band whose max is 1 -- the closed
+# domain migration 0006's price_rules_is_valid_occupancy_bands enforces.
+OCCUPANCY_DOMAIN_END = 1
+
 
 @dataclass(frozen=True)
 class DemandFactor:
@@ -39,7 +44,9 @@ def compute_occupancy(
     curve. Includes held rooms, not just confirmed ones: a room on hold
     already reduces what is left to sell — the same reserved+held vs.
     total relationship this system's inventory_never_oversold constraint
-    reasons about.
+    reasons about. Exactly 1.0 for a sold-out night and for a night with
+    no rooms at all (total 0); never above 1, since that constraint keeps
+    reserved + held within total.
 
     Raises:
         AllotmentNotFoundError: no allotment exists for this night.
@@ -65,11 +72,13 @@ def compute_demand_factor(
 ) -> DemandFactor:
     """Combines demand_curve's occupancy-based and lead-time-based
     multipliers into one basis-point factor, keeping both inputs
-    alongside the combined result for traceability.
+    alongside the combined result for traceability. A sold-out night
+    (occupancy 1.0) takes the top occupancy band's multiplier.
 
     Raises:
-        NoMatchingBandError: occupancy or lead_days is out of the
-            configured bands' range (see lookup_band_value).
+        NoMatchingBandError: occupancy is outside 0..1 or lead_days is
+            negative (see lookup_band_value) -- never for a valid stored
+            curve and a real inventory row.
     """
     occupancy_bps = lookup_band_value(
         demand_curve["occupancy_bands"],
@@ -77,6 +86,7 @@ def compute_demand_factor(
         min_key="min",
         max_key="max",
         value_key="multiplier_bps",
+        closed_domain_end=OCCUPANCY_DOMAIN_END,
     )
     lead_time_bps = lookup_band_value(
         demand_curve["lead_time_bands"],
