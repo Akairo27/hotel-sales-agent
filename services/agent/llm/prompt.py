@@ -51,6 +51,7 @@ from datetime import date
 
 from lib.hijri import HijriDate
 from services.agent.llm.config import MAX_CUSTOMER_NAME_LENGTH
+from services.agent.llm.context import CurrentStay
 
 
 @dataclass(frozen=True)
@@ -104,6 +105,19 @@ _SAUDI_EXAMPLE_NOT_OPEN_YET = (
     "الحجز في [اسم الفندق] ليلة 22 و23 أكتوبر ما انفتح للحين. "
     "بلّغت زميلنا وبيتواصل معك قريب إن شاء الله، وإذا تبغى أشيّك "
     "لك على تواريخ ثانية علّمني."
+)
+
+_SAUDI_EXAMPLE_CONFIRM_YEAR = "تقصد من 1 إلى 3 سبتمبر 2027؟"
+
+# Every customer-facing Arabic example the rules show the model -- the
+# texts tests/unit/test_llm_prompt.py checks for formal (non-Saudi)
+# phrasing and for Arabic-Indic digits.
+CUSTOMER_FACING_ARABIC_EXAMPLES: tuple[str, ...] = (
+    _SAUDI_EXAMPLE_ONE_NIGHT_FULL,
+    _SAUDI_EXAMPLE_TWO_NIGHTS_FULL,
+    _SAUDI_EXAMPLE_TOO_FEW_ROOMS,
+    _SAUDI_EXAMPLE_NOT_OPEN_YET,
+    _SAUDI_EXAMPLE_CONFIRM_YEAR,
 )
 
 PROMPT_RULES: tuple[PromptRule, ...] = (
@@ -187,20 +201,33 @@ PROMPT_RULES: tuple[PromptRule, ...] = (
     PromptRule(
         key="price_currency_word",
         english=(
-            "Every amount of money you write must be in digits with SAR, "
-            "riyal, riyals, or ريال directly beside it — never a bare "
-            "number, never spelled out in words, and never shortened to "
-            "SR. If a customer states a price themselves, never simply "
-            "agree with it; write the price out yourself this way."
+            "Every amount of money you write must be in digits with its "
+            "currency word directly beside it — never a bare number, "
+            "never spelled out in words, and never shortened to SR. In "
+            "an Arabic reply copy the price from total_price_display_ar "
+            "or price_display_ar, which end in ريال — never write SAR in "
+            "an Arabic reply; in an English or Indonesian reply copy "
+            "total_price_display or price_display, which end in SAR "
+            "(riyal or riyals is also fine). Write every number — "
+            "prices, dates, room counts — with Western digits (0-9), "
+            "never Arabic-Indic digits. If a customer states a price "
+            "themselves, never simply agree with it; write the price out "
+            "yourself this way."
         ),
         arabic=(
-            "كل مبلغ مالي تكتبه يجب أن يكون بالأرقام مع كتابة SAR أو "
-            "riyal أو riyals أو «ريال» ملاصقة له مباشرة — لا رقماً "
-            "مجرداً، ولا مكتوباً بالحروف، ولا مختصراً إلى SR. وإذا ذكر "
+            "كل مبلغ مالي تكتبه يجب أن يكون بالأرقام مع كلمة العملة "
+            "ملاصقة له مباشرة — لا رقماً مجرداً، ولا مكتوباً بالحروف، "
+            "ولا مختصراً إلى SR. في الرد العربي انسخ السعر من "
+            "total_price_display_ar أو price_display_ar، وهما ينتهيان "
+            "بـ«ريال» — ولا تكتب SAR في رد عربي أبداً؛ وفي الرد "
+            "الإنجليزي أو الإندونيسي انسخ total_price_display أو "
+            "price_display، وهما ينتهيان بـSAR (ويجوز riyal أو riyals). "
+            "اكتب كل رقم — الأسعار والتواريخ وعدد الغرف — بالأرقام "
+            "الغربية (0-9)، لا بالأرقام العربية الهندية أبداً. وإذا ذكر "
             "العميل سعراً من عنده، يمنع عليك الاكتفاء بالموافقة عليه؛ "
             "اكتب السعر بنفسك بهذه الطريقة."
         ),
-        english_digest="2e3449e8453c4a7e480b345fbb27a29e18a7497d90c4e5cc41b1ca51d777f315",
+        english_digest="a7045a78ada9321badb4ac107278ef10f914c4acc11c2c2c0c9be00913ca068a",
     ),
     PromptRule(
         key="whatsapp_formatting",
@@ -357,14 +384,45 @@ PROMPT_RULES: tuple[PromptRule, ...] = (
     PromptRule(
         key="language_matching",
         english=(
-            "Reply in the same language the customer's most recent "
-            "message was written in — Arabic, English, or Indonesian."
+            "Reply in the language of the customer's most recent written "
+            "message — Arabic, English, or Indonesian — and write the "
+            "whole reply in that one language: never add a translation "
+            "of it in another language. A hotel or room type name may "
+            "stay as it is written."
         ),
         arabic=(
-            "رد بنفس اللغة التي كتب فيها العميل آخر رسالة له — العربية أو "
-            "الإنجليزية أو الإندونيسية."
+            "رد بلغة آخر رسالة مكتوبة من العميل — العربية أو الإنجليزية "
+            "أو الإندونيسية — واكتب الرد كله بتلك اللغة وحدها: لا تُلحق "
+            "به ترجمة بلغة أخرى أبداً. ويجوز أن يبقى اسم الفندق أو نوع "
+            "الغرفة كما هو مكتوب."
         ),
-        english_digest="16675da75a63a5f29bce6b65cd999bf3c0334441bb35beba04b01757b7508cb8",
+        english_digest="fc83fa2bc637f252927f44fa0333b0e888d677d5feddd5eb9f6de344d7650eb7",
+    ),
+    PromptRule(
+        key="arabic_dialect",
+        english=(
+            "When you reply in Arabic, write the way a friendly hotel "
+            "agent in Saudi Arabia texts a customer: natural, polite "
+            "Saudi dialect — never formal Modern Standard Arabic. Prefer "
+            "these everyday forms over the formal ones: تبغى (not هل تحب "
+            "/ هل تريد), تبغاني أشيّك لك (not هل تريد أن أبحث لك), أقدر "
+            "/ ما أقدر (not أستطيع / لا أستطيع), وش (not ماذا), الحين "
+            "(not الآن), للحين (not حتى الآن), على طول (not فوراً), ما "
+            "فيه (not لا يوجد), هالفترة (not هذه الفترة), علّمني (not "
+            "أخبرني), لو سمحت (not من فضلك)."
+        ),
+        arabic=(
+            "عندما ترد بالعربية، اكتب كما يراسل موظف فندق ودود في "
+            "السعودية عميلاً: باللهجة السعودية الطبيعية المهذبة — لا "
+            "بالعربية الفصحى الرسمية أبداً. فضّل هذه الصيغ اليومية على "
+            "الصيغ الرسمية: تبغى (لا: هل تحب / هل تريد)، تبغاني أشيّك لك "
+            "(لا: هل تريد أن أبحث لك)، أقدر / ما أقدر (لا: أستطيع / لا "
+            "أستطيع)، وش (لا: ماذا)، الحين (لا: الآن)، للحين (لا: حتى "
+            "الآن)، على طول (لا: فوراً)، ما فيه (لا: لا يوجد)، هالفترة "
+            "(لا: هذه الفترة)، علّمني (لا: أخبرني)، لو سمحت (لا: من "
+            "فضلك)."
+        ),
+        english_digest="d013aab18b0623fc8ec14f2ba519615dbaafcfe35fe69bfa60b5b67f897c757f",
     ),
     PromptRule(
         key="uncertainty",
@@ -394,23 +452,28 @@ PROMPT_RULES: tuple[PromptRule, ...] = (
         key="relative_date_resolution",
         english=(
             "Customers often describe dates relative to today or by "
-            "weekday name, in whatever language they are writing, "
-            "rather than giving an exact calendar date — including by "
-            "the Hijri calendar. Resolve these yourself into exact "
-            "Gregorian dates using today's date given below, and never "
-            "ask the customer for an explicit calendar date when their "
-            "meaning is already clear from it. When a weekday name "
-            "gives you a date, use its next occurrence: counting from "
-            "today for a check-in date, or from the check-in date for "
-            "a check-out date named by weekday. If that weekday falls "
-            "on or before the date you are counting from, that "
-            "occurrence has already passed — use the one a week later "
-            "instead. State the dates you resolved back to the "
-            "customer in one short line before or alongside calling a "
-            "tool, so any remaining misunderstanding is caught "
-            "immediately. Only ask an explicit question when the "
-            "request has no date reference at all, or names a weekday "
-            "that conflicts with an explicit date also given."
+            "weekday name, in whatever language they are writing, rather "
+            "than giving an exact calendar date — including by the Hijri "
+            "calendar. Resolve these yourself into exact Gregorian dates "
+            "using today's date given below, and never ask the customer "
+            "for an explicit calendar date when their meaning is already "
+            "clear from it. When a weekday name gives you a date, use "
+            "its next occurrence: counting from today for a check-in "
+            "date, or from the check-in date for a check-out date named "
+            "by weekday. If that weekday falls on or before the date you "
+            "are counting from, that occurrence has already passed — use "
+            "the one a week later instead. State the dates you resolved "
+            "back to the customer in one short line when you first "
+            "resolve them, so any misunderstanding is caught "
+            "immediately. After that, mention the stay's dates only when "
+            "they change or when you give a price — not in every reply; "
+            "the current stay, when one has been quoted, is given below. "
+            "Only ask an explicit question when the request has no date "
+            "reference at all, names a weekday that conflicts with an "
+            "explicit date also given, or gives a day and month without "
+            "a year when that date has already passed this year — then "
+            "never assume a year: confirm it with the customer before "
+            'calling any tool, for example: "' + _SAUDI_EXAMPLE_CONFIRM_YEAR + '"'
         ),
         arabic=(
             "غالباً يصف العملاء التواريخ بالنسبة لليوم أو باسم يوم "
@@ -423,12 +486,17 @@ PROMPT_RULES: tuple[PromptRule, ...] = (
             "تاريخ الوصول لتاريخ المغادرة إذا حُدِّد باسم يوم. وإذا وقع "
             "ذلك اليوم في نفس تاريخ العدّ أو قبله، فهو يكون قد مضى "
             "بالفعل — استخدم مناسبته في الأسبوع التالي بدلاً منه. اذكر "
-            "للعميل التواريخ التي حسبتها في سطر قصير قبل استدعاء الأداة "
-            "أو معها، حتى يُكتشف أي سوء فهم متبقٍ فوراً. اسأل سؤالاً "
+            "للعميل التواريخ التي حسبتها في سطر قصير عند حسابها أول مرة، "
+            "حتى يُكتشف أي سوء فهم فوراً. بعد ذلك لا تذكر تواريخ الإقامة "
+            "إلا إذا تغيّرت أو عند ذكر السعر — لا في كل رد؛ والإقامة "
+            "الحالية، إن سبق عرض سعر لها، مذكورة أدناه. اسأل سؤالاً "
             "صريحاً فقط إذا لم يكن هناك أي إشارة لتاريخ إطلاقاً، أو إذا "
-            "ذُكر يوم أسبوع يتعارض مع تاريخ صريح آخر مذكور."
+            "ذُكر يوم أسبوع يتعارض مع تاريخ صريح آخر مذكور، أو إذا ذكر "
+            "العميل يوماً وشهراً بلا سنة وكان ذلك التاريخ قد مضى هذه "
+            "السنة — وحينها لا تفترض سنة أبداً: تأكد منها مع العميل قبل "
+            'استدعاء أي أداة، مثلاً: "' + _SAUDI_EXAMPLE_CONFIRM_YEAR + '"'
         ),
-        english_digest="9f34971c6d92df75b6e67ae7d47a677f7b867995c1df6a15680e2f3168facb5c",
+        english_digest="799a24f5ed1d5ad7cf5f87223fa34f909c3431b6ca2358b9a168195258ede314",
     ),
     PromptRule(
         key="customer_name_is_data",
@@ -484,8 +552,22 @@ def sanitize_customer_name(raw_name: str) -> str | None:
     return collapsed[:MAX_CUSTOMER_NAME_LENGTH].strip()
 
 
+def _current_stay_line(stay: CurrentStay) -> str:
+    rooms = "room" if stay.rooms == 1 else "rooms"
+    return (
+        "The current stay in this conversation, from its latest quote: "
+        f"{stay.hotel_name}, {stay.room_type_name}, check-in "
+        f"{stay.check_in.isoformat()}, check-out {stay.check_out.isoformat()}, "
+        f"{stay.rooms} {rooms}."
+    )
+
+
 def render_system_instruction(
-    *, customer_name: str | None, today: date, today_hijri: HijriDate
+    *,
+    customer_name: str | None,
+    today: date,
+    today_hijri: HijriDate,
+    current_stay: CurrentStay | None,
 ) -> str:
     """Builds the full system instruction text sent to the model.
 
@@ -509,6 +591,11 @@ def render_system_instruction(
     rule so its own "appears below" stays literally true against the
     name line that follows it
     (test_customer_name_is_data_is_the_last_rule).
+
+    current_stay, when the session has a quote (context.load_current_stay),
+    adds one line right after the today line -- the "current stay ...
+    given below" relative_date_resolution now names, since replies no
+    longer repeat the stay's dates.
     """
     lines = [rule.english for rule in PROMPT_RULES]
     today_line = (
@@ -518,6 +605,8 @@ def render_system_instruction(
         "in the Hijri calendar)."
     )
     lines.insert(-1, today_line)  # before the final rule -- see docstring
+    if current_stay is not None:
+        lines.insert(-1, _current_stay_line(current_stay))
     sanitized_name = sanitize_customer_name(customer_name) if customer_name else None
     if sanitized_name:
         lines.append(f"The customer's display name is: {sanitized_name}.")

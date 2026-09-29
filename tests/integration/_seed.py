@@ -341,19 +341,27 @@ def seed_quote(
     min_allowed_total: int = 10_000,
     nights: str = _VALID_QUOTE_NIGHTS,
     created_at: datetime | None = None,
+    check_in: date = date(2026, 9, 1),
+    check_out: date = date(2026, 9, 2),
+    rooms: int = 1,
 ) -> int:
     """created_at defaults to now(); pass one to place the quote at an
-    exact time (session-boundary tests)."""
+    exact time (session-boundary tests). check_in/check_out/rooms only
+    label the quoted stay (the current-stay line reads them); `nights`
+    carries the prices."""
     return returning_id(
         conn,
         "INSERT INTO quotes (hotel_id, room_type_id, check_in, check_out, rooms, "
         "ask_price_total, min_allowed_total, nights, negotiation_open, "
         "customer_phone, conversation_id, created_at) "
-        "VALUES (%s, %s, '2026-09-01', '2026-09-02', 1, %s, %s, %s::jsonb, "
+        "VALUES (%s, %s, %s, %s, %s, %s, %s, %s::jsonb, "
         "true, %s, %s, COALESCE(%s, now())) RETURNING id",
         (
             hotel_id,
             room_type_id,
+            check_in,
+            check_out,
+            rooms,
             ask_price_total,
             min_allowed_total,
             nights,

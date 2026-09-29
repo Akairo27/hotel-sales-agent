@@ -16,7 +16,7 @@ from typing import Any
 import psycopg
 import pytest
 
-from lib.money import format_halalas_as_sar
+from lib.money import format_halalas_as_arabic_riyal, format_halalas_as_sar
 from services.agent.llm.dispatch import dispatch_get_quote
 from services.agent.llm.errors import ConversationNotFoundError
 from services.agent.output_guard.enforcement import (
@@ -595,6 +595,52 @@ def test_a_stated_margin_percentage_gets_the_percentage_reason(
         "SELECT reason FROM escalations WHERE id = %s", (verdict.escalation_id,)
     ).fetchone()
     assert reason == (REASON_PERCENTAGE_STATED,)
+
+
+def test_an_arabic_reply_quoting_the_arabic_riyal_display_is_allowed(
+    db_conn: psycopg.Connection[Any],
+) -> None:
+    """The Arabic display get_quote now returns (owner decision,
+    2026-09-30: never SAR in an Arabic reply) is the same number with ريال,
+    which the guard reads as the Saudi riyal -- so a reply copying it
+    passes, and one digit off is still blocked."""
+    hotel_id, room_type_id = _seed_priceable_stay(db_conn)
+    conversation_id = seed_conversation(db_conn)
+    args = {
+        "hotel_id": hotel_id,
+        "room_type_id": room_type_id,
+        "check_in": "2026-09-10",
+        "check_out": "2026-09-12",
+        "rooms": 1,
+    }
+
+    quote_result = dispatch_get_quote(
+        db_conn,
+        args,
+        now=_NOW,
+        customer_phone="+966500000001",
+        conversation_id=conversation_id,
+    )
+    arabic_total = quote_result["total_price_display_ar"]
+    assert arabic_total.endswith(" ريال")
+
+    allowed_verdict = enforce_outbound_text(
+        db_conn,
+        conversation_id=conversation_id,
+        text=f"السعر الإجمالي للإقامة {arabic_total}.",
+    )
+    assert allowed_verdict.allowed is True
+
+    real_total_halalas = int(
+        arabic_total.removesuffix(" ريال").replace(",", "").replace(".", "")
+    )
+    wrong_display = format_halalas_as_arabic_riyal(real_total_halalas + 1)
+    blocked_verdict = enforce_outbound_text(
+        db_conn,
+        conversation_id=conversation_id,
+        text=f"السعر الإجمالي للإقامة {wrong_display}.",
+    )
+    assert blocked_verdict.allowed is False
 
 
 def test_output_guard_fallback_message_is_always_allowed(

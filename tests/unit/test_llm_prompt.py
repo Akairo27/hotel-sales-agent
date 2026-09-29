@@ -14,7 +14,9 @@ import pytest
 from lib.hijri import to_hijri
 from services.agent.llm import dispatch as dispatch_module
 from services.agent.llm.config import MAX_CUSTOMER_NAME_LENGTH
+from services.agent.llm.context import CurrentStay
 from services.agent.llm.prompt import (
+    CUSTOMER_FACING_ARABIC_EXAMPLES,
     PRICE_CURRENCY_WORDS,
     PROMPT_RULES,
     PromptRule,
@@ -37,7 +39,10 @@ def _rule(key: str) -> PromptRule:
 
 def _render(customer_name: str | None) -> str:
     return render_system_instruction(
-        customer_name=customer_name, today=_TODAY, today_hijri=_TODAY_HIJRI
+        customer_name=customer_name,
+        today=_TODAY,
+        today_hijri=_TODAY_HIJRI,
+        current_stay=None,
     )
 
 
@@ -147,7 +152,9 @@ def test_today_line_matches_each_reported_examples_send_date(
     the correct anchor date for each of the three real dates the
     reported relative-date failures were actually sent on."""
     hijri = to_hijri(today)
-    text = render_system_instruction(customer_name=None, today=today, today_hijri=hijri)
+    text = render_system_instruction(
+        customer_name=None, today=today, today_hijri=hijri, current_stay=None
+    )
     assert weekday_name in text
     assert today.isoformat() in text
     assert f"{hijri.year}-{hijri.month:02d}-{hijri.day:02d}" in text
@@ -277,3 +284,114 @@ def test_unavailable_dates_rule_examples_use_western_digits_only() -> None:
     arabic_indic_digits = {chr(code) for code in range(0x0660, 0x066A)}
     extended_digits = {chr(code) for code in range(0x06F0, 0x06FA)}
     assert not (arabic_indic_digits | extended_digits) & set(rule.english)
+
+
+_STAY = CurrentStay(
+    hotel_name="Test Hotel",
+    room_type_name="Deluxe",
+    check_in=date(2026, 10, 20),
+    check_out=date(2026, 10, 22),
+    rooms=1,
+)
+
+
+def _render_with_stay(stay: CurrentStay | None) -> str:
+    return render_system_instruction(
+        customer_name=None, today=_TODAY, today_hijri=_TODAY_HIJRI, current_stay=stay
+    )
+
+
+def test_current_stay_line_follows_the_today_line_before_the_last_rule() -> None:
+    """relative_date_resolution says the current stay "is given below", and
+    customer_name_is_data must stay last."""
+    text = _render_with_stay(_STAY)
+    line = (
+        "The current stay in this conversation, from its latest quote: Test Hotel, "
+        "Deluxe, check-in 2026-10-20, check-out 2026-10-22, 1 room."
+    )
+    today_pos = text.index("Today's date is")
+    stay_pos = text.index(line)
+    name_rule_pos = text.index(_rule("customer_name_is_data").english)
+    assert today_pos < stay_pos < name_rule_pos
+
+
+def test_current_stay_line_is_absent_without_a_quoted_stay() -> None:
+    assert "The current stay" not in _render_with_stay(None)
+
+
+def test_relative_date_resolution_restates_dates_only_when_needed() -> None:
+    rule = _rule("relative_date_resolution")
+    assert "when you first resolve them" in rule.english
+    assert "only when they change or when you give a price" in rule.english
+    assert "not in every reply" in rule.english
+
+
+def test_relative_date_resolution_confirms_the_year_of_a_passed_date() -> None:
+    """Owner-approved wording (2026-09-30): the longer form."""
+    rule = _rule("relative_date_resolution")
+    assert "never assume a year" in rule.english
+    assert "تقصد من 1 إلى 3 سبتمبر 2027؟" in rule.english
+
+
+def test_language_matching_forbids_an_appended_translation() -> None:
+    rule = _rule("language_matching")
+    assert "never add a translation" in rule.english
+    for language in ("Arabic", "English", "Indonesian"):
+        assert language in rule.english
+
+
+def test_arabic_dialect_rule_prefers_the_approved_saudi_forms() -> None:
+    rule = _rule("arabic_dialect")
+    assert "never formal Modern Standard Arabic" in rule.english
+    for saudi_form in ("تبغى", "أقدر", "وش", "للحين", "على طول", "ما فيه", "علّمني"):
+        assert saudi_form in rule.english
+
+
+def test_price_currency_word_names_every_price_display_get_quote_returns() -> None:
+    """The rule tells the model which display to copy in which language; if
+    quote_to_tool_result renames one, the rule must change with it."""
+    rule = _rule("price_currency_word")
+    displays = {
+        key
+        for key in dispatch_module.QUOTE_RESULT_KEYS | dispatch_module.NIGHT_RESULT_KEYS
+        if "display" in key
+    }
+    assert displays == {
+        "total_price_display",
+        "total_price_display_ar",
+        "price_display",
+        "price_display_ar",
+    }
+    for key in displays:
+        assert key in rule.english
+    assert "never write SAR in an Arabic reply" in rule.english
+    assert "Western digits" in rule.english
+
+
+_ARABIC_INDIC_DIGITS = frozenset(
+    chr(code) for code in (*range(0x0660, 0x066A), *range(0x06F0, 0x06FA))
+)
+# Formal (Modern Standard) phrasing the owner does not want in a customer
+# reply (2026-09-30) -- the formal side of arabic_dialect's pairs.
+_FORMAL_ARABIC_PHRASES = (
+    "هل تحب",
+    "هل تريد",
+    "أستطيع",
+    "ماذا",
+    "فوراً",
+    "سوف",
+    "لا يوجد",
+)
+
+
+def test_no_rule_or_example_uses_arabic_indic_digits() -> None:
+    for rule in PROMPT_RULES:
+        assert not _ARABIC_INDIC_DIGITS & set(rule.english), rule.key
+    for example in CUSTOMER_FACING_ARABIC_EXAMPLES:
+        assert not _ARABIC_INDIC_DIGITS & set(example)
+
+
+def test_customer_facing_arabic_examples_are_saudi_not_formal() -> None:
+    for example in CUSTOMER_FACING_ARABIC_EXAMPLES:
+        for phrase in _FORMAL_ARABIC_PHRASES:
+            assert phrase not in example, (phrase, example)

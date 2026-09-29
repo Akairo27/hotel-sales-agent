@@ -153,8 +153,11 @@ GET_QUOTE = ToolDeclaration(
         "priced=false with a reason, the nights that stop the stay "
         "(unavailable_nights, nights_without_allotment) and no price — "
         "never quote a price in that case. The returned price is already "
-        "final and already formatted — never recompute, convert, or round "
-        "it yourself."
+        "final and already formatted, twice: total_price_display and "
+        "price_display end in SAR, total_price_display_ar and "
+        "price_display_ar end in ريال — copy the one that matches your "
+        "reply's language, and never recompute, convert, or round it "
+        "yourself."
     ),
     parameters=_stay_parameters(),
 )
