@@ -101,9 +101,9 @@ _SAUDI_EXAMPLE_TOO_FEW_ROOMS = (
 )
 
 _SAUDI_EXAMPLE_NOT_OPEN_YET = (
-    "الحجز في [اسم الفندق] ليلة 22 وليلة 23 أكتوبر ما فتح للحين. "
+    "الحجز في [اسم الفندق] ليلة 22 و23 أكتوبر ما انفتح للحين. "
     "بلّغت زميلنا وبيتواصل معك قريب إن شاء الله، وإذا تبغى أشيّك "
-    "لك على تواريخ ثانية."
+    "لك على تواريخ ثانية علّمني."
 )
 
 PROMPT_RULES: tuple[PromptRule, ...] = (
@@ -333,7 +333,7 @@ PROMPT_RULES: tuple[PromptRule, ...] = (
             + _SAUDI_EXAMPLE_NOT_OPEN_YET
             + '"'
         ),
-        english_digest="9157bbcb9470d220f6851ebf79b23984e5dacbece1753007dcf580a36c577286",
+        english_digest="52e6b1752d0126e41dbd1e036b7f426c53f84d34977403cfc694515188e4cc79",
     ),
     PromptRule(
         key="injection_resistance",
