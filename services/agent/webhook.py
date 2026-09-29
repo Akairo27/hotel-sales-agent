@@ -20,22 +20,32 @@ right fix for the retry itself, but nothing bounds how long a webhook
 response can take without this split). Order matters and is deliberate:
 
 1. Verify X-Hub-Signature-256 against the raw body, before touching the
-   database at all. An unsigned or forged request leaves no trace.
-2. Store the inbound message. A message that later gets capped or
-   blocked is not a lost message — it stays in the database so a "the
-   bot never replied" complaint can be investigated. Also the dedup
-   boundary: a retried WhatsApp delivery for the same whatsapp_message_id
-   short-circuits here every time, whether the first delivery is still
-   being generated in the background or long since finished.
+   database at all. An unsigned or forged request leaves no trace beyond
+   one webhook_signature_rejected warning (the reason only).
+2. Store each inbound message in the delivery -- every one, not just the
+   first. A message that later gets capped or blocked is not a lost
+   message — it stays in the database so a "the bot never replied"
+   complaint can be investigated. Also the dedup boundary: a retried
+   WhatsApp delivery for the same whatsapp_message_id short-circuits here
+   every time, whether the first delivery is still being generated in the
+   background or long since finished. Only a failure before this insert
+   answers 500 (so Meta redelivers); every step after it logs and carries
+   on, since a redelivery would be dropped as a duplicate. Reactions,
+   stickers and unknown types are ignored, not stored
+   (_HANDLED_MESSAGE_TYPES).
 3. Check the per-number-per-day message rate (services.agent.llm.caps).
+   The first message past it gets the fallback and an escalation; later
+   ones that day stay silent (owner decision B).
 
    Everything through step 3 is synchronous, on one DB connection, and
    fast — confirmed against production timing (comfortably under 1s).
-   The response returns here, {"status": "accepted"}, once steps 1-3
-   pass. Everything below runs afterward, in _generate_and_deliver_reply
-   (a FastAPI BackgroundTasks job), on its own DB connection: the one
-   used above is already closed by the time Starlette schedules the
-   background job.
+   The response returns here once steps 1-3 pass. A text message is
+   answered afterward by _generate_and_deliver_reply (a FastAPI
+   BackgroundTasks job) on its own DB connection: the one used above is
+   already closed by the time Starlette schedules the background job. A
+   voice note, an image or other media never reaches the model: a
+   background job sends a fixed notice and escalates
+   (_send_notice_without_a_model_turn). Steps 4-7 are the text path.
 
 4. Call generate_reply. Its tool-calling loop can raise any of several
    exceptions (see conversation.py's own docstring) after one or more
@@ -274,20 +284,59 @@ def get_db_connection() -> Iterator[psycopg.Connection[Any]]:
         conn.close()
 
 
-def _signature_is_valid(
+def _signature_problem(
     *, body: bytes, signature_header: str | None, app_secret: str
-) -> bool:
-    """Verifies X-Hub-Signature-256 against the raw request body —
-    CLAUDE.md §8: verify Meta's signature on every webhook call, reject
-    unsigned. Must run before any parsing or database access: a forged or
-    replayed request must leave zero trace."""
-    if signature_header is None or not signature_header.startswith(_SIGNATURE_PREFIX):
-        return False
+) -> str | None:
+    """Why X-Hub-Signature-256 fails to verify against the raw request
+    body -- "missing", "malformed" (no sha256= prefix) or "mismatch" -- or
+    None when it verifies. CLAUDE.md §8: verify Meta's signature on every
+    webhook call, reject unsigned. Must run before any parsing or
+    database access: a forged or replayed request leaves no trace beyond
+    the one warning receive_message logs, which carries this label and
+    never the header's value or the secret."""
+    if signature_header is None:
+        return "missing"
+    if not signature_header.startswith(_SIGNATURE_PREFIX):
+        return "malformed"
     provided_digest = signature_header[len(_SIGNATURE_PREFIX) :]
     expected_digest = hmac.new(
         app_secret.encode("utf-8"), body, hashlib.sha256
     ).hexdigest()
-    return hmac.compare_digest(provided_digest, expected_digest)
+    if not hmac.compare_digest(provided_digest, expected_digest):
+        return "mismatch"
+    return None
+
+
+# How the fast path handles each inbound message type (owner decision A,
+# revised 2026-09-29). Only text reaches the model. A voice note or an
+# image gets PLEASE_TYPE_MESSAGE; the other media listed get the generic
+# fallback; both open an escalation for staff. Every other type --
+# reaction, sticker, and any type not listed here -- is deliberately
+# ignored: not stored, not answered (ARCHITECTURE.md §7, "لا صمت").
+_TEXT_MESSAGE_TYPE = "text"
+_PLEASE_TYPE_MESSAGE_TYPES = frozenset({"audio", "image"})
+_FALLBACK_MESSAGE_TYPES = frozenset(
+    {"video", "document", "location", "contacts", "interactive"}
+)
+_HANDLED_MESSAGE_TYPES = (
+    frozenset({_TEXT_MESSAGE_TYPE})
+    | _PLEASE_TYPE_MESSAGE_TYPES
+    | _FALLBACK_MESSAGE_TYPES
+)
+
+# The fixed reply to a voice note or an image: the agent reads text only.
+# Sent through the output guard like every outbound text (CLAUDE.md rule
+# 8); it states no amount, so the guard always allows it
+# (test_please_type_message_is_always_allowed).
+PLEASE_TYPE_MESSAGE = (
+    "Sorry, I can't read voice notes or images yet. Please type your "
+    "request and I'll help you right away.\n"
+    "عذراً، لا أستطيع قراءة الرسائل الصوتية أو الصور حالياً. من فضلك اكتب "
+    "طلبك وسأساعدك فوراً."
+)
+
+_REASON_UNSUPPORTED_MESSAGE_TYPE = "unsupported_message_type"
+_REASON_MESSAGE_RATE_CAP_EXCEEDED = "message_rate_cap_exceeded"
 
 
 @dataclass(frozen=True)
@@ -295,6 +344,10 @@ class InboundMessage:
     customer_phone: str
     customer_name: str | None
     whatsapp_message_id: str
+    message_type: str
+    # The text for a text message; for any other type a fixed placeholder
+    # ("[image message]"), plus its caption when it has one -- what staff
+    # and the model's later context see in place of the media itself.
     body: str
 
 
@@ -305,36 +358,82 @@ def _normalize_phone(wa_id: str) -> str:
     return wa_id if wa_id.startswith("+") else f"+{wa_id}"
 
 
-def _parse_inbound_message(payload: dict[str, Any]) -> InboundMessage | None:
-    """Extracts the first inbound text message from a WhatsApp Cloud API
-    webhook payload, or None for any event this module does not handle —
-    delivery/read status callbacks, non-text message types, or a payload
-    that does not match the expected shape at all. Meta sends many event
-    shapes to the same URL; treating an unrecognized one as a no-op
-    (rather than raising) is the correct, expected behavior for a webhook
-    consumer that only acts on inbound text messages today.
-    """
-    try:
-        value = payload["entry"][0]["changes"][0]["value"]
-        messages = value.get("messages")
-        if not messages:
-            return None
-        message = messages[0]
-        if message.get("type") != "text":
-            return None
-        contacts = value.get("contacts") or []
-        wa_id = contacts[0]["wa_id"] if contacts else message["from"]
-        customer_name = None
-        if contacts:
-            customer_name = (contacts[0].get("profile") or {}).get("name")
-        return InboundMessage(
-            customer_phone=_normalize_phone(wa_id),
-            customer_name=customer_name,
-            whatsapp_message_id=message["id"],
-            body=message["text"]["body"],
-        )
-    except KeyError, IndexError, TypeError:
+def _as_list(value: object) -> list[Any]:
+    return value if isinstance(value, list) else []
+
+
+def _as_dict(value: object) -> dict[str, Any]:
+    return value if isinstance(value, dict) else {}
+
+
+def _message_body(message: dict[str, Any], message_type: str) -> str:
+    """The text of a text message; for any other type the placeholder
+    "[<type> message]", followed by the media's caption when it has one."""
+    if message_type == _TEXT_MESSAGE_TYPE:
+        text = _as_dict(message.get("text")).get("body")
+        if not isinstance(text, str):
+            raise KeyError("text message without text.body")
+        return text
+    placeholder = f"[{message_type} message]"
+    caption = _as_dict(message.get(message_type)).get("caption")
+    return f"{placeholder} {caption}" if isinstance(caption, str) else placeholder
+
+
+def _parse_one_message(
+    message: dict[str, Any], contacts: list[Any]
+) -> InboundMessage | None:
+    """One entry of a webhook's messages array, or None if it lacks what
+    every message needs (a sender, an id, a type, and text.body for a text
+    message). The sender's display name comes from the contact whose
+    wa_id matches; a payload with no "from" falls back to its only
+    contact."""
+    names = {
+        contact.get("wa_id"): _as_dict(contact.get("profile")).get("name")
+        for contact in map(_as_dict, contacts)
+    }
+    wa_id = message.get("from")
+    if not isinstance(wa_id, str) and len(contacts) == 1:
+        wa_id = _as_dict(contacts[0]).get("wa_id")
+    message_id = message.get("id")
+    message_type = message.get("type")
+    if not (
+        isinstance(wa_id, str)
+        and isinstance(message_id, str)
+        and isinstance(message_type, str)
+    ):
         return None
+    try:
+        body = _message_body(message, message_type)
+    except KeyError:
+        return None
+    name = names.get(wa_id)
+    return InboundMessage(
+        customer_phone=_normalize_phone(wa_id),
+        customer_name=name if isinstance(name, str) else None,
+        whatsapp_message_id=message_id,
+        message_type=message_type,
+        body=body,
+    )
+
+
+def _parse_inbound_messages(payload: dict[str, Any]) -> list[InboundMessage]:
+    """Every inbound message in a WhatsApp Cloud API webhook payload, of
+    any type, across every entry and change -- not just the first (a
+    delivery can batch several). Delivery/read status callbacks carry no
+    messages and yield nothing; a message missing what it needs is
+    skipped, not fatal to the rest. Which types are answered is
+    receive_message's decision (_HANDLED_MESSAGE_TYPES), not this
+    function's."""
+    parsed: list[InboundMessage] = []
+    for entry in map(_as_dict, _as_list(payload.get("entry"))):
+        for change in map(_as_dict, _as_list(entry.get("changes"))):
+            value = _as_dict(change.get("value"))
+            contacts = _as_list(value.get("contacts"))
+            for message in map(_as_dict, _as_list(value.get("messages"))):
+                inbound = _parse_one_message(message, contacts)
+                if inbound is not None:
+                    parsed.append(inbound)
+    return parsed
 
 
 def _find_or_create_conversation(
@@ -552,6 +651,15 @@ def _increment_turn_count_or_log_failure(
 _STATUS_ACCEPTED = "accepted"
 _STATUS_PROCESSED = "processed"
 
+# Per-message statuses in receive_message's response (Meta ignores the
+# body; these are for logs and tests).
+_STATUS_IGNORED = "ignored"
+_STATUS_DUPLICATE = "duplicate"
+_STATUS_RATE_LIMITED = "rate_limited"
+_STATUS_UNSUPPORTED_TYPE = "unsupported_type"
+_STATUS_NOT_STORED = "not_stored"
+_STATUS_BATCH = "batch"
+
 # The four outcomes of _escalate_and_notify, one per combination of "was a
 # human escalation opened" and "did the customer get the fallback". Named
 # honestly on purpose: before CLAUDE.md rule 12, a failed fallback send
@@ -665,10 +773,13 @@ def _open_escalation_or_log_failure(
     conversation_id: int,
     reason: str,
     exc: Exception | None,
+    extra_notes: dict[str, str] | None = None,
 ) -> int | None:
     """Opens the escalation for a failed turn and logs it; on any failure
     logs conversation_escalation_failed and returns None instead of
     raising, so the fallback send that follows is still attempted.
+    extra_notes (fixed, code-chosen values such as a message type -- never
+    customer text) are added to _escalation_notes(exc).
 
     exception_message appears in the conversation_escalated event only for
     ModelUnavailableError: client.py's message carries just the exception
@@ -681,7 +792,7 @@ def _open_escalation_or_log_failure(
             conn,
             conversation_id=conversation_id,
             reason=reason,
-            notes=_escalation_notes(exc),
+            notes={**_escalation_notes(exc), **(extra_notes or {})},
         )
     except Exception as open_exc:
         logger.error(
@@ -717,21 +828,23 @@ async def _send_fallback_or_log_failure(
     customer_phone: str,
     reason: str,
     escalation_id: int | None,
+    notice_text: str = OUTPUT_GUARD_FALLBACK_MESSAGE,
 ) -> bool:
-    """Sends OUTPUT_GUARD_FALLBACK_MESSAGE through the output guard like
-    any other outbound text (CLAUDE.md rule 8 -- the guard is never
-    bypassed, even for this fixed string). Returns whether it was
-    delivered; never raises.
+    """Sends notice_text -- OUTPUT_GUARD_FALLBACK_MESSAGE unless a caller
+    passes another fixed message such as PLEASE_TYPE_MESSAGE -- through the
+    output guard like any other outbound text (CLAUDE.md rule 8 -- the
+    guard is never bypassed, even for a fixed string). Returns whether it
+    was delivered; never raises.
 
-    A blocked fallback is structurally impossible -- test_output_guard_
-    fallback_message_is_always_allowed (tests/integration/
-    test_output_guard.py) exists to prove it -- and is not routed around
-    with a second attempt, the infinite-regress trap this design avoids.
-    It is logged loudly if it ever happens.
+    A blocked notice is structurally impossible -- test_output_guard_
+    fallback_message_is_always_allowed and its please-type twin
+    (tests/integration/test_output_guard.py) exist to prove it -- and is
+    not routed around with a second attempt, the infinite-regress trap
+    this design avoids. It is logged loudly if it ever happens.
     """
     try:
         verdict = enforce_outbound_text(
-            conn, conversation_id=conversation_id, text=OUTPUT_GUARD_FALLBACK_MESSAGE
+            conn, conversation_id=conversation_id, text=notice_text
         )
         if not verdict.allowed:
             logger.error(
@@ -767,7 +880,7 @@ async def _send_fallback_or_log_failure(
         conn=conn,
         conversation_id=conversation_id,
         customer_phone=customer_phone,
-        text=OUTPUT_GUARD_FALLBACK_MESSAGE,
+        text=notice_text,
     )
     return whatsapp_message_id is not None
 
@@ -780,11 +893,15 @@ async def _escalate_and_notify(
     reason: str,
     exc: Exception | None,
     existing_escalation_id: int | None = None,
+    notice_text: str = OUTPUT_GUARD_FALLBACK_MESSAGE,
+    extra_notes: dict[str, str] | None = None,
 ) -> str:
     """The one funnel every failed turn goes through (CLAUDE.md rule 12,
     "never leave a customer in silence", and §9's "beyond the cap,
     escalate to a human"): opens an escalation for a human and sends the
-    customer the bilingual fallback message.
+    customer the bilingual fallback message -- or, for a voice note or
+    image, notice_text=PLEASE_TYPE_MESSAGE, with the message type in
+    extra_notes.
 
     The two are attempted independently -- a failure to open the
     escalation no longer stops the fallback from being sent, and a failed
@@ -808,7 +925,11 @@ async def _escalate_and_notify(
     escalation_id = existing_escalation_id
     if escalation_id is None:
         escalation_id = _open_escalation_or_log_failure(
-            conn, conversation_id=conversation_id, reason=reason, exc=exc
+            conn,
+            conversation_id=conversation_id,
+            reason=reason,
+            exc=exc,
+            extra_notes=extra_notes,
         )
     delivered = await _send_fallback_or_log_failure(
         conn,
@@ -816,6 +937,7 @@ async def _escalate_and_notify(
         customer_phone=customer_phone,
         reason=reason,
         escalation_id=escalation_id,
+        notice_text=notice_text,
     )
     if (escalation_id is None or not delivered) and conn.closed:
         escalation_id, delivered = await _retry_funnel_on_a_fresh_connection(
@@ -825,6 +947,8 @@ async def _escalate_and_notify(
             exc=exc,
             escalation_id=escalation_id,
             delivered=delivered,
+            notice_text=notice_text,
+            extra_notes=extra_notes,
         )
     return _funnel_status(escalated=escalation_id is not None, delivered=delivered)
 
@@ -837,6 +961,8 @@ async def _retry_funnel_on_a_fresh_connection(
     exc: Exception | None,
     escalation_id: int | None,
     delivered: bool,
+    notice_text: str,
+    extra_notes: dict[str, str] | None,
 ) -> tuple[int | None, bool]:
     """Re-attempts whichever of the escalation and the fallback send has
     not succeeded yet, on a new connection, and returns the updated pair.
@@ -846,7 +972,11 @@ async def _retry_funnel_on_a_fresh_connection(
         with get_db_connection() as fresh_conn:
             if escalation_id is None:
                 escalation_id = _open_escalation_or_log_failure(
-                    fresh_conn, conversation_id=conversation_id, reason=reason, exc=exc
+                    fresh_conn,
+                    conversation_id=conversation_id,
+                    reason=reason,
+                    exc=exc,
+                    extra_notes=extra_notes,
                 )
             if not delivered:
                 delivered = await _send_fallback_or_log_failure(
@@ -855,6 +985,7 @@ async def _retry_funnel_on_a_fresh_connection(
                     customer_phone=customer_phone,
                     reason=reason,
                     escalation_id=escalation_id,
+                    notice_text=notice_text,
                 )
     except Exception as connect_exc:
         logger.error(
@@ -1178,20 +1309,44 @@ async def _escalate_unexpected_background_failure(
     still open an escalation and attempt the fallback send. Uses a fresh
     connection of its own, since the turn's may be why this failed.
 
-    Reuses _escalate_and_notify rather than duplicating it (CLAUDE.md §2's
-    "one way to do each thing"), with reason _REASON_INTERNAL_ERROR.
-    Returns the funnel status, or failed_unrecorded if not even a fresh
-    connection can be opened. Never raises: there is nothing left to hand
-    a failure to.
+    Reuses the funnel rather than duplicating it (CLAUDE.md §2's "one way
+    to do each thing"), with reason _REASON_INTERNAL_ERROR. Returns the
+    funnel status. Never raises: there is nothing left to hand a failure
+    to.
     """
+    return await _run_funnel_on_own_connection(
+        conversation_id=conversation_id,
+        customer_phone=customer_phone,
+        reason=_REASON_INTERNAL_ERROR,
+        exc=exc,
+    )
+
+
+async def _run_funnel_on_own_connection(
+    *,
+    conversation_id: int,
+    customer_phone: str,
+    reason: str,
+    exc: Exception | None,
+    notice_text: str = OUTPUT_GUARD_FALLBACK_MESSAGE,
+    extra_notes: dict[str, str] | None = None,
+) -> str:
+    """_escalate_and_notify on a connection of its own, for a background
+    job that has none: the last-resort safety net, and the notices the
+    fast path schedules for a message the model never sees (a voice note,
+    an image, other media, the first message past the daily cap). Returns
+    the funnel status, or failed_unrecorded if not even a connection can
+    be opened. Never raises."""
     try:
         with get_db_connection() as conn:
             return await _escalate_and_notify(
                 conn,
                 conversation_id=conversation_id,
                 customer_phone=customer_phone,
-                reason=_REASON_INTERNAL_ERROR,
+                reason=reason,
                 exc=exc,
+                notice_text=notice_text,
+                extra_notes=extra_notes,
             )
     except Exception as unexpected_exc:
         logger.error(
@@ -1199,6 +1354,7 @@ async def _escalate_unexpected_background_failure(
                 {
                     "event": "background_reply_escalation_failed",
                     "conversation_id": conversation_id,
+                    "reason": reason,
                     "exception_type": type(unexpected_exc).__name__,
                     "exception_message": str(unexpected_exc),
                 }
@@ -1296,6 +1452,250 @@ async def _generate_and_deliver_reply(
     )
 
 
+async def _send_notice_without_a_model_turn(
+    *,
+    conversation_id: int,
+    customer_phone: str,
+    reason: str,
+    notice_text: str,
+    extra_notes: dict[str, str] | None,
+) -> None:
+    """Background job for a stored message the model never sees -- a
+    voice note, an image, other media, or the first message past the
+    daily cap: the funnel on a connection of its own (CLAUDE.md rule 12),
+    then the same reply_turn_finished line every turn logs. Never
+    raises."""
+    status = await _run_funnel_on_own_connection(
+        conversation_id=conversation_id,
+        customer_phone=customer_phone,
+        reason=reason,
+        exc=None,
+        notice_text=notice_text,
+        extra_notes=extra_notes,
+    )
+    logger.info(
+        json.dumps(
+            {
+                "event": "reply_turn_finished",
+                "conversation_id": conversation_id,
+                "status": status,
+            }
+        )
+    )
+
+
+def _touch_last_message_at_or_log_failure(
+    conn: psycopg.Connection[Any], *, conversation_id: int
+) -> None:
+    """touch_last_message_at, logged at ERROR instead of raised: it runs
+    after the inbound message is stored, where an exception would turn
+    into a 500 whose retry is then dropped as a duplicate -- a message
+    lost for good. The session clock is off by one message at worst."""
+    try:
+        touch_last_message_at(conn, conversation_id=conversation_id)
+    except Exception as exc:
+        logger.error(
+            json.dumps(
+                {
+                    "event": "touch_last_message_at_failed",
+                    "conversation_id": conversation_id,
+                    "exception_type": type(exc).__name__,
+                    "exception_message": str(exc),
+                }
+            ),
+            exc_info=exc,
+        )
+
+
+def _rate_cap_blocks(
+    conn: psycopg.Connection[Any],
+    inbound: InboundMessage,
+    *,
+    conversation_id: int,
+    llm_settings: LlmSettings,
+    now: datetime,
+) -> MessageRateCapExceededError | None:
+    """The rate-cap verdict for a message already stored: the cap error if
+    it is blocked, else None. A failed check (a database error, not the
+    cap) is logged at ERROR and lets the message through -- for the same
+    lost-for-good reason as _touch_last_message_at_or_log_failure, and
+    because one message over the cap is a smaller harm than silence.
+    Never raises."""
+    try:
+        check_message_rate_cap(
+            conn, customer_phone=inbound.customer_phone, now=now, settings=llm_settings
+        )
+    except MessageRateCapExceededError as cap_exc:
+        logger.info(
+            json.dumps(
+                {
+                    "event": "message_rate_cap_blocked",
+                    "conversation_id": conversation_id,
+                    "first_of_day": cap_exc.first_of_day,
+                }
+            )
+        )
+        return cap_exc
+    except Exception as exc:
+        logger.error(
+            json.dumps(
+                {
+                    "event": "message_rate_cap_check_failed",
+                    "conversation_id": conversation_id,
+                    "exception_type": type(exc).__name__,
+                    "exception_message": str(exc),
+                }
+            ),
+            exc_info=exc,
+        )
+    return None
+
+
+def _schedule_after_storing(
+    inbound: InboundMessage,
+    *,
+    conversation_id: int,
+    llm_settings: LlmSettings,
+    now: datetime,
+    background_tasks: BackgroundTasks,
+) -> str:
+    """Schedules the background job for a stored, uncapped message: a
+    model turn for text, a notice for any other handled type (decision A:
+    PLEASE_TYPE_MESSAGE for a voice note or an image, the generic fallback
+    for other media, an escalation either way). Returns its status."""
+    if inbound.message_type == _TEXT_MESSAGE_TYPE:
+        background_tasks.add_task(
+            _generate_and_deliver_reply,
+            conversation_id=conversation_id,
+            customer_name=inbound.customer_name,
+            customer_phone=inbound.customer_phone,
+            llm_settings=llm_settings,
+            now=now,
+        )
+        return _STATUS_ACCEPTED
+    notice_text = (
+        PLEASE_TYPE_MESSAGE
+        if inbound.message_type in _PLEASE_TYPE_MESSAGE_TYPES
+        else OUTPUT_GUARD_FALLBACK_MESSAGE
+    )
+    background_tasks.add_task(
+        _send_notice_without_a_model_turn,
+        conversation_id=conversation_id,
+        customer_phone=inbound.customer_phone,
+        reason=_REASON_UNSUPPORTED_MESSAGE_TYPE,
+        notice_text=notice_text,
+        extra_notes={"message_type": inbound.message_type},
+    )
+    return _STATUS_UNSUPPORTED_TYPE
+
+
+def _accept_inbound_message(
+    conn: psycopg.Connection[Any],
+    inbound: InboundMessage,
+    *,
+    llm_settings: LlmSettings,
+    now: datetime,
+    background_tasks: BackgroundTasks,
+) -> str:
+    """Stores one inbound message and schedules what answers it. Returns
+    its status.
+
+    Everything before the insert may raise -- the message is not stored
+    yet, so a retry can still process it. Everything after may not: the
+    stored row makes any redelivery a duplicate, so a failure there must
+    never become a 500 (the post-insert steps log and carry on).
+
+    Raises:
+        Any exception from the conversation upsert, the session check or
+        the insert itself (see _accept_inbound_message_or_log_failure).
+    """
+    if inbound.message_type not in _HANDLED_MESSAGE_TYPES:
+        logger.info(
+            json.dumps(
+                {
+                    "event": "inbound_message_ignored",
+                    "message_type": inbound.message_type,
+                }
+            )
+        )
+        return _STATUS_IGNORED
+    conversation_id = _find_or_create_conversation(
+        conn, customer_phone=inbound.customer_phone
+    )
+    start_new_session_if_idle(conn, conversation_id=conversation_id, now=now)
+    message_id = _insert_inbound_message(
+        conn,
+        conversation_id=conversation_id,
+        customer_phone=inbound.customer_phone,
+        whatsapp_message_id=inbound.whatsapp_message_id,
+        body=inbound.body,
+    )
+    if message_id is None:
+        return _STATUS_DUPLICATE
+
+    _touch_last_message_at_or_log_failure(conn, conversation_id=conversation_id)
+    cap_exc = _rate_cap_blocks(
+        conn,
+        inbound,
+        conversation_id=conversation_id,
+        llm_settings=llm_settings,
+        now=now,
+    )
+    if cap_exc is not None:
+        if cap_exc.first_of_day:
+            background_tasks.add_task(
+                _send_notice_without_a_model_turn,
+                conversation_id=conversation_id,
+                customer_phone=inbound.customer_phone,
+                reason=_REASON_MESSAGE_RATE_CAP_EXCEEDED,
+                notice_text=OUTPUT_GUARD_FALLBACK_MESSAGE,
+                extra_notes=None,
+            )
+        return _STATUS_RATE_LIMITED
+    return _schedule_after_storing(
+        inbound,
+        conversation_id=conversation_id,
+        llm_settings=llm_settings,
+        now=now,
+        background_tasks=background_tasks,
+    )
+
+
+def _accept_inbound_message_or_log_failure(
+    conn: psycopg.Connection[Any],
+    inbound: InboundMessage,
+    *,
+    llm_settings: LlmSettings,
+    now: datetime,
+    background_tasks: BackgroundTasks,
+) -> str:
+    """_accept_inbound_message, with a failure before the message was
+    stored logged at ERROR and reported as not_stored, so one bad message
+    does not stop the rest of a batch; receive_message then answers 500
+    for the retry. Never raises."""
+    try:
+        return _accept_inbound_message(
+            conn,
+            inbound,
+            llm_settings=llm_settings,
+            now=now,
+            background_tasks=background_tasks,
+        )
+    except Exception as exc:
+        logger.error(
+            json.dumps(
+                {
+                    "event": "inbound_message_not_stored",
+                    "message_type": inbound.message_type,
+                    "exception_type": type(exc).__name__,
+                    "exception_message": str(exc),
+                }
+            ),
+            exc_info=exc,
+        )
+        return _STATUS_NOT_STORED
+
+
 @router.get("/webhook/whatsapp")
 async def verify_subscription(
     hub_mode: str = Query(alias="hub.mode"),
@@ -1320,22 +1720,45 @@ async def verify_subscription(
 async def receive_message(
     request: Request, background_tasks: BackgroundTasks
 ) -> JSONResponse:
-    """Processes one WhatsApp Cloud API webhook delivery — see this
-    module's own docstring for the fast-ack/background split and for why
-    the fast path stops where it does.
+    """Processes one WhatsApp Cloud API webhook delivery -- every message
+    in it (_accept_inbound_message) -- see this module's own docstring for
+    the fast-ack/background split and for why the fast path stops where
+    it does.
+
+    The response body is {"status": ...} for a single message (or
+    "ignored" when there is none), and {"status": "batch", "results":
+    [...]} for several. It is HTTP 500 when any message could not be
+    stored, so Meta redelivers the batch: the messages already stored come
+    back as duplicates and were already answered -- FastAPI still runs the
+    jobs scheduled here on a returned 500 -- and the failed one gets
+    another attempt.
 
     Raises:
         HTTPException(401): the signature is missing or does not match
-            X-Hub-Signature-256 — checked before any database access.
+            X-Hub-Signature-256 -- checked before any database access, and
+            logged as a warning with the reason only.
         HTTPException(400): the signed body is not valid JSON.
     """
     webhook_settings = get_webhook_settings()
     body = await request.body()
-    if not _signature_is_valid(
+    problem = _signature_problem(
         body=body,
         signature_header=request.headers.get(_SIGNATURE_HEADER),
         app_secret=webhook_settings.app_secret,
-    ):
+    )
+    if problem is not None:
+        # The reason and the body size only: never the header's value or
+        # the app secret. A wrong WHATSAPP_APP_SECRET would otherwise make
+        # every real message vanish with no application log at all.
+        logger.warning(
+            json.dumps(
+                {
+                    "event": "webhook_signature_rejected",
+                    "problem": problem,
+                    "body_bytes": len(body),
+                }
+            )
+        )
         raise HTTPException(status_code=401, detail="invalid signature")
 
     try:
@@ -1343,53 +1766,27 @@ async def receive_message(
     except json.JSONDecodeError:
         raise HTTPException(status_code=400, detail="invalid JSON body") from None
 
-    inbound = _parse_inbound_message(payload)
-    if inbound is None:
-        return JSONResponse({"status": "ignored"})
+    messages = _parse_inbound_messages(_as_dict(payload))
+    if not messages:
+        return JSONResponse({"status": _STATUS_IGNORED})
 
     llm_settings = get_llm_settings()
     now = datetime.now(UTC)
-
     with get_db_connection() as conn:
-        conversation_id = _find_or_create_conversation(
-            conn, customer_phone=inbound.customer_phone
-        )
-        start_new_session_if_idle(conn, conversation_id=conversation_id, now=now)
-        message_id = _insert_inbound_message(
-            conn,
-            conversation_id=conversation_id,
-            customer_phone=inbound.customer_phone,
-            whatsapp_message_id=inbound.whatsapp_message_id,
-            body=inbound.body,
-        )
-        if message_id is None:
-            return JSONResponse({"status": "duplicate"})
-        touch_last_message_at(conn, conversation_id=conversation_id)
-
-        try:
-            check_message_rate_cap(
+        statuses = [
+            _accept_inbound_message_or_log_failure(
                 conn,
-                customer_phone=inbound.customer_phone,
+                inbound,
+                llm_settings=llm_settings,
                 now=now,
-                settings=llm_settings,
+                background_tasks=background_tasks,
             )
-        except MessageRateCapExceededError:
-            logger.info(
-                json.dumps(
-                    {
-                        "event": "message_rate_cap_blocked",
-                        "conversation_id": conversation_id,
-                    }
-                )
-            )
-            return JSONResponse({"status": "rate_limited"})
+            for inbound in messages
+        ]
 
-    background_tasks.add_task(
-        _generate_and_deliver_reply,
-        conversation_id=conversation_id,
-        customer_name=inbound.customer_name,
-        customer_phone=inbound.customer_phone,
-        llm_settings=llm_settings,
-        now=now,
+    status_code = 500 if _STATUS_NOT_STORED in statuses else 200
+    if len(statuses) == 1:
+        return JSONResponse({"status": statuses[0]}, status_code=status_code)
+    return JSONResponse(
+        {"status": _STATUS_BATCH, "results": statuses}, status_code=status_code
     )
-    return JSONResponse({"status": _STATUS_ACCEPTED})
