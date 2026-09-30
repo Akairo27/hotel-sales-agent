@@ -8,6 +8,15 @@ by hand:
     python -m tests.eval_model_candidates --confirm-scratch-db \\
         --model deepseek/deepseek-v4-pro-0813 --provider <approved-slug> ...
 
+Reasoning settings (added 2026-09-30): --reasoning-effort is repeatable;
+"default" sends no reasoning field (production today), any other value is
+sent as OpenRouter's reasoning.effort. --repeat N runs every (setting,
+scenario) pair N times, interleaving settings within each repeat, and
+--output PATH also writes the report to a file (the manual GitHub workflow
+.github/workflows/model-eval.yml uploads it). Model calls use production's
+per-attempt timeout and turn budget, so a slow setting is measured, not
+cut short.
+
 Each (model, scenario) pair runs the real generate_reply -- real prompt,
 real tool declarations, real dispatch against a seeded database, real
 pricing -- then the real enforce_outbound_text output guard on the reply,
@@ -41,19 +50,27 @@ import os
 import sys
 import time
 from collections.abc import Sequence
+from dataclasses import dataclass
 from datetime import date
 from decimal import Decimal
+from pathlib import Path
 from typing import Any
 
 import psycopg
 from psycopg import sql
 
 from services.agent.llm.client import (
+    REASONING_EFFORTS,
     GeminiTransport,
     ModelTransport,
     OpenRouterTransport,
+    ReasoningEffort,
 )
-from services.agent.llm.config import GEMINI_MODELS, LlmSettings
+from services.agent.llm.config import (
+    GEMINI_MODELS,
+    MODEL_ATTEMPT_TIMEOUT_MS,
+    LlmSettings,
+)
 from services.agent.llm.conversation import generate_reply
 from services.agent.llm.errors import LlmConfigurationError, LlmError
 from services.agent.llm.model_types import ModelResponse, Turn
@@ -82,7 +99,12 @@ from tests.integration._seed import (
     seed_season,
 )
 
-EVAL_TIMEOUT_MS = 10_000
+# Production's own per-attempt ceiling (the turn budget comes from
+# generate_reply itself): with a shorter one a slower reasoning setting
+# would time out here and look worse than it is in production.
+EVAL_TIMEOUT_MS = MODEL_ATTEMPT_TIMEOUT_MS
+# The --reasoning-effort value that sends no reasoning field at all.
+DEFAULT_SETTING = "default"
 EVAL_TOTAL_ROOMS = 5
 EVAL_COST_PER_NIGHT_HALALAS = 10_000
 EVAL_TARGET_MARGIN_BPS = 2_000
@@ -112,19 +134,40 @@ class EvalConfigurationError(Exception):
 
 
 class _CountingTransport:
-    """Counts every model call, including ones that raise."""
+    """Counts every model call, including ones that raise, and adds up the
+    token usage of the ones that return -- input, output, and the
+    reasoning part of the output (None until some call reports it)."""
 
     def __init__(self, inner: ModelTransport) -> None:
         self._inner = inner
         self.calls = 0
+        self.input_tokens = 0
+        self.output_tokens = 0
+        self.reasoning_tokens: int | None = None
 
     async def generate(
         self, *, turns: list[Turn], system_instruction: str, deadline: float
     ) -> ModelResponse:
         self.calls += 1
-        return await self._inner.generate(
+        response = await self._inner.generate(
             turns=turns, system_instruction=system_instruction, deadline=deadline
         )
+        self.input_tokens += response.usage.prompt_tokens
+        self.output_tokens += response.usage.candidates_tokens
+        if response.usage.reasoning_tokens is not None:
+            self.reasoning_tokens = (
+                self.reasoning_tokens or 0
+            ) + response.usage.reasoning_tokens
+        return response
+
+
+@dataclass(frozen=True)
+class EvalTarget:
+    """One model under one reasoning setting."""
+
+    model: str
+    setting: str
+    transport: ModelTransport
 
 
 class _RetryCounter(logging.Handler):
@@ -262,6 +305,7 @@ async def run_scenario(
     transport: ModelTransport,
     model: str,
     scenario: Scenario,
+    setting: str = DEFAULT_SETTING,
 ) -> ScenarioResult:
     """Seeds a fresh database, runs the real generate_reply for the
     scenario's customer message, judges the reply with the real output
@@ -303,7 +347,11 @@ async def run_scenario(
             malformed_retries=retry_counter.malformed_retries,
             model_calls=counting.calls,
             latency_seconds=time.perf_counter() - started,
-            total_tokens=0,
+            total_tokens=counting.input_tokens + counting.output_tokens,
+            setting=setting,
+            input_tokens=counting.input_tokens,
+            output_tokens=counting.output_tokens,
+            reasoning_tokens=counting.reasoning_tokens,
         )
     finally:
         client_logger.removeHandler(retry_counter)
@@ -324,6 +372,10 @@ async def run_scenario(
         model_calls=counting.calls,
         latency_seconds=latency,
         total_tokens=reply.usage.total_tokens,
+        setting=setting,
+        input_tokens=counting.input_tokens,
+        output_tokens=counting.output_tokens,
+        reasoning_tokens=counting.reasoning_tokens,
     )
 
 
@@ -335,12 +387,18 @@ def _require_env(name: str) -> str:
 
 
 def build_transports(
-    models: Sequence[str], providers: Sequence[str], *, include_gemini_baseline: bool
-) -> list[tuple[str, ModelTransport]]:
+    models: Sequence[str],
+    providers: Sequence[str],
+    *,
+    include_gemini_baseline: bool,
+    reasoning_efforts: Sequence[str] = (DEFAULT_SETTING,),
+) -> list[EvalTarget]:
     """The OpenRouter candidates get the providers passed on the command
     line -- never OPENROUTER_ROUTES, which stays empty until a provider is
-    approved. Synthetic scenario data is all that is ever sent."""
-    transports: list[tuple[str, ModelTransport]] = []
+    approved -- one target per reasoning setting. The Gemini baseline runs
+    once, under the default setting. Synthetic scenario data is all that is
+    ever sent."""
+    transports: list[EvalTarget] = []
     if include_gemini_baseline:
         gemini_model = _require_env("LLM_MODEL")
         if gemini_model not in GEMINI_MODELS:
@@ -349,26 +407,47 @@ def build_transports(
                 "the baseline needs the deployed Gemini one"
             )
         settings = eval_settings(gemini_model, api_key=_require_env("LLM_API_KEY"))
-        transports.append((gemini_model, GeminiTransport(settings)))
+        transports.append(
+            EvalTarget(gemini_model, DEFAULT_SETTING, GeminiTransport(settings))
+        )
     if models:
         api_key = _require_env("OPENROUTER_API_KEY")
         for model in models:
-            transports.append(
-                (
-                    model,
-                    OpenRouterTransport(
-                        model=model,
-                        api_key=api_key,
-                        providers=tuple(providers),
-                        timeout_ms=EVAL_TIMEOUT_MS,
-                    ),
+            for setting in reasoning_efforts:
+                transports.append(
+                    EvalTarget(
+                        model,
+                        setting,
+                        OpenRouterTransport(
+                            model=model,
+                            api_key=api_key,
+                            providers=tuple(providers),
+                            timeout_ms=EVAL_TIMEOUT_MS,
+                            reasoning_effort=_reasoning_effort(setting),
+                        ),
+                    )
                 )
-            )
     if not transports:
         raise EvalConfigurationError(
             "nothing to evaluate: pass --model and/or --include-gemini-baseline"
         )
     return transports
+
+
+def _reasoning_effort(setting: str) -> ReasoningEffort | None:
+    if setting == DEFAULT_SETTING:
+        return None
+    for effort in REASONING_EFFORTS:
+        if effort == setting:
+            return effort
+    raise EvalConfigurationError(f"unknown reasoning effort {setting!r}")
+
+
+def _positive_int(raw: str) -> int:
+    value = int(raw)
+    if value < 1:
+        raise argparse.ArgumentTypeError("must be at least 1")
+    return value
 
 
 def _parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
@@ -388,21 +467,46 @@ def _parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
         action="store_true",
         help="EVAL_DATABASE_URL is a scratch database that may be truncated",
     )
-    return parser.parse_args(argv)
+    parser.add_argument(
+        "--reasoning-effort",
+        action="append",
+        choices=[DEFAULT_SETTING, *REASONING_EFFORTS],
+        help=(
+            "OpenRouter reasoning.effort to compare (repeatable); "
+            f"{DEFAULT_SETTING!r} sends none. Defaults to {DEFAULT_SETTING!r} only."
+        ),
+    )
+    parser.add_argument(
+        "--repeat",
+        type=_positive_int,
+        default=1,
+        help="run every (setting, scenario) pair this many times",
+    )
+    parser.add_argument("--output", help="also write the report to this file")
+    args = parser.parse_args(argv)
+    args.reasoning_effort = args.reasoning_effort or [DEFAULT_SETTING]
+    return args
 
 
 async def _run_all(
-    conn: psycopg.Connection[Any],
-    transports: Sequence[tuple[str, ModelTransport]],
+    conn: psycopg.Connection[Any], targets: Sequence[EvalTarget], *, repeat: int
 ) -> list[ScenarioResult]:
+    """Every target runs every scenario, `repeat` times. The targets are
+    interleaved within each repeat, so a provider's slow spell falls on
+    every setting alike rather than on whichever ran then."""
     results: list[ScenarioResult] = []
-    for model, transport in transports:
-        for scenario in SCENARIOS:
-            results.append(
-                await run_scenario(
-                    conn, transport=transport, model=model, scenario=scenario
+    for _ in range(repeat):
+        for target in targets:
+            for scenario in SCENARIOS:
+                results.append(
+                    await run_scenario(
+                        conn,
+                        transport=target.transport,
+                        model=target.model,
+                        scenario=scenario,
+                        setting=target.setting,
+                    )
                 )
-            )
     return results
 
 
@@ -418,14 +522,19 @@ def main(argv: Sequence[str] | None = None) -> int:
         os.environ.get("EVAL_DATABASE_URL"),
         production_url=os.environ.get("DATABASE_URL"),
     )
-    transports = build_transports(
-        args.model, args.provider, include_gemini_baseline=args.include_gemini_baseline
+    targets = build_transports(
+        args.model,
+        args.provider,
+        include_gemini_baseline=args.include_gemini_baseline,
+        reasoning_efforts=args.reasoning_effort,
     )
     with psycopg.connect(url, autocommit=True) as conn:
         require_only_seeded_hotels(conn)
-        results = asyncio.run(_run_all(conn, transports))
-    sys.stdout.write(render_results_table(results) + "\n\n")
-    sys.stdout.write(render_model_summary(results) + "\n")
+        results = asyncio.run(_run_all(conn, targets, repeat=args.repeat))
+    report = render_model_summary(results) + "\n\n" + render_results_table(results)
+    sys.stdout.write(report + "\n")
+    if args.output:
+        Path(args.output).write_text(report + "\n", encoding="utf-8")
     return 0
 
 

@@ -116,7 +116,7 @@ MAX_CUSTOMER_NAME_LENGTH = 60
 # client.py's per-attempt timeout is min(this, the turn's remaining
 # budget), so raising this cap only lets a single healthy-but-slow
 # attempt finish; it does not by itself let a turn run any longer.
-_DEFAULT_TIMEOUT_MS = 30_000
+MODEL_ATTEMPT_TIMEOUT_MS = 30_000
 
 # The total wall-clock time one turn may spend across every model-call
 # attempt and retry, in every tool-calling iteration combined (CLAUDE.md
@@ -218,7 +218,7 @@ def load_llm_settings(env: Mapping[str, str] | None = None) -> LlmSettings:
         api_key=api_key,
         token_rates=token_rates,
         openrouter_route=route,
-        timeout_ms=_DEFAULT_TIMEOUT_MS,
+        timeout_ms=MODEL_ATTEMPT_TIMEOUT_MS,
         max_conversation_turns=_require_positive_int(
             active_env, "MAX_CONVERSATION_TURNS"
         ),

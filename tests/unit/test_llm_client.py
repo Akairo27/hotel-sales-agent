@@ -549,6 +549,8 @@ def test_generate_folds_thinking_tokens_into_candidates_tokens(
     assert response.usage.prompt_tokens == 10
     assert response.usage.candidates_tokens == 45
     assert response.usage.total_tokens == 55
+    # The thinking part of the output, reported on its own for the log.
+    assert response.usage.reasoning_tokens == 40
 
 
 def test_generate_treats_absent_thinking_tokens_as_zero(
@@ -578,6 +580,7 @@ def test_generate_treats_absent_thinking_tokens_as_zero(
     )
 
     assert response.usage.candidates_tokens == 2
+    assert response.usage.reasoning_tokens is None
 
 
 def test_generate_sends_a_tool_error_result_as_a_function_response(
@@ -778,6 +781,12 @@ def test_generate_logs_info_for_a_successful_first_attempt(
     assert info_records[0]["outcome"] == "success"
     assert isinstance(info_records[0]["elapsed_ms"], int)
     assert info_records[0]["elapsed_ms"] >= 0
+    # A successful attempt also logs its tokens (never the prompt or reply).
+    assert set(info_records[0]) >= {
+        "prompt_tokens",
+        "completion_tokens",
+        "reasoning_tokens",
+    }
 
 
 def test_generate_logs_info_for_a_failed_final_attempt(
@@ -809,3 +818,4 @@ def test_generate_logs_info_for_a_failed_final_attempt(
     assert len(info_records) == 1
     assert info_records[0]["event"] == "model_call_attempt"
     assert info_records[0]["outcome"] == "failure"
+    assert "prompt_tokens" not in info_records[0]

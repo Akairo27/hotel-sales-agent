@@ -1,0 +1,88 @@
+name: Model eval (manual)
+
+# Paid model comparison (tests/eval_model_candidates.py), owner-approved
+# 2026-09-30: GLM-5.3 under three reasoning settings -- default (no
+# reasoning field, production today), effort "low" and effort "none" -- on
+# the eight synthetic scenarios, repeated. Manual only: it spends real
+# money, so it never runs on a push or a pull request.
+#
+# The database is a throwaway Postgres container that exists only for this
+# job, never the live database. The OpenRouter key comes from the repo
+# secret OPENROUTER_EVAL_API_KEY and reaches only the eval step's
+# environment; nothing here prints it (GitHub also masks it in logs). The
+# uploaded artifact is the results report only.
+on:
+  workflow_dispatch:
+    inputs:
+      repeat:
+        description: "Runs of every (setting, scenario) pair"
+        required: true
+        default: "3"
+
+permissions:
+  contents: read
+
+env:
+  UV_VERSION: "0.12.5"
+  EVAL_MODEL: z-ai/glm-5.3-20260816
+
+jobs:
+  eval:
+    name: model eval
+    runs-on: ubuntu-24.04
+    # 8 scenarios x 3 settings x 3 repeats is 72 turns; a turn is capped at
+    # 75s by generate_reply's own budget.
+    timeout-minutes: 120
+    services:
+      postgres:
+        image: postgres:17.11
+        env:
+          POSTGRES_DB: hotel_sales_eval
+          POSTGRES_HOST_AUTH_METHOD: trust
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    env:
+      TEST_DATABASE_URL: postgresql://postgres@localhost:5432/hotel_sales_eval
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
+        with:
+          version: ${{ env.UV_VERSION }}
+
+      - name: Install locked dependencies
+        run: uv sync --frozen
+
+      # The test suite's schema fixture applies db/migrations/ exactly as CI
+      # does; this one test then seeds the eval hotel the harness expects.
+      - name: Apply migrations to the throwaway database
+        run: >-
+          uv run pytest
+          "tests/integration/test_eval_model_candidates_integration.py::test_seeding_is_repeatable_and_leaves_only_the_test_hotel"
+
+      - name: Run the eval
+        env:
+          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_EVAL_API_KEY }}
+          EVAL_DATABASE_URL: postgresql://postgres@localhost:5432/hotel_sales_eval
+          REPEAT: ${{ inputs.repeat }}
+        run: >-
+          uv run python -m tests.eval_model_candidates --confirm-scratch-db
+          --model "$EVAL_MODEL"
+          --provider crusoe --provider inference-net
+          --reasoning-effort default --reasoning-effort low --reasoning-effort none
+          --repeat "$REPEAT"
+          --output model-eval-results.md
+
+      - name: Upload the results
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: model-eval-results
+          path: model-eval-results.md
+          if-no-files-found: warn
+          retention-days: 30

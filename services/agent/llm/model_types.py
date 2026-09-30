@@ -114,11 +114,17 @@ class ModelUsage:
     """One model call's token usage — provider-neutral names for the
     same three figures services.agent.llm.conversation.UsageTotals
     accumulates across a turn's calls (that type is unchanged; this is
-    just what a single call reports)."""
+    just what a single call reports).
+
+    reasoning_tokens is the part of candidates_tokens the model spent
+    reasoning (already inside it, never added on top), or None when the
+    provider did not report it. Logged per call and read by the eval
+    harness; no cap uses it."""
 
     prompt_tokens: int
     candidates_tokens: int
     total_tokens: int
+    reasoning_tokens: int | None = None
 
 
 @dataclass(frozen=True)
