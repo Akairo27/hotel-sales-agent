@@ -64,3 +64,16 @@ def test_the_settings_come_from_the_dispatch_and_default_to_production() -> None
     assert "${{ inputs" not in run_script.split("run: |", 1)[1]
     assert "set -euf -o pipefail" in run_script
     assert '--reasoning-effort "$setting"' in run_script
+
+
+def test_the_categories_come_from_the_dispatch_and_default_to_all() -> None:
+    """Owner-approved 2026-10-01: re-run a subset (e.g. booking). Empty runs
+    every scenario; the input reaches the script only through the
+    environment, like the settings."""
+    text = _text()
+    categories_input = text.split("      categories:\n", 1)[1].split("\n\n", 1)[0]
+    assert 'default: ""' in categories_input
+    assert "CATEGORIES: ${{ inputs.categories }}" in text
+    run_script = text.split("run: |", 1)[1]
+    assert '--category "$category"' in run_script
+    assert '"${category_args[@]}"' in run_script

@@ -37,9 +37,11 @@ from tests.eval_scenarios import (
     quote_reply_complete,
     quote_was_priced,
     render_model_summary,
+    render_replies,
     render_results_table,
     reply_leaked,
     scenario_now,
+    scenarios_in,
     stay_tool_call_matches,
 )
 
@@ -559,3 +561,52 @@ def test_the_results_table_has_the_confirm_and_booking_columns() -> None:
     table = render_results_table([_result(hotel_confirmed_ok=True, booking_ok=False)])
     assert "| confirm | booking |" in table
     assert "| ok | FAIL |" in table
+
+
+def test_scenarios_in_filters_by_category_in_list_order() -> None:
+    booking = scenarios_in(["booking"])
+    assert [s.key for s in booking] == [
+        s.key for s in SCENARIOS if s.category == "booking"
+    ]
+    assert len(booking) == 6
+    assert scenarios_in([]) == SCENARIOS
+
+
+def test_scenarios_in_refuses_an_unknown_category() -> None:
+    with pytest.raises(ValueError, match="unknown scenario categories"):
+        scenarios_in(["no-such-category"])
+
+
+_TWO_LINE_REPLY = ("أبشر، بلّغت زميلي.", "يتواصل معك إن شاء الله.")
+
+
+def test_the_replies_section_shows_each_turns_reply_and_tools() -> None:
+    """Owner-approved 2026-10-01: a failed check must be readable, not just
+    counted -- synthetic data only."""
+    text = render_replies(
+        [
+            _result(
+                scenario_key="booking_yes_gulf",
+                setting="low",
+                booking_ok=False,
+                reply_text="\n".join(_TWO_LINE_REPLY),
+                tool_names=(),
+            ),
+            _result(
+                scenario_key="booking_yes_en",
+                setting="low",
+                reply_text="Done.",
+                tool_names=("request_booking_follow_up",),
+            ),
+            _result(
+                error_type="ModelUnavailableError",
+                guard_allowed=None,
+                reply_text=None,
+            ),
+        ]
+    )
+    assert "Synthetic scenarios only" in text
+    assert "1. booking_yes_gulf (low) — FAIL — tools: none" in text
+    assert "\n".join(f"> {line}" for line in _TWO_LINE_REPLY) in text
+    assert "2. booking_yes_en (low) — PASS — tools: request_booking_follow_up" in text
+    assert "> (no reply: ModelUnavailableError)" in text

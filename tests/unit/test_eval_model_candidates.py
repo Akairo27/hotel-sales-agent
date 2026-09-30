@@ -335,8 +335,21 @@ def test_every_setting_runs_every_scenario_each_repeat_interleaved(
         EvalTarget("vendor/model-1", "low", cast(Any, None)),
     ]
 
-    asyncio.run(eval_module._run_all(cast(Any, None), targets, repeat=2))
+    asyncio.run(
+        eval_module._run_all(cast(Any, None), targets, scenarios=SCENARIOS, repeat=2)
+    )
 
     keys = [scenario.key for scenario in SCENARIOS]
     one_repeat = [("default", key) for key in keys] + [("low", key) for key in keys]
     assert order == one_repeat * 2
+
+
+def test_the_command_line_runs_every_category_unless_told_otherwise() -> None:
+    assert _parse_args(["--confirm-scratch-db"]).category == []
+    args = _parse_args(["--category", "booking", "--category", "price-validity"])
+    assert args.category == ["booking", "price-validity"]
+
+
+def test_the_command_line_refuses_an_unknown_category() -> None:
+    with pytest.raises(SystemExit):
+        _parse_args(["--category", "no-such-category"])
