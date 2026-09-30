@@ -2,7 +2,7 @@
 
 Pure-ish functions (conn + explicit `now` in, following
 services/worker/hold_expiry.py's pattern of never reading the clock
-itself). Three checks, two writes:
+itself). Three checks, two writes, one lookup:
 
 - check_token_spend_caps: called from generate_reply, before every
   transport.generate() call inside its tool-calling loop (not just once
@@ -18,6 +18,9 @@ itself). Three checks, two writes:
 - check_message_rate_cap: called by the webhook right after it stores an
   inbound message, before any conversation turn starts — so it lives
   here rather than as a generate_reply-raised LlmError.
+- find_todays_cap_escalation: called by the webhook when a turn ends on
+  one of the caps, so a number is escalated for a cap at most once per
+  Asia/Riyadh day (ARCHITECTURE.md §7).
 """
 
 from __future__ import annotations
@@ -32,6 +35,7 @@ import psycopg
 from services.agent.llm.config import SESSION_CLOCK_SKEW_TOLERANCE, LlmSettings
 from services.agent.llm.errors import (
     DailySpendCapExceededError,
+    NumberDailyTokenCapExceededError,
     TokenSpendCapExceededError,
 )
 from services.agent.llm.pricing import (
@@ -70,13 +74,14 @@ def check_token_spend_caps(
     conn: psycopg.Connection[Any],
     *,
     conversation_id: int,
+    customer_phone: str,
     now: datetime,
     settings: LlmSettings,
     usage_so_far: UsageTotals,
 ) -> None:
-    """Raises if this conversation's or today's total spend — committed
-    usage from token_usage plus usage_so_far from the current turn's own
-    model calls so far — is at or above its cap.
+    """Raises if this conversation's, this number's or today's total
+    spend — committed usage from token_usage plus usage_so_far from the
+    current turn's own model calls so far — is at or above its cap.
 
     Called from generate_reply before every transport.generate() call in
     its tool-calling loop, not just once before the loop starts.
@@ -88,12 +93,12 @@ def check_token_spend_caps(
     change nothing. Every caller must state explicitly what this turn has
     already spent; pass UsageTotals.zero() for a turn-start check.
 
-    Neither exception below carries usage_so_far itself — that happens one
-    level up, in generate_reply's own wrapping try/except
+    None of the exceptions below carries usage_so_far itself — that
+    happens one level up, in generate_reply's own wrapping try/except
     (conversation.py), via errors.attach_usage_so_far. This function's
     only job with usage_so_far is the arithmetic above; carrying it on
     whatever gets raised is a concern shared by every exception the
-    tool-calling loop can produce, not just these two, so it lives in one
+    tool-calling loop can produce, not just these three, so it lives in one
     place there rather than being duplicated here.
 
     Raises:
@@ -101,6 +106,10 @@ def check_token_spend_caps(
             conversation_id's current session (services.agent.llm.session),
             plus usage_so_far, has already reached
             settings.max_tokens_per_conversation.
+        NumberDailyTokenCapExceededError: customer_phone's token_usage
+            total for today (Asia/Riyadh calendar day, every session that
+            day), plus usage_so_far, has already reached
+            settings.max_tokens_per_number_per_day.
         DailySpendCapExceededError: today's (Asia/Riyadh calendar day)
             estimated spend across every conversation, plus usage_so_far,
             has already reached settings.max_spend_per_day_usd. A soft cap
@@ -140,6 +149,21 @@ def check_token_spend_caps(
 
     day = riyadh_calendar_day(now)
     day_start_utc, day_end_utc = riyadh_day_bounds_utc(day)
+    number_row = conn.execute(
+        "SELECT COALESCE(SUM(total_tokens), 0) FROM token_usage "
+        "WHERE customer_phone = %s AND created_at >= %s AND created_at < %s",
+        (customer_phone, day_start_utc, day_end_utc),
+    ).fetchone()
+    if number_row is None:
+        raise RuntimeError("SELECT SUM(...) with no GROUP BY returned no row")
+    number_total_tokens: int = number_row[0] + usage_so_far.total_tokens
+    if number_total_tokens >= settings.max_tokens_per_number_per_day:
+        raise NumberDailyTokenCapExceededError(
+            f"the phone number of conversation {conversation_id} has used "
+            f"{number_total_tokens} tokens on {day.isoformat()}, at or above "
+            f"its daily cap ({settings.max_tokens_per_number_per_day})"
+        )
+
     daily_row = conn.execute(
         "SELECT COALESCE(SUM(prompt_tokens), 0), "
         "COALESCE(SUM(candidates_tokens), 0) FROM token_usage "
@@ -242,6 +266,40 @@ def increment_turn_count(
         "UPDATE conversations SET turn_count = turn_count + 1 WHERE id = %s",
         (conversation_id,),
     )
+
+
+def find_todays_cap_escalation(
+    conn: psycopg.Connection[Any],
+    *,
+    customer_phone: str,
+    reasons: tuple[str, ...],
+    now: datetime,
+) -> int | None:
+    """The id of the latest escalation opened for customer_phone on the
+    current Asia/Riyadh calendar day with one of `reasons`, or None.
+
+    The webhook reuses it instead of opening another one when a cap blocks
+    the same number again that day (owner decision 2026-09-30,
+    ARCHITECTURE.md §7): the customer still gets the fallback every time,
+    but staff get one escalation per number per day, not one per message.
+    Reads only escalations' id, reason, customer_phone and opened_at, the
+    columns migration 0031 grants hotel_agent.
+
+    Raises:
+        psycopg.Error: the read failed -- the webhook opens a new
+            escalation instead.
+    """
+    day = riyadh_calendar_day(now)
+    day_start_utc, day_end_utc = riyadh_day_bounds_utc(day)
+    row = conn.execute(
+        "SELECT id FROM escalations WHERE customer_phone = %s "
+        "AND reason = ANY(%s) AND opened_at >= %s AND opened_at < %s "
+        "ORDER BY opened_at DESC, id DESC LIMIT 1",
+        (customer_phone, list(reasons), day_start_utc, day_end_utc),
+    ).fetchone()
+    if row is None:
+        return None
+    return int(row[0])
 
 
 def check_message_rate_cap(

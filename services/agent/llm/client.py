@@ -24,13 +24,13 @@ import logging
 import random
 import time
 from dataclasses import dataclass
-from typing import Any, Literal, Protocol, get_args
+from typing import Any, Protocol
 
 import httpx
 from google import genai
 from google.genai import errors, types
 
-from services.agent.llm.config import LlmSettings
+from services.agent.llm.config import LlmSettings, ReasoningEffort
 from services.agent.llm.errors import (
     LlmConfigurationError,
     ModelUnavailableError,
@@ -627,11 +627,6 @@ _OPENROUTER_RETRYABLE_STATUS_CODES = (408, 429, 500, 502, 503, 504)
 # back unchanged (its "Reasoning Tokens" page) -- the OpenRouter analogue
 # of the Gemini thought_signature ModelTurn.provider_state exists for.
 _OPENROUTER_REASONING_FIELDS = ("reasoning", "reasoning_details")
-
-# OpenRouter's documented reasoning.effort values ("Reasoning Tokens" page,
-# read 2026-09-30); "none" disables reasoning entirely.
-ReasoningEffort = Literal["max", "xhigh", "high", "medium", "low", "minimal", "none"]
-REASONING_EFFORTS: tuple[ReasoningEffort, ...] = get_args(ReasoningEffort)
 
 
 class OpenRouterCallError(Exception):

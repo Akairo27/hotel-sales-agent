@@ -42,6 +42,7 @@ from services.agent.llm.errors import (
     LlmConfigurationError,
     LlmError,
     ModelUnavailableError,
+    NumberDailyTokenCapExceededError,
     TokenSpendCapExceededError,
     ToolLoopLimitError,
     TurnBudgetExceededError,
@@ -79,6 +80,7 @@ from tests.integration._seed import (
     seed_allotment_night,
     seed_allotment_nights,
     seed_conversation,
+    seed_escalation,
     seed_hotel,
     seed_message,
     seed_price_rule,
@@ -172,6 +174,7 @@ def _settings(
     max_spend_per_day_usd: Decimal = Decimal("1000"),
     max_messages_per_number_per_day: int = 1_000,
     max_conversation_turns: int = 20,
+    max_tokens_per_number_per_day: int = 10_000_000,
 ) -> LlmSettings:
     return LlmSettings(
         model="test-model-v1",
@@ -181,6 +184,7 @@ def _settings(
         max_tokens_per_conversation=max_tokens_per_conversation,
         max_spend_per_day_usd=max_spend_per_day_usd,
         max_messages_per_number_per_day=max_messages_per_number_per_day,
+        max_tokens_per_number_per_day=max_tokens_per_number_per_day,
     )
 
 
@@ -2979,6 +2983,7 @@ def _exception_family(base: type[Exception]) -> list[type[Exception]]:
 _ANTICIPATED_STOP_REASONS: dict[type[Exception], str] = {
     TurnCapExceededError: "turn_cap_exceeded",
     TokenSpendCapExceededError: "token_spend_cap_exceeded",
+    NumberDailyTokenCapExceededError: "number_daily_token_cap_exceeded",
     DailySpendCapExceededError: "daily_spend_cap_exceeded",
     ModelUnavailableError: "model_unavailable",
     TurnBudgetExceededError: "turn_budget_exceeded",
@@ -3024,7 +3029,7 @@ def test_no_exception_type_ends_a_turn_in_silence(
     the class trees, so a new subclass is covered without touching this
     test), a bug (RuntimeError) and a database error (psycopg.DataError) --
     gets exactly one fallback message and exactly one escalation with its
-    expected reason. Only the five anticipated stops may carry their
+    expected reason. Only the six anticipated stops may carry their
     message into escalations.notes; for every other type the message must
     not appear in the notes or in any log line."""
     sentinel = f"sentinel-detail-{exception_type.__name__}"
@@ -3596,6 +3601,243 @@ def test_receive_message_second_message_hits_the_cap_from_the_first_recording(
         "SELECT reason FROM escalations WHERE customer_phone = %s", (_PHONE,)
     ).fetchone()
     assert escalation_row == ("token_spend_cap_exceeded",)
+
+
+def _info_events(caplog: pytest.LogCaptureFixture) -> list[dict[str, Any]]:
+    """Every INFO record from services.agent.webhook, parsed."""
+    return [
+        json.loads(r.getMessage())
+        for r in caplog.records
+        if r.levelno == logging.INFO and r.name == "services.agent.webhook"
+    ]
+
+
+def _escalation_reasons(db_conn: psycopg.Connection[Any]) -> list[str]:
+    return [reason for reason, _notes in _escalations(db_conn)]
+
+
+def _post_text(client: TestClient, *, message_id: str, body: str) -> None:
+    payload = _whatsapp_payload(wa_id=_WA_ID, message_id=message_id, body=body)
+    response = _post(client, payload, signature=_sign(json.dumps(payload).encode()))
+    assert response.status_code == 200
+    assert response.json() == {"status": "accepted"}
+
+
+def test_receive_message_escalates_when_the_number_daily_token_cap_is_reached(
+    webhook_client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+    db_conn: psycopg.Connection[Any],
+) -> None:
+    """CLAUDE.md §9's per-number daily token cap, end to end: the first
+    message's 60 tokens are recorded by the webhook itself, and the second
+    message is stopped by the 50-token per-number cap before any model
+    call, with the fallback and a number_daily_token_cap_exceeded
+    escalation. The per-session cap stays far above, so the new cap is the
+    only one that could have stopped it."""
+    _set_llm_settings(monkeypatch, _settings(max_tokens_per_number_per_day=50))
+    transport = _FakeTransport(prompt_tokens=50, candidates_tokens=10)
+    _set_transport(monkeypatch, transport)
+    _set_whatsapp_sender(
+        monkeypatch, _FakeWhatsAppSender(message_id="wamid.OUTBOUND-FIRST")
+    )
+    _post_text(webhook_client, message_id="wamid.number-cap-first", body="hi")
+    second_sender = _FakeWhatsAppSender(message_id="wamid.OUTBOUND-SECOND")
+    _set_whatsapp_sender(monkeypatch, second_sender)
+
+    _post_text(webhook_client, message_id="wamid.number-cap-second", body="hello?")
+
+    assert len(transport.calls) == 1
+    assert second_sender.calls == [(_WA_ID, FALLBACK.english)]
+    assert _escalation_reasons(db_conn) == ["number_daily_token_cap_exceeded"]
+
+
+def test_a_number_capped_again_the_same_day_gets_the_fallback_but_no_new_escalation(
+    webhook_client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+    db_conn: psycopg.Connection[Any],
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Owner decision 2026-09-30 (ARCHITECTURE.md §7): one cap escalation
+    per number per Asia/Riyadh day. The first capped message opens it; a
+    later one the same day still gets the fallback (never silence), but no
+    second escalation. Run as hotel_agent too (webhook_client), this also
+    proves migration 0031's grant: a lookup the role could not run would
+    fail and open a second escalation."""
+    _set_llm_settings(monkeypatch, _settings(max_tokens_per_conversation=50))
+    transport = _FakeTransport(prompt_tokens=50, candidates_tokens=10)
+    _set_transport(monkeypatch, transport)
+    caplog.set_level(logging.INFO, logger="services.agent.webhook")
+    senders = [_FakeWhatsAppSender(message_id=f"wamid.OUTBOUND-{n}") for n in range(3)]
+    bodies = ["hi", "are you there?", "hello?"]
+
+    for index, (sender, body) in enumerate(zip(senders, bodies, strict=True)):
+        _set_whatsapp_sender(monkeypatch, sender)
+        _post_text(webhook_client, message_id=f"wamid.collapse-{index}", body=body)
+
+    assert len(transport.calls) == 1
+    assert senders[1].calls == [(_WA_ID, FALLBACK.english)]
+    assert senders[2].calls == [(_WA_ID, FALLBACK.english)]
+    assert _escalation_reasons(db_conn) == ["token_spend_cap_exceeded"]
+    escalation_row = db_conn.execute(
+        "SELECT id, conversation_id FROM escalations WHERE customer_phone = %s",
+        (_PHONE,),
+    ).fetchone()
+    assert escalation_row is not None
+    escalation_id, conversation_id = escalation_row
+    reused = [
+        event
+        for event in _info_events(caplog)
+        if event.get("event") == "cap_escalation_reused"
+    ]
+    assert reused == [
+        {
+            "event": "cap_escalation_reused",
+            "conversation_id": conversation_id,
+            "reason": "token_spend_cap_exceeded",
+            "escalation_id": escalation_id,
+        }
+    ]
+    assert all(
+        event["event"] != "cap_escalation_lookup_failed"
+        for event in _error_events(caplog)
+    )
+
+
+def test_a_different_cap_the_same_day_reuses_the_number_s_escalation(
+    webhook_client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+    db_conn: psycopg.Connection[Any],
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The collapse spans all four caps: a number already escalated today
+    for its token cap gets only the fallback when the turn cap stops it."""
+    _set_llm_settings(monkeypatch, _settings(max_conversation_turns=3))
+    transport = _FakeTransport()
+    _set_transport(monkeypatch, transport)
+    sender = _FakeWhatsAppSender()
+    _set_whatsapp_sender(monkeypatch, sender)
+    caplog.set_level(logging.INFO, logger="services.agent.webhook")
+    conversation_id = seed_conversation(db_conn, customer_phone=_PHONE, turn_count=3)
+    seed_escalation(
+        db_conn,
+        conversation_id,
+        reason="token_spend_cap_exceeded",
+        customer_phone=_PHONE,
+    )
+
+    _post_text(webhook_client, message_id="wamid.turn-cap-after-token-cap", body="hi")
+
+    assert transport.calls == []
+    assert sender.calls == [(_WA_ID, FALLBACK.english)]
+    assert _escalation_reasons(db_conn) == ["token_spend_cap_exceeded"]
+    assert _turn_status(caplog) == "escalated"
+
+
+def test_a_cap_escalation_from_an_earlier_day_or_for_another_reason_is_not_reused(
+    webhook_client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+    db_conn: psycopg.Connection[Any],
+) -> None:
+    """Only a cap escalation opened today counts: yesterday's belongs to
+    another day, and today's escalation for a non-cap reason (here a model
+    outage) is a different problem a human must still see this one next
+    to."""
+    _set_llm_settings(monkeypatch, _settings(max_conversation_turns=3))
+    _set_transport(monkeypatch, _FakeTransport())
+    sender = _FakeWhatsAppSender()
+    _set_whatsapp_sender(monkeypatch, sender)
+    conversation_id = seed_conversation(db_conn, customer_phone=_PHONE, turn_count=3)
+    seed_escalation(
+        db_conn,
+        conversation_id,
+        reason="turn_cap_exceeded",
+        customer_phone=_PHONE,
+        opened_at=datetime.now(UTC) - timedelta(days=2),
+    )
+    seed_escalation(
+        db_conn, conversation_id, reason="model_unavailable", customer_phone=_PHONE
+    )
+
+    _post_text(webhook_client, message_id="wamid.turn-cap-new-day", body="hi")
+
+    assert sender.calls == [(_WA_ID, FALLBACK.english)]
+    assert _escalation_reasons(db_conn) == [
+        "turn_cap_exceeded",
+        "model_unavailable",
+        "turn_cap_exceeded",
+    ]
+
+
+def test_a_failure_that_is_not_a_cap_is_escalated_even_after_a_cap_escalation(
+    webhook_client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+    db_conn: psycopg.Connection[Any],
+) -> None:
+    """The collapse is for the four caps only: a model outage on a number
+    already escalated today for a cap still opens its own escalation."""
+    _set_llm_settings(monkeypatch, _settings())
+    _set_transport(monkeypatch, _ScriptedTransport([ModelUnavailableError("HTTP 503")]))
+    sender = _FakeWhatsAppSender()
+    _set_whatsapp_sender(monkeypatch, sender)
+    conversation_id = seed_conversation(db_conn, customer_phone=_PHONE)
+    seed_escalation(
+        db_conn, conversation_id, reason="turn_cap_exceeded", customer_phone=_PHONE
+    )
+
+    _post_text(webhook_client, message_id="wamid.outage-after-cap", body="hi")
+
+    assert sender.calls == [(_WA_ID, FALLBACK.english)]
+    assert _escalation_reasons(db_conn) == ["turn_cap_exceeded", "model_unavailable"]
+
+
+def test_a_failed_cap_escalation_lookup_opens_a_new_escalation(
+    webhook_client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+    db_conn: psycopg.Connection[Any],
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """When the lookup itself fails, the safe side is a duplicate
+    escalation, never a missed one -- and the customer still gets the
+    fallback. The failure is logged by exception type only."""
+    _set_llm_settings(monkeypatch, _settings(max_conversation_turns=3))
+    _set_transport(monkeypatch, _FakeTransport())
+    sender = _FakeWhatsAppSender()
+    _set_whatsapp_sender(monkeypatch, sender)
+    caplog.set_level(logging.INFO, logger="services.agent.webhook")
+    conversation_id = seed_conversation(db_conn, customer_phone=_PHONE, turn_count=3)
+    seed_escalation(
+        db_conn, conversation_id, reason="turn_cap_exceeded", customer_phone=_PHONE
+    )
+
+    def _fail_lookup(
+        _conn: psycopg.Connection[Any],
+        *,
+        customer_phone: str,
+        reasons: tuple[str, ...],
+        now: datetime,
+    ) -> int | None:
+        del customer_phone, reasons, now
+        raise psycopg.OperationalError("the lookup failed")
+
+    monkeypatch.setattr(webhook_module, "find_todays_cap_escalation", _fail_lookup)
+
+    _post_text(webhook_client, message_id="wamid.lookup-fails", body="hi")
+
+    assert sender.calls == [(_WA_ID, FALLBACK.english)]
+    assert _escalation_reasons(db_conn) == ["turn_cap_exceeded", "turn_cap_exceeded"]
+    failures = [
+        event
+        for event in _error_events(caplog)
+        if event["event"] == "cap_escalation_lookup_failed"
+    ]
+    assert failures == [
+        {
+            "event": "cap_escalation_lookup_failed",
+            "conversation_id": conversation_id,
+            "reason": "turn_cap_exceeded",
+            "exception_type": "OperationalError",
+        }
+    ]
 
 
 def test_receive_message_with_invalid_json_body_is_rejected(

@@ -25,11 +25,10 @@ from google.genai import types
 
 from services.agent.llm.client import (
     OPENROUTER_CHAT_COMPLETIONS_URL,
-    REASONING_EFFORTS,
     OpenRouterTransport,
-    ReasoningEffort,
     _OpenRouterAssistantMessage,
 )
+from services.agent.llm.config import REASONING_EFFORTS, ReasoningEffort
 from services.agent.llm.dispatch import tool_error_result
 from services.agent.llm.errors import (
     LlmConfigurationError,

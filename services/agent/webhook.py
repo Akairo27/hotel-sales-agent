@@ -159,6 +159,7 @@ from services.agent.fixed_texts import (
 from services.agent.llm.caps import (
     MessageRateCapExceededError,
     check_message_rate_cap,
+    find_todays_cap_escalation,
     increment_turn_count,
     record_token_usage,
 )
@@ -172,6 +173,7 @@ from services.agent.llm.conversation import AgentReply, UsageTotals, generate_re
 from services.agent.llm.errors import (
     DailySpendCapExceededError,
     ModelUnavailableError,
+    NumberDailyTokenCapExceededError,
     TokenSpendCapExceededError,
     ToolLoopLimitError,
     TurnBudgetExceededError,
@@ -257,6 +259,7 @@ def get_model_transport(settings: LlmSettings) -> ModelTransport:
         api_key=settings.api_key,
         providers=route.providers,
         timeout_ms=settings.timeout_ms,
+        reasoning_effort=route.reasoning_effort,
     )
 
 
@@ -668,7 +671,7 @@ _STATUS_ESCALATED_UNDELIVERED = "escalated_undelivered"
 _STATUS_NOTIFIED_NO_ESCALATION = "notified_no_escalation"
 _STATUS_FAILED_UNRECORDED = "failed_unrecorded"
 
-# The five anticipated stops -- CLAUDE.md §9's three caps, a transport
+# The six anticipated stops -- CLAUDE.md §9's four caps, a transport
 # failure after client.py's own retries (ModelUnavailableError), and the
 # turn's time budget running out (TurnBudgetExceededError). Their messages
 # are vetted: they carry counts, USD spend estimates, or an HTTP status,
@@ -678,6 +681,7 @@ _STATUS_FAILED_UNRECORDED = "failed_unrecorded"
 _ANTICIPATED_STOPS: tuple[type[Exception], ...] = (
     TurnCapExceededError,
     TokenSpendCapExceededError,
+    NumberDailyTokenCapExceededError,
     DailySpendCapExceededError,
     ModelUnavailableError,
     TurnBudgetExceededError,
@@ -691,6 +695,7 @@ _ANTICIPATED_STOPS: tuple[type[Exception], ...] = (
 _ESCALATION_REASONS: dict[type[Exception], str] = {
     TurnCapExceededError: "turn_cap_exceeded",
     TokenSpendCapExceededError: "token_spend_cap_exceeded",
+    NumberDailyTokenCapExceededError: "number_daily_token_cap_exceeded",
     DailySpendCapExceededError: "daily_spend_cap_exceeded",
     ModelUnavailableError: "model_unavailable",
     TurnBudgetExceededError: "turn_budget_exceeded",
@@ -698,6 +703,19 @@ _ESCALATION_REASONS: dict[type[Exception], str] = {
     ToolLoopLimitError: "tool_loop_limit_exceeded",
     UnknownToolError: "unknown_tool",
 }
+# CLAUDE.md §9's four caps, whose escalations collapse to one per number
+# per Asia/Riyadh day (owner decision 2026-09-30, ARCHITECTURE.md §7): a
+# number blocked again that day by any of them gets the fallback only,
+# and staff work from the escalation already opened.
+_COLLAPSED_CAP_STOPS: tuple[type[Exception], ...] = (
+    TurnCapExceededError,
+    TokenSpendCapExceededError,
+    NumberDailyTokenCapExceededError,
+    DailySpendCapExceededError,
+)
+_COLLAPSED_CAP_REASONS: tuple[str, ...] = tuple(
+    _ESCALATION_REASONS[stop] for stop in _COLLAPSED_CAP_STOPS
+)
 # Every services.pricing exception compute_quote lets propagate -- a
 # price_rules misconfiguration, or the occupancy-1.0 band gap -- shares
 # one reason; the exception type in escalations.notes says which.
@@ -927,8 +945,9 @@ async def _escalate_and_notify(
     escalation no longer stops the fallback from being sent, and a failed
     send is reported as such (escalated_undelivered) instead of as
     "escalated". existing_escalation_id is for a caller whose escalation
-    already exists (the output guard opens its own for a blocked reply):
-    no second one is opened, only the fallback is sent.
+    already exists (the output guard opens its own for a blocked reply,
+    and a cap may already be escalated today for this number): no second
+    one is opened, only the fallback is sent.
 
     If either half failed because the turn's own connection died partway
     through (psycopg reports a broken connection as closed), the failed
@@ -1023,6 +1042,52 @@ async def _retry_funnel_on_a_fresh_connection(
     return escalation_id, delivered
 
 
+def _todays_cap_escalation_or_none(
+    conn: psycopg.Connection[Any],
+    *,
+    conversation_id: int,
+    customer_phone: str,
+    reason: str,
+    now: datetime,
+) -> int | None:
+    """The cap escalation already opened today for customer_phone
+    (caps.find_todays_cap_escalation), to reuse instead of opening another,
+    or None. A failed lookup is logged and returns None, so a new
+    escalation is opened: a duplicate is the safe side of that trade, a
+    missed escalation is not. Never raises."""
+    try:
+        escalation_id = find_todays_cap_escalation(
+            conn,
+            customer_phone=customer_phone,
+            reasons=_COLLAPSED_CAP_REASONS,
+            now=now,
+        )
+    except Exception as lookup_exc:
+        logger.error(
+            json.dumps(
+                {
+                    "event": "cap_escalation_lookup_failed",
+                    "conversation_id": conversation_id,
+                    "reason": reason,
+                    "exception_type": type(lookup_exc).__name__,
+                }
+            )
+        )
+        return None
+    if escalation_id is not None:
+        logger.info(
+            json.dumps(
+                {
+                    "event": "cap_escalation_reused",
+                    "conversation_id": conversation_id,
+                    "reason": reason,
+                    "escalation_id": escalation_id,
+                }
+            )
+        )
+    return escalation_id
+
+
 async def _handle_generate_reply_failure(
     conn: psycopg.Connection[Any],
     exc: Exception,
@@ -1041,7 +1106,10 @@ async def _handle_generate_reply_failure(
     model call happened, so this turn counts, regardless of how it
     ends). Then EVERY exception, of any type, goes through
     _escalate_and_notify with _escalation_reason's reason -- CLAUDE.md
-    rule 12: no exception type may end a turn in silence.
+    rule 12: no exception type may end a turn in silence. For the four
+    _COLLAPSED_CAP_STOPS, a cap escalation already opened today for this
+    number is reused, so the customer gets the fallback without a second
+    escalation (ARCHITECTURE.md §7).
 
     Anything other than an anticipated stop is also logged at ERROR:
     usage_unavailable (just the event) for UsageUnavailableError, and
@@ -1087,12 +1155,23 @@ async def _handle_generate_reply_failure(
             )
         )
 
+    reason = _escalation_reason(exc)
+    existing_escalation_id = None
+    if isinstance(exc, _COLLAPSED_CAP_STOPS):
+        existing_escalation_id = _todays_cap_escalation_or_none(
+            conn,
+            conversation_id=conversation_id,
+            customer_phone=customer_phone,
+            reason=reason,
+            now=now,
+        )
     return await _escalate_and_notify(
         conn,
         conversation_id=conversation_id,
         customer_phone=customer_phone,
-        reason=_escalation_reason(exc),
+        reason=reason,
         exc=exc,
+        existing_escalation_id=existing_escalation_id,
     )
 
 

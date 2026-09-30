@@ -171,6 +171,7 @@ _VALID_ENV = {
     "LLM_MAX_TOKENS_PER_CONVERSATION": "50000",
     "LLM_MAX_SPEND_PER_DAY_USD": "5.00",
     "MAX_MESSAGES_PER_NUMBER_PER_DAY": "50",
+    "LLM_MAX_TOKENS_PER_NUMBER_PER_DAY": "100000",
     "DATABASE_URL": "postgresql://placeholder.invalid/db",
 }
 
@@ -212,6 +213,7 @@ def test_validate_startup_configuration_accepts_a_complete_environment(
         ("LLM_MAX_TOKENS_PER_CONVERSATION", LlmConfigurationError),
         ("LLM_MAX_SPEND_PER_DAY_USD", LlmConfigurationError),
         ("MAX_MESSAGES_PER_NUMBER_PER_DAY", LlmConfigurationError),
+        ("LLM_MAX_TOKENS_PER_NUMBER_PER_DAY", LlmConfigurationError),
         ("DATABASE_URL", StartupConfigurationError),
     ],
 )

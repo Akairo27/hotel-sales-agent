@@ -195,6 +195,21 @@ class DailySpendCapExceededError(LlmError):
     """
 
 
+class NumberDailyTokenCapExceededError(LlmError):
+    """Raised when one customer number's token usage on the current
+    Asia/Riyadh calendar day -- committed usage from token_usage across
+    every session that day, plus usage_so_far from the current turn -- has
+    reached settings.max_tokens_per_number_per_day or more (CLAUDE.md §9:
+    "cap token spend ... per number per day"; owner decision 2026-09-30).
+
+    Unlike TokenSpendCapExceededError it does not reset after an idle gap:
+    a new session the same day still counts. Checked before every model
+    call and carries usage_so_far the same way -- see that class's
+    docstring. The message names the conversation, never the phone
+    number.
+    """
+
+
 class UsageUnavailableError(LlmError):
     """Raised when a model response carried no usable token-usage data —
     usage_metadata was absent, or one of its counts was None.

@@ -157,6 +157,11 @@ async def generate_reply(
             model call in the tool-calling loop below, not only the
             first — so this can follow one or more real model calls
             already made in this same turn.
+        NumberDailyTokenCapExceededError: this conversation's phone
+            number's logged token usage today (Asia/Riyadh calendar day,
+            every session), plus this turn's own usage so far, has reached
+            settings.max_tokens_per_number_per_day. Same mid-turn timing as
+            TokenSpendCapExceededError above.
         DailySpendCapExceededError: today's (Asia/Riyadh calendar day)
             estimated spend across every conversation, plus this turn's
             own usage so far, has reached settings.max_spend_per_day_usd.
@@ -229,6 +234,7 @@ async def generate_reply(
             check_token_spend_caps(
                 conn,
                 conversation_id=conversation_id,
+                customer_phone=state.customer_phone,
                 now=now,
                 settings=settings,
                 usage_so_far=usage,

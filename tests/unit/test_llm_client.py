@@ -55,6 +55,7 @@ _SETTINGS = LlmSettings(
     max_tokens_per_conversation=50_000,
     max_spend_per_day_usd=Decimal("5.00"),
     max_messages_per_number_per_day=50,
+    max_tokens_per_number_per_day=100_000,
 )
 
 # Far enough out that _attempt_timeout_seconds never trims a test's

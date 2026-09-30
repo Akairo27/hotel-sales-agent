@@ -27,11 +27,19 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import timedelta
 from decimal import Decimal, InvalidOperation
+from typing import Literal, get_args
 
 from services.agent.llm.errors import LlmConfigurationError
 from services.agent.llm.pricing import GEMINI_FLASH_RATES, TokenRates
 
 GEMINI_MODELS: frozenset[str] = frozenset({"gemini-3.7-flash"})
+
+
+# OpenRouter's documented reasoning.effort values ("Reasoning Tokens" page,
+# read 2026-09-30); "none" disables reasoning entirely -- GLM-5.3's
+# providers reject it with HTTP 400 (eval run 36674059327).
+ReasoningEffort = Literal["max", "xhigh", "high", "medium", "low", "minimal", "none"]
+REASONING_EFFORTS: tuple[ReasoningEffort, ...] = get_args(ReasoningEffort)
 
 
 @dataclass(frozen=True)
@@ -47,10 +55,16 @@ class OpenRouterRoute:
     token_rates must be the HIGHEST rates among the approved providers, so
     the daily spend cap (CLAUDE.md §9) errs toward tripping early, never
     late, whichever approved provider OpenRouter picks.
+
+    reasoning_effort, when set, is sent as OpenRouter's reasoning.effort on
+    every call; None sends no reasoning field (the model's own default).
+    Every approved provider must accept it: the routing sets
+    require_parameters, so a provider that does not is never picked.
     """
 
     providers: tuple[str, ...]
     token_rates: TokenRates
+    reasoning_effort: ReasoningEffort | None = None
 
 
 # The dated snapshot slug, not the bare "z-ai/glm-5.3" alias (CLAUDE.md §9);
@@ -65,6 +79,12 @@ OPENROUTER_ROUTES: Mapping[str, OpenRouterRoute] = {
             input_usd_per_million_tokens=Decimal("1.40"),
             output_usd_per_million_tokens=Decimal("4.40"),
         ),
+        # Owner decision 2026-09-30, from eval run 36674059327 (9 scenarios
+        # x 3 repeats per setting): the same tool-calling results as the
+        # default (15/15 right stay, every quote priced), median turn 2.5s
+        # instead of 7.6s, worst 4.7s instead of 59.4s, and about 80% fewer
+        # output tokens. Both providers accepted it; "none" was rejected.
+        reasoning_effort="low",
     ),
 }
 
@@ -143,6 +163,7 @@ class LlmSettings:
     max_tokens_per_conversation: int
     max_spend_per_day_usd: Decimal
     max_messages_per_number_per_day: int
+    max_tokens_per_number_per_day: int
     token_rates: TokenRates = GEMINI_FLASH_RATES
     openrouter_route: OpenRouterRoute | None = None
 
@@ -230,5 +251,8 @@ def load_llm_settings(env: Mapping[str, str] | None = None) -> LlmSettings:
         ),
         max_messages_per_number_per_day=_require_positive_int(
             active_env, "MAX_MESSAGES_PER_NUMBER_PER_DAY"
+        ),
+        max_tokens_per_number_per_day=_require_positive_int(
+            active_env, "LLM_MAX_TOKENS_PER_NUMBER_PER_DAY"
         ),
     )

@@ -441,3 +441,23 @@ def seed_message(
         "created_at) VALUES (%s, %s, %s, %s, COALESCE(%s, now())) RETURNING id",
         (conversation_id, customer_phone, direction, body, created_at),
     )
+
+
+def seed_escalation(
+    conn: psycopg.Connection[Any],
+    conversation_id: int,
+    *,
+    reason: str,
+    customer_phone: str = "+966500000001",
+    opened_at: datetime | None = None,
+) -> int:
+    """Inserts one escalations row with empty notes, as open_escalation
+    writes them at the least. opened_at defaults to now(), the column's own
+    default; pass one to place it on a given Riyadh day."""
+    return returning_id(
+        conn,
+        "INSERT INTO escalations (conversation_id, customer_phone, reason, "
+        "notes, opened_at) VALUES (%s, %s, %s, '{}', COALESCE(%s, now())) "
+        "RETURNING id",
+        (conversation_id, customer_phone, reason, opened_at),
+    )

@@ -21,6 +21,7 @@ _VALID_ENV = {
     "LLM_MAX_TOKENS_PER_CONVERSATION": "50000",
     "LLM_MAX_SPEND_PER_DAY_USD": "5.00",
     "MAX_MESSAGES_PER_NUMBER_PER_DAY": "50",
+    "LLM_MAX_TOKENS_PER_NUMBER_PER_DAY": "100000",
 }
 
 
@@ -42,6 +43,7 @@ def test_load_llm_settings_with_a_valid_env(monkeypatch: pytest.MonkeyPatch) -> 
         max_tokens_per_conversation=50_000,
         max_spend_per_day_usd=Decimal("5.00"),
         max_messages_per_number_per_day=50,
+        max_tokens_per_number_per_day=100_000,
     )
 
 
@@ -191,8 +193,9 @@ _GLM_MODEL = "z-ai/glm-5.3-20260816"
 
 def test_the_shipped_route_is_the_recorded_glm_decision() -> None:
     """Pins ARCHITECTURE.md §10's decision (Crusoe primary, InferenceNet
-    secondary, GLM-5.3 only, Crusoe's rates as the higher of the two): any
-    change to the reviewed route must show up here as a deliberate diff."""
+    secondary, GLM-5.3 only, Crusoe's rates as the higher of the two,
+    reasoning effort "low" from eval run 36674059327): any change to the
+    reviewed route must show up here as a deliberate diff."""
     assert set(OPENROUTER_ROUTES) == {_GLM_MODEL}
     assert _GLM_MODEL in ALLOWED_MODELS
     route = OPENROUTER_ROUTES[_GLM_MODEL]
@@ -201,6 +204,7 @@ def test_the_shipped_route_is_the_recorded_glm_decision() -> None:
         input_usd_per_million_tokens=Decimal("1.40"),
         output_usd_per_million_tokens=Decimal("4.40"),
     )
+    assert route.reasoning_effort == "low"
 
 
 def test_the_shipped_route_loads_with_the_openrouter_key_only() -> None:
