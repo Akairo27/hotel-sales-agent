@@ -100,6 +100,13 @@ MESSAGE_WINDOW = 10
 # keeps their context, short enough that "hello" the next day starts fresh.
 SESSION_IDLE_GAP = timedelta(hours=6)
 
+# How long a quoted price stays valid (owner decision 2026-09-30): the
+# output guard accepts a stated amount only from a quote this recent
+# (services/agent/output_guard/quotes.py), and the current-stay line tells
+# the model until when it may repeat the price. QUOTE_VALIDITY_MINUTES in
+# the environment overrides it.
+DEFAULT_QUOTE_VALIDITY_MINUTES = 30
+
 # token_usage rows are stamped with the application clock at the start of a
 # request (webhook.receive_message's `now`), while messages -- and so a
 # session's start -- are stamped by the database when inserted. A session's
@@ -166,6 +173,7 @@ class LlmSettings:
     max_tokens_per_number_per_day: int
     token_rates: TokenRates = GEMINI_FLASH_RATES
     openrouter_route: OpenRouterRoute | None = None
+    quote_validity: timedelta = timedelta(minutes=DEFAULT_QUOTE_VALIDITY_MINUTES)
 
 
 def _require(env: Mapping[str, str], key: str) -> str:
@@ -184,6 +192,13 @@ def _require_positive_int(env: Mapping[str, str], key: str) -> int:
     if value <= 0:
         raise LlmConfigurationError(f"{key}={value} must be positive")
     return value
+
+
+def _optional_positive_int(env: Mapping[str, str], key: str, default: int) -> int:
+    """key's positive integer value, or default when it is not set."""
+    if not env.get(key, ""):
+        return default
+    return _require_positive_int(env, key)
 
 
 def _require_positive_decimal(env: Mapping[str, str], key: str) -> Decimal:
@@ -254,5 +269,10 @@ def load_llm_settings(env: Mapping[str, str] | None = None) -> LlmSettings:
         ),
         max_tokens_per_number_per_day=_require_positive_int(
             active_env, "LLM_MAX_TOKENS_PER_NUMBER_PER_DAY"
+        ),
+        quote_validity=timedelta(
+            minutes=_optional_positive_int(
+                active_env, "QUOTE_VALIDITY_MINUTES", DEFAULT_QUOTE_VALIDITY_MINUTES
+            )
         ),
     )

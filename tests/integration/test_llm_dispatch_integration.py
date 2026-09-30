@@ -18,6 +18,7 @@ import psycopg
 import pytest
 
 from services.agent.llm import dispatch as dispatch_module
+from services.agent.llm.config import DEFAULT_QUOTE_VALIDITY_MINUTES
 from services.agent.llm.dispatch import (
     QUOTE_RESULT_KEYS,
     dispatch_check_availability,
@@ -47,6 +48,8 @@ from tests.integration._seed import (
 )
 
 pytestmark = pytest.mark.usefixtures("db_conn")
+
+_QUOTE_VALIDITY = timedelta(minutes=DEFAULT_QUOTE_VALIDITY_MINUTES)
 
 _NOW = datetime(2026, 9, 1, tzinfo=UTC)
 
@@ -376,6 +379,7 @@ def test_dispatch_tool_logs_get_quote_result_with_no_cost_fields(
         customer_phone="+966500000001",
         conversation_id=conversation_id,
         resolved_stays={(hotel_id, room_type_id)},
+        quote_validity=_QUOTE_VALIDITY,
     )
 
     records = [json.loads(r.getMessage()) for r in caplog.records]
@@ -419,6 +423,7 @@ def test_dispatch_tool_logs_check_availability_result(
         customer_phone=None,
         conversation_id=None,
         resolved_stays={(hotel_id, room_type_id)},
+        quote_validity=_QUOTE_VALIDITY,
     )
 
     records = [json.loads(r.getMessage()) for r in caplog.records]
@@ -762,6 +767,7 @@ def test_dispatch_tool_logs_the_reason_for_an_unpriced_get_quote(
         customer_phone=None,
         conversation_id=None,
         resolved_stays={(hotel_id, room_type_id)},
+        quote_validity=_QUOTE_VALIDITY,
     )
 
     records = [json.loads(r.getMessage()) for r in caplog.records]

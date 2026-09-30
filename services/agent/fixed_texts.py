@@ -2,7 +2,9 @@
 "please type" reply — and the choice of language they go out in (owner
 decisions, 2026-09-30; ARCHITECTURE.md §7).
 
-Each text exists in Arabic (Saudi dialect), English and Indonesian. It is
+Each text exists in Arabic (simple "white" Arabic understood across the
+Arab world, with a light Gulf touch -- owner decision 2026-09-30, the same
+register as prompt.py's arabic_register), English and Indonesian. It is
 sent in the customer's language alone when that is known from their
 latest written message, and as Arabic then English when it is not (no
 written message yet, or the lookup failed). Every rendering is still
@@ -57,7 +59,9 @@ class FixedText:
 # failed), and "a colleague will follow up" matches prompt.py's
 # no_booking_actions rule.
 FALLBACK = FixedText(
-    arabic="لحظة لو سمحت، بتأكد من هالموضوع مع زميلي وبيتواصل معك قريب إن شاء الله.",
+    arabic=(
+        "لحظة لو سمحت، خلّيني أتأكد من طلبك مع زميلي، ويتواصل معك قريباً إن شاء الله."
+    ),
     english=(
         "One moment — I need to double-check this with a colleague, and "
         "they'll follow up with you shortly."
@@ -71,8 +75,8 @@ FALLBACK = FixedText(
 # The reply to a voice note or an image: the agent reads text only.
 PLEASE_TYPE = FixedText(
     arabic=(
-        "المعذرة، ما أقدر أسمع الرسائل الصوتية ولا أشوف الصور للحين. اكتب لي "
-        "طلبك وأخدمك على طول."
+        "المعذرة، ما أقدر أسمع الرسائل الصوتية ولا أشوف الصور حالياً. اكتب لي "
+        "طلبك وأخدمك مباشرة."
     ),
     english=(
         "Sorry, I can't read voice notes or images yet. Please type your "

@@ -13,6 +13,7 @@ import psycopg
 import pytest
 
 from lib.hijri import to_hijri
+from services.agent.llm.config import DEFAULT_QUOTE_VALIDITY_MINUTES
 from services.agent.llm.context import (
     CurrentStay,
     build_contents,
@@ -30,6 +31,8 @@ from tests.integration._seed import (
 )
 
 pytestmark = pytest.mark.usefixtures("db_conn")
+
+_QUOTE_VALIDITY = timedelta(minutes=DEFAULT_QUOTE_VALIDITY_MINUTES)
 
 _TODAY = date(2026, 9, 23)
 _PHONE = "+966500000001"
@@ -97,7 +100,9 @@ def test_customer_phone_never_appears_in_any_built_content_or_the_system_instruc
             customer_name="Ahmed",
             today=_TODAY,
             today_hijri=to_hijri(_TODAY),
-            current_stay=load_current_stay(db_conn, conversation_id),
+            current_stay=load_current_stay(
+                db_conn, conversation_id, quote_validity=_QUOTE_VALIDITY
+            ),
         )
     ]
     for turn in turns:
@@ -117,7 +122,10 @@ def test_load_current_stay_is_none_before_any_quote(
     conversation_id = seed_conversation(db_conn, customer_phone=_PHONE)
     seed_message(db_conn, conversation_id, direction="inbound", body="hello")
 
-    assert load_current_stay(db_conn, conversation_id) is None
+    assert (
+        load_current_stay(db_conn, conversation_id, quote_validity=_QUOTE_VALIDITY)
+        is None
+    )
 
 
 def test_load_current_stay_is_the_sessions_latest_quote(
@@ -156,13 +164,49 @@ def test_load_current_stay_is_the_sessions_latest_quote(
         rooms=2,
     )
 
-    assert load_current_stay(db_conn, conversation_id) == CurrentStay(
+    assert load_current_stay(
+        db_conn, conversation_id, quote_validity=_QUOTE_VALIDITY
+    ) == CurrentStay(
         hotel_name="Test Hotel",
         room_type_name="Standard",
         check_in=date(2026, 10, 21),
         check_out=date(2026, 10, 24),
         rooms=2,
+        total_price_display="200.00 SAR",
+        total_price_display_ar="200.00 ريال",
+        valid_until=now - timedelta(minutes=1) + _QUOTE_VALIDITY,
+        is_valid=True,
     )
+
+
+def test_load_current_stay_marks_a_quote_past_its_validity_as_expired(
+    db_conn: psycopg.Connection[Any],
+) -> None:
+    """The stay stays in view after the window, but its price does not:
+    the prompt then tells the model to call get_quote again."""
+    hotel_id, room_type_id = seed_hotel_and_room_type(db_conn)
+    conversation_id = seed_conversation(db_conn, customer_phone=_PHONE)
+    now = datetime.now(UTC)
+    seed_message(
+        db_conn,
+        conversation_id,
+        direction="inbound",
+        body="a room please",
+        created_at=now - timedelta(minutes=50),
+    )
+    seed_quote(
+        db_conn,
+        hotel_id,
+        room_type_id,
+        conversation_id=conversation_id,
+        created_at=now - timedelta(minutes=45),
+    )
+
+    stay = load_current_stay(db_conn, conversation_id, quote_validity=_QUOTE_VALIDITY)
+
+    assert stay is not None
+    assert stay.is_valid is False
+    assert stay.valid_until == now - timedelta(minutes=45) + _QUOTE_VALIDITY
 
 
 def test_load_current_stay_ignores_a_quote_from_an_earlier_session(
@@ -187,7 +231,10 @@ def test_load_current_stay_ignores_a_quote_from_an_earlier_session(
         db_conn, conversation_id, direction="inbound", body="now", created_at=now
     )
 
-    assert load_current_stay(db_conn, conversation_id) is None
+    assert (
+        load_current_stay(db_conn, conversation_id, quote_validity=_QUOTE_VALIDITY)
+        is None
+    )
 
 
 def test_load_current_stay_is_none_for_a_conversation_without_messages(
@@ -197,4 +244,7 @@ def test_load_current_stay_is_none_for_a_conversation_without_messages(
     conversation_id = seed_conversation(db_conn, customer_phone=_PHONE)
     seed_quote(db_conn, hotel_id, room_type_id, conversation_id=conversation_id)
 
-    assert load_current_stay(db_conn, conversation_id) is None
+    assert (
+        load_current_stay(db_conn, conversation_id, quote_validity=_QUOTE_VALIDITY)
+        is None
+    )

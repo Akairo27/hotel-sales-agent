@@ -117,18 +117,22 @@ def test_request_booking_follow_up_name_matches_dispatch_routing() -> None:
     assert REQUEST_BOOKING_FOLLOW_UP.name == REQUEST_BOOKING_FOLLOW_UP_TOOL
 
 
-def test_request_booking_follow_up_takes_only_a_quote_id() -> None:
+def test_request_booking_follow_up_takes_no_arguments() -> None:
+    """The model never names a quote (owner decision 2026-09-30): the
+    database picks the latest valid one the customer answered."""
     parameters = REQUEST_BOOKING_FOLLOW_UP.parameters
-    assert set(parameters["properties"]) == {"quote_id"}
-    assert parameters["required"] == ["quote_id"]
+    assert parameters["properties"] == {}
+    assert parameters["required"] == []
 
 
-def test_request_booking_follow_up_description_demands_an_explicit_yes() -> None:
-    """The owner's condition (2026-09-30): only after an explicit yes. The
-    database check in booking_follow_up.py backs this up; the model reads
-    it here first."""
+def test_request_booking_follow_up_description_demands_a_clear_yes() -> None:
+    """Only after the customer clearly says yes, in any wording; the
+    database check in booking_follow_up.py backs this up."""
     description = REQUEST_BOOKING_FOLLOW_UP.description
-    assert "only after the customer has explicitly said yes" in description
+    assert "only when the customer has clearly said yes" in description
+    assert "in any wording or dialect" in description
+    assert "It takes no arguments" in description
+    assert "restate exactly those" in description
     assert "books, holds and charges nothing" in description
 
 

@@ -18,6 +18,7 @@ import pytest
 
 from lib.money import format_halalas_as_arabic_riyal, format_halalas_as_sar
 from services.agent.fixed_texts import FALLBACK, PLEASE_TYPE
+from services.agent.llm.config import DEFAULT_QUOTE_VALIDITY_MINUTES
 from services.agent.llm.dispatch import dispatch_get_quote
 from services.agent.llm.errors import ConversationNotFoundError
 from services.agent.output_guard.enforcement import (
@@ -43,6 +44,13 @@ from tests.integration._seed import (
 )
 
 pytestmark = pytest.mark.usefixtures("db_conn")
+
+_QUOTE_VALIDITY = timedelta(minutes=DEFAULT_QUOTE_VALIDITY_MINUTES)
+# For tests about session scoping whose data sits at fixed past dates: a
+# window long enough that validity never decides the outcome.
+_LONGER_THAN_ANY_TEST_DATA = timedelta(days=3650)
+# webhook.py's window for its fixed texts: no quote counts at all.
+_FIXED_TEXT_QUOTE_VALIDITY = timedelta(0)
 
 _NOW = datetime(2026, 9, 1, tzinfo=UTC)
 
@@ -135,7 +143,9 @@ def test_load_allowed_amounts_returns_every_quote_in_the_conversation(
         min_allowed_total=200_000,
     )
 
-    result = load_allowed_amounts(db_conn, conversation_id)
+    result = load_allowed_amounts(
+        db_conn, conversation_id, quote_validity=_QUOTE_VALIDITY
+    )
 
     assert len(result.quote_ids) == 2
     assert {135_000, 300_000, 20_000}.issubset(result.amounts_halalas)
@@ -157,7 +167,9 @@ def test_load_allowed_amounts_ignores_quotes_from_another_conversation(
         min_allowed_total=999_999,
     )
 
-    result = load_allowed_amounts(db_conn, this_conversation)
+    result = load_allowed_amounts(
+        db_conn, this_conversation, quote_validity=_QUOTE_VALIDITY
+    )
 
     assert result.quote_ids == ()
     assert result.amounts_halalas == frozenset()
@@ -171,7 +183,9 @@ def test_load_allowed_amounts_ignores_quotes_with_a_null_conversation_id(
     conversation_id = seed_conversation(db_conn)
     seed_quote(db_conn, hotel_id, room_type_id, conversation_id=None)
 
-    result = load_allowed_amounts(db_conn, conversation_id)
+    result = load_allowed_amounts(
+        db_conn, conversation_id, quote_validity=_QUOTE_VALIDITY
+    )
 
     assert result.amounts_halalas == frozenset()
 
@@ -191,7 +205,9 @@ def test_load_allowed_amounts_never_surfaces_a_cost_bearing_field(
         nights=_NIGHTS_WITH_COST_FIELDS,
     )
 
-    result = load_allowed_amounts(db_conn, conversation_id)
+    result = load_allowed_amounts(
+        db_conn, conversation_id, quote_validity=_QUOTE_VALIDITY
+    )
 
     assert {f.name for f in fields(result)} == {
         "quote_ids",
@@ -218,7 +234,10 @@ def test_a_reply_quoting_the_real_total_passes_and_opens_no_escalation(
     )
 
     verdict = enforce_outbound_text(
-        db_conn, conversation_id=conversation_id, text="Your total is 1,350.00 SAR"
+        db_conn,
+        conversation_id=conversation_id,
+        text="Your total is 1,350.00 SAR",
+        quote_validity=_QUOTE_VALIDITY,
     )
 
     assert verdict.allowed is True
@@ -251,7 +270,10 @@ def test_a_reply_with_the_real_total_in_markdown_bold_passes_once_converted(
     assert formatted_text == "Your total is *1,350.00 SAR*"
 
     verdict = enforce_outbound_text(
-        db_conn, conversation_id=conversation_id, text=formatted_text
+        db_conn,
+        conversation_id=conversation_id,
+        text=formatted_text,
+        quote_validity=_QUOTE_VALIDITY,
     )
 
     assert verdict.allowed is True
@@ -273,7 +295,10 @@ def test_a_blocked_reply_opens_exactly_one_escalation_row(
     )
 
     verdict = enforce_outbound_text(
-        db_conn, conversation_id=conversation_id, text="I can do 100.00 SAR for you"
+        db_conn,
+        conversation_id=conversation_id,
+        text="I can do 100.00 SAR for you",
+        quote_validity=_QUOTE_VALIDITY,
     )
 
     assert verdict.allowed is False
@@ -300,7 +325,10 @@ def test_the_escalation_notes_carry_the_offending_amount_and_quote_ids(
     )
 
     verdict = enforce_outbound_text(
-        db_conn, conversation_id=conversation_id, text="I can do 50.00 SAR for you"
+        db_conn,
+        conversation_id=conversation_id,
+        text="I can do 50.00 SAR for you",
+        quote_validity=_QUOTE_VALIDITY,
     )
 
     row = db_conn.execute(
@@ -330,7 +358,10 @@ def test_the_escalation_notes_never_contain_the_customer_phone_number(
     )
 
     verdict = enforce_outbound_text(
-        db_conn, conversation_id=conversation_id, text="I can do 100.00 SAR for you"
+        db_conn,
+        conversation_id=conversation_id,
+        text="I can do 100.00 SAR for you",
+        quote_validity=_QUOTE_VALIDITY,
     )
 
     row = db_conn.execute(
@@ -355,7 +386,10 @@ def test_an_unparseable_blocked_reply_gets_the_unparseable_reason(
     )
 
     verdict = enforce_outbound_text(
-        db_conn, conversation_id=conversation_id, text="It comes to 1,2,3.4.5 SAR"
+        db_conn,
+        conversation_id=conversation_id,
+        text="It comes to 1,2,3.4.5 SAR",
+        quote_validity=_QUOTE_VALIDITY,
     )
 
     reason = db_conn.execute(
@@ -382,7 +416,10 @@ def test_a_foreign_labelled_real_total_is_blocked_with_the_foreign_reason(
     )
 
     verdict = enforce_outbound_text(
-        db_conn, conversation_id=conversation_id, text="Your total is 1,350.00 USD"
+        db_conn,
+        conversation_id=conversation_id,
+        text="Your total is 1,350.00 USD",
+        quote_validity=_QUOTE_VALIDITY,
     )
 
     assert verdict.allowed is False
@@ -410,7 +447,10 @@ def test_a_real_total_with_no_currency_marker_is_blocked_with_the_missing_reason
     )
 
     verdict = enforce_outbound_text(
-        db_conn, conversation_id=conversation_id, text="Your total is 1,350.00"
+        db_conn,
+        conversation_id=conversation_id,
+        text="Your total is 1,350.00",
+        quote_validity=_QUOTE_VALIDITY,
     )
 
     assert verdict.allowed is False
@@ -440,6 +480,7 @@ def test_a_reply_with_both_a_mismatch_and_an_unparseable_amount_is_reason_mismat
         db_conn,
         conversation_id=conversation_id,
         text="It's either 100.00 SAR or 1,2,3.4.5 SAR",
+        quote_validity=_QUOTE_VALIDITY,
     )
 
     reason = db_conn.execute(
@@ -463,7 +504,10 @@ def test_a_block_verdict_always_carries_the_escalation_id_it_opened(
     )
 
     verdict = enforce_outbound_text(
-        db_conn, conversation_id=conversation_id, text="900.00 SAR only"
+        db_conn,
+        conversation_id=conversation_id,
+        text="900.00 SAR only",
+        quote_validity=_QUOTE_VALIDITY,
     )
 
     assert verdict.allowed is False
@@ -489,10 +533,16 @@ def test_two_blocked_replies_open_two_escalations(
     )
 
     first = enforce_outbound_text(
-        db_conn, conversation_id=conversation_id, text="900.00 SAR"
+        db_conn,
+        conversation_id=conversation_id,
+        text="900.00 SAR",
+        quote_validity=_QUOTE_VALIDITY,
     )
     second = enforce_outbound_text(
-        db_conn, conversation_id=conversation_id, text="800.00 SAR"
+        db_conn,
+        conversation_id=conversation_id,
+        text="800.00 SAR",
+        quote_validity=_QUOTE_VALIDITY,
     )
 
     assert first.escalation_id != second.escalation_id
@@ -507,7 +557,12 @@ def test_enforce_raises_for_an_unknown_conversation_id(
     db_conn: psycopg.Connection[Any],
 ) -> None:
     with pytest.raises(ConversationNotFoundError, match="999999"):
-        enforce_outbound_text(db_conn, conversation_id=999_999, text="100.00 SAR")
+        enforce_outbound_text(
+            db_conn,
+            conversation_id=999_999,
+            text="100.00 SAR",
+            quote_validity=_QUOTE_VALIDITY,
+        )
 
 
 def test_a_reply_with_no_amounts_is_allowed_when_the_conversation_has_no_quotes(
@@ -516,7 +571,10 @@ def test_a_reply_with_no_amounts_is_allowed_when_the_conversation_has_no_quotes(
     conversation_id = seed_conversation(db_conn)
 
     verdict = enforce_outbound_text(
-        db_conn, conversation_id=conversation_id, text="Let me check for you."
+        db_conn,
+        conversation_id=conversation_id,
+        text="Let me check for you.",
+        quote_validity=_QUOTE_VALIDITY,
     )
 
     assert verdict.allowed is True
@@ -556,6 +614,7 @@ def test_a_reply_quoting_a_real_compute_quote_result_is_allowed(
         db_conn,
         conversation_id=conversation_id,
         text=f"Your total for the stay is {real_total_display}.",
+        quote_validity=_QUOTE_VALIDITY,
     )
     assert allowed_verdict.allowed is True
 
@@ -567,6 +626,7 @@ def test_a_reply_quoting_a_real_compute_quote_result_is_allowed(
         db_conn,
         conversation_id=conversation_id,
         text=f"Your total for the stay is {wrong_display}.",
+        quote_validity=_QUOTE_VALIDITY,
     )
     assert blocked_verdict.allowed is False
 
@@ -586,7 +646,10 @@ def test_a_stated_margin_percentage_gets_the_percentage_reason(
     )
 
     verdict = enforce_outbound_text(
-        db_conn, conversation_id=conversation_id, text="Our margin is 20%"
+        db_conn,
+        conversation_id=conversation_id,
+        text="Our margin is 20%",
+        quote_validity=_QUOTE_VALIDITY,
     )
 
     assert verdict.allowed is False
@@ -627,6 +690,7 @@ def test_an_arabic_reply_quoting_the_arabic_riyal_display_is_allowed(
         db_conn,
         conversation_id=conversation_id,
         text=f"السعر الإجمالي للإقامة {arabic_total}.",
+        quote_validity=_QUOTE_VALIDITY,
     )
     assert allowed_verdict.allowed is True
 
@@ -638,6 +702,7 @@ def test_an_arabic_reply_quoting_the_arabic_riyal_display_is_allowed(
         db_conn,
         conversation_id=conversation_id,
         text=f"السعر الإجمالي للإقامة {wrong_display}.",
+        quote_validity=_QUOTE_VALIDITY,
     )
     assert blocked_verdict.allowed is False
 
@@ -649,9 +714,12 @@ _FIXED_TEXT_RENDERINGS = [
 ]
 
 
+@pytest.mark.parametrize(
+    "validity", [_QUOTE_VALIDITY, _FIXED_TEXT_QUOTE_VALIDITY], ids=["30min", "zero"]
+)
 @pytest.mark.parametrize("rendering", _FIXED_TEXT_RENDERINGS)
 def test_every_fixed_text_rendering_is_always_allowed(
-    db_conn: psycopg.Connection[Any], rendering: str
+    db_conn: psycopg.Connection[Any], rendering: str, validity: timedelta
 ) -> None:
     """The fixed customer texts (webhook.py's job to send, not this
     module's) must be provably safe to send through this exact function,
@@ -663,7 +731,10 @@ def test_every_fixed_text_rendering_is_always_allowed(
     """
     no_quotes_conversation = seed_conversation(db_conn, customer_phone="+966544444441")
     no_quotes_verdict = enforce_outbound_text(
-        db_conn, conversation_id=no_quotes_conversation, text=rendering
+        db_conn,
+        conversation_id=no_quotes_conversation,
+        text=rendering,
+        quote_validity=validity,
     )
     assert no_quotes_verdict.allowed is True
     assert no_quotes_verdict.escalation_id is None
@@ -679,7 +750,10 @@ def test_every_fixed_text_rendering_is_always_allowed(
         min_allowed_total=90_000,
     )
     with_quote_verdict = enforce_outbound_text(
-        db_conn, conversation_id=with_quote_conversation, text=rendering
+        db_conn,
+        conversation_id=with_quote_conversation,
+        text=rendering,
+        quote_validity=validity,
     )
     assert with_quote_verdict.allowed is True
     assert with_quote_verdict.escalation_id is None
@@ -784,7 +858,10 @@ def test_every_approved_quote_reply_passes_the_guard(
     )
 
     verdict = enforce_outbound_text(
-        db_conn, conversation_id=conversation_id, text=reply
+        db_conn,
+        conversation_id=conversation_id,
+        text=reply,
+        quote_validity=_QUOTE_VALIDITY,
     )
 
     assert verdict.allowed is True, verdict.findings
@@ -836,7 +913,9 @@ def test_load_allowed_amounts_ignores_quotes_from_an_earlier_session(
 ) -> None:
     conversation_id, todays_quote = _seed_two_sessions(db_conn)
 
-    result = load_allowed_amounts(db_conn, conversation_id)
+    result = load_allowed_amounts(
+        db_conn, conversation_id, quote_validity=_LONGER_THAN_ANY_TEST_DATA
+    )
 
     assert result.quote_ids == (todays_quote,)
     assert 135_000 in result.amounts_halalas
@@ -854,12 +933,91 @@ def test_a_reply_stating_yesterdays_price_is_blocked_but_todays_is_allowed(
         db_conn,
         conversation_id=conversation_id,
         text=f"The total is {format_halalas_as_sar(777_000)}.",
+        quote_validity=_LONGER_THAN_ANY_TEST_DATA,
     )
     current = enforce_outbound_text(
         db_conn,
         conversation_id=conversation_id,
         text=f"The total is {format_halalas_as_sar(135_000)}.",
+        quote_validity=_LONGER_THAN_ANY_TEST_DATA,
     )
 
     assert stale.allowed is False
     assert current.allowed is True
+
+
+def _conversation_quoted_minutes_ago(
+    db_conn: psycopg.Connection[Any], minutes: int
+) -> int:
+    """A conversation in one session, quoted 135,000 halalas `minutes` ago."""
+    hotel_id, room_type_id = seed_hotel_and_room_type(db_conn)
+    conversation_id = seed_conversation(db_conn)
+    now = datetime.now(UTC)
+    seed_message(
+        db_conn,
+        conversation_id,
+        direction="inbound",
+        body="a room please",
+        created_at=now - timedelta(minutes=minutes + 1),
+    )
+    seed_quote(
+        db_conn,
+        hotel_id,
+        room_type_id,
+        conversation_id=conversation_id,
+        ask_price_total=135_000,
+        min_allowed_total=90_000,
+        created_at=now - timedelta(minutes=minutes),
+    )
+    return conversation_id
+
+
+def test_a_price_from_an_expired_quote_is_blocked(
+    db_conn: psycopg.Connection[Any],
+) -> None:
+    """Owner decision 2026-09-30: a live test showed a price restated from
+    hours earlier in the same session. Past the validity window it is
+    blocked like any unmatched amount; the fallback and escalation follow."""
+    conversation_id = _conversation_quoted_minutes_ago(db_conn, 45)
+
+    verdict = enforce_outbound_text(
+        db_conn,
+        conversation_id=conversation_id,
+        text=f"The total is {format_halalas_as_sar(135_000)}.",
+        quote_validity=_QUOTE_VALIDITY,
+    )
+
+    assert verdict.allowed is False
+    assert verdict.quote_ids == ()
+    assert verdict.escalation_id is not None
+
+
+def test_a_price_from_a_quote_within_the_window_is_allowed(
+    db_conn: psycopg.Connection[Any],
+) -> None:
+    """A clarifying question inside the window ("does that include
+    breakfast?") may restate the price."""
+    conversation_id = _conversation_quoted_minutes_ago(db_conn, 10)
+
+    verdict = enforce_outbound_text(
+        db_conn,
+        conversation_id=conversation_id,
+        text=f"The total is {format_halalas_as_sar(135_000)}.",
+        quote_validity=_QUOTE_VALIDITY,
+    )
+
+    assert verdict.allowed is True
+
+
+def test_the_window_passed_in_is_the_one_applied(
+    db_conn: psycopg.Connection[Any],
+) -> None:
+    """QUOTE_VALIDITY_MINUTES is a setting: the same 45-minute-old quote is
+    allowed under a one-hour window."""
+    conversation_id = _conversation_quoted_minutes_ago(db_conn, 45)
+
+    allowed = load_allowed_amounts(
+        db_conn, conversation_id, quote_validity=timedelta(hours=1)
+    )
+
+    assert 135_000 in allowed.amounts_halalas

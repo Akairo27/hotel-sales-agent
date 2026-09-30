@@ -116,6 +116,19 @@ def riyadh_calendar_day(now: datetime) -> date:
     return now.astimezone(_RIYADH).date()
 
 
+def riyadh_clock_time(moment: datetime) -> str:
+    """The Asia/Riyadh wall-clock time of a timezone-aware timestamp, as
+    HH:MM -- how the model is told until when a quoted price is valid
+    (services/agent/llm/prompt.py's current-stay line).
+
+    Raises:
+        ValueError: moment is naive.
+    """
+    if moment.tzinfo is None:
+        raise ValueError("riyadh_clock_time requires a timezone-aware datetime")
+    return moment.astimezone(_RIYADH).strftime("%H:%M")
+
+
 def riyadh_day_bounds_utc(day: date) -> tuple[datetime, datetime]:
     """The [start, end) UTC instants spanning one Asia/Riyadh calendar day.
 

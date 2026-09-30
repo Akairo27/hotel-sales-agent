@@ -176,25 +176,18 @@ GET_QUOTE = ToolDeclaration(
 REQUEST_BOOKING_FOLLOW_UP = ToolDeclaration(
     name="request_booking_follow_up",
     description=(
-        "Passes a quoted stay to a colleague, who contacts the customer to "
-        "confirm the booking. Call it only after the customer has explicitly "
-        "said yes to that, with the quote_id of the get_quote result they "
-        "agreed to. It books, holds and charges nothing itself; calling it "
-        "again for the same quote does not open a second request. Then tell "
-        "the customer a colleague will contact them to confirm the booking."
+        "Passes the price the customer just agreed to on to a colleague, who "
+        "contacts them to confirm the booking. Call it only when the "
+        "customer has clearly said yes to your offer to pass it on, in any "
+        "wording or dialect. It takes no arguments: it always uses the "
+        "latest still-valid price the customer has answered. It books, "
+        "holds and charges nothing itself; calling it again for the same "
+        "price does not open a second request. The result names the hotel, "
+        "room type, dates, rooms and total that were passed on: restate "
+        "exactly those, and say a colleague will contact the customer to "
+        "confirm the booking."
     ),
-    parameters={
-        "type": "object",
-        "properties": {
-            "quote_id": {
-                "type": "integer",
-                "description": (
-                    "The quote_id of the get_quote result the customer said yes to."
-                ),
-            },
-        },
-        "required": ["quote_id"],
-    },
+    parameters={"type": "object", "properties": {}, "required": []},
 )
 
 AGENT_TOOLS: tuple[ToolDeclaration, ...] = (
@@ -230,9 +223,8 @@ TOOL_ERROR_MESSAGES: Mapping[ToolErrorCode, str] = {
         "do not know instead of guessing."
     ),
     "quote_not_confirmable": (
-        "Not done: this quote_id is not a price from this conversation that "
-        "the customer has answered yet. Give the customer the price with "
-        "get_quote first, and call this tool only after they explicitly say "
-        "yes to it."
+        "Not done: there is no still-valid price the customer has answered. "
+        "Give the customer a fresh price with get_quote first, and call this "
+        "tool only after they say yes to it."
     ),
 }

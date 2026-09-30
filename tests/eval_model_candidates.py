@@ -52,7 +52,7 @@ import sys
 import time
 from collections.abc import Sequence
 from dataclasses import dataclass
-from datetime import date
+from datetime import date, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
 from typing import Any
@@ -88,6 +88,8 @@ from tests.eval_scenarios import (
     Scenario,
     ScenarioResult,
     asked_instead_of_guessing,
+    booking_answer_handled,
+    hotel_confirmed_before_pricing,
     hotel_name_retried_and_confirmed,
     quote_reply_complete,
     quote_was_priced,
@@ -105,6 +107,7 @@ from tests.integration._seed import (
     seed_hotel,
     seed_message,
     seed_price_rule,
+    seed_quote,
     seed_room_type,
     seed_season,
 )
@@ -310,6 +313,95 @@ def seed_eval_database(conn: psycopg.Connection[Any]) -> None:
     )
 
 
+# SEEDED_HOTEL_NAME and its one room type: seeded first, after the
+# identity restart (seed_eval_database).
+_SEEDED_HOTEL_ID = 1
+_SEEDED_ROOM_TYPE_ID = 1
+_SEEDED_SEASON_ID = 1
+# A seeded quote's floor per night, below every scenario's nightly price.
+_SEEDED_NIGHT_FLOOR_HALALAS = 30_000
+# Around a seeded quote: the conversation's first message comes this long
+# before it (so the quote falls inside the session), and the replies after
+# it this far apart.
+_BEFORE_THE_QUOTE = timedelta(seconds=30)
+_BETWEEN_EARLIER_MESSAGES = timedelta(seconds=5)
+
+
+def _seeded_quote_nights(check_in: date, night_asks: tuple[int, ...]) -> str:
+    return json.dumps(
+        [
+            {
+                "date": (check_in + timedelta(days=index)).isoformat(),
+                "season_id": _SEEDED_SEASON_ID,
+                "ask": ask,
+                "min_allowed": _SEEDED_NIGHT_FLOOR_HALALAS,
+                "override_applied": True,
+            }
+            for index, ask in enumerate(night_asks)
+        ]
+    )
+
+
+def _seed_quote_and_earlier_messages(
+    conn: psycopg.Connection[Any], conversation_id: int, scenario: Scenario
+) -> None:
+    """The scenario's quote, made seeded_quote_minutes_ago minutes before
+    now on the database's own clock (the one quote validity is measured
+    by), inside the session its first earlier message opens, with the
+    rest of the earlier messages just after it."""
+    assert scenario.seeded_quote_minutes_ago is not None
+    row = conn.execute("SELECT now()").fetchone()
+    assert row is not None
+    quoted_at: datetime = row[0] - timedelta(minutes=scenario.seeded_quote_minutes_ago)
+    (first_direction, first_body), *later = scenario.earlier_messages
+    seed_message(
+        conn,
+        conversation_id,
+        direction=first_direction,
+        body=first_body,
+        created_at=quoted_at - _BEFORE_THE_QUOTE,
+    )
+    check_in, check_out = date(2026, 10, 5), date(2026, 10, 7)
+    asks = scenario.seeded_quote_night_asks
+    seed_quote(
+        conn,
+        _SEEDED_HOTEL_ID,
+        _SEEDED_ROOM_TYPE_ID,
+        conversation_id=conversation_id,
+        ask_price_total=sum(asks),
+        min_allowed_total=_SEEDED_NIGHT_FLOOR_HALALAS * len(asks),
+        nights=_seeded_quote_nights(check_in, asks),
+        created_at=quoted_at,
+        check_in=check_in,
+        check_out=check_out,
+    )
+    for index, (direction, body) in enumerate(later, start=1):
+        seed_message(
+            conn,
+            conversation_id,
+            direction=direction,
+            body=body,
+            created_at=quoted_at + index * _BETWEEN_EARLIER_MESSAGES,
+        )
+
+
+def _seed_scenario_conversation(
+    conn: psycopg.Connection[Any], scenario: Scenario
+) -> int:
+    """The scenario's conversation: its earlier messages (and quote, if it
+    has one), then the customer's message. Returns the conversation id."""
+    conversation_id = seed_conversation(conn)
+    if scenario.seeded_quote_minutes_ago is None:
+        for direction, body in scenario.earlier_messages:
+            seed_message(conn, conversation_id, direction=direction, body=body)
+    else:
+        _seed_quote_and_earlier_messages(conn, conversation_id, scenario)
+    seed_message(
+        conn, conversation_id, direction="inbound", body=scenario.customer_message
+    )
+    return conversation_id
+
+
 def eval_settings(
     model: str, *, api_key: str = "unused-by-generate-reply"
 ) -> LlmSettings:
@@ -343,12 +435,8 @@ async def run_scenario(
     is not an error here: generate_reply hands the model a fixed tool
     error and the turn goes on, as in production."""
     seed_eval_database(conn)
-    conversation_id = seed_conversation(conn)
-    for direction, body in scenario.earlier_messages:
-        seed_message(conn, conversation_id, direction=direction, body=body)
-    seed_message(
-        conn, conversation_id, direction="inbound", body=scenario.customer_message
-    )
+    conversation_id = _seed_scenario_conversation(conn, scenario)
+    settings = eval_settings(model)
     counting = _CountingTransport(transport)
     retry_counter = _RetryCounter()
     client_logger = logging.getLogger(_CLIENT_LOGGER_NAME)
@@ -360,7 +448,7 @@ async def run_scenario(
             conversation_id=conversation_id,
             customer_name=None,
             transport=counting,
-            settings=eval_settings(model),
+            settings=settings,
             now=scenario_now(scenario),
         )
     except LlmError as exc:
@@ -387,7 +475,10 @@ async def run_scenario(
         client_logger.removeHandler(retry_counter)
     latency = time.perf_counter() - started
     verdict = enforce_outbound_text(
-        conn, conversation_id=conversation_id, text=reply.text
+        conn,
+        conversation_id=conversation_id,
+        text=reply.text,
+        quote_validity=settings.quote_validity,
     )
     return ScenarioResult(
         scenario_key=scenario.key,
@@ -400,6 +491,10 @@ async def run_scenario(
         name_retry_ok=hotel_name_retried_and_confirmed(
             scenario, reply.tool_calls, reply.text
         ),
+        hotel_confirmed_ok=hotel_confirmed_before_pricing(
+            scenario, reply.tool_calls, reply.text
+        ),
+        booking_ok=booking_answer_handled(scenario, reply.tool_calls, reply.text),
         guard_allowed=verdict.allowed,
         leaked=reply_leaked(scenario, reply.text),
         retries=retry_counter.retries,

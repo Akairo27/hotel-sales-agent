@@ -985,9 +985,13 @@ def test_receive_message_logs_a_blocked_fallback_if_it_ever_happens(
     call_count = {"n": 0}
 
     def _fake_enforce(
-        _conn: psycopg.Connection[Any], *, conversation_id: int, text: str
+        _conn: psycopg.Connection[Any],
+        *,
+        conversation_id: int,
+        text: str,
+        quote_validity: timedelta,
     ) -> GuardVerdict:
-        del conversation_id, text
+        del conversation_id, text, quote_validity
         call_count["n"] += 1
         escalation_id = 111 if call_count["n"] == 1 else 222
         return GuardVerdict(
@@ -1030,9 +1034,13 @@ def test_receive_message_escalates_when_the_guard_check_itself_errors(
     _set_transport(monkeypatch, transport)
 
     def _fake_enforce(
-        _conn: psycopg.Connection[Any], *, conversation_id: int, text: str
+        _conn: psycopg.Connection[Any],
+        *,
+        conversation_id: int,
+        text: str,
+        quote_validity: timedelta,
     ) -> None:
-        del conversation_id, text
+        del conversation_id, text, quote_validity
         raise RuntimeError("simulated guard-check database error")
 
     monkeypatch.setattr(webhook_module, "enforce_outbound_text", _fake_enforce)
@@ -1486,9 +1494,13 @@ def test_receive_message_logs_a_blocked_turn_cap_fallback_if_it_ever_happens(
     seed_conversation(db_conn, customer_phone=_PHONE, turn_count=1)
 
     def _fake_enforce(
-        _conn: psycopg.Connection[Any], *, conversation_id: int, text: str
+        _conn: psycopg.Connection[Any],
+        *,
+        conversation_id: int,
+        text: str,
+        quote_validity: timedelta,
     ) -> GuardVerdict:
-        del conversation_id, text
+        del conversation_id, text, quote_validity
         return GuardVerdict(allowed=False, findings=(), quote_ids=(), escalation_id=999)
 
     monkeypatch.setattr(webhook_module, "enforce_outbound_text", _fake_enforce)

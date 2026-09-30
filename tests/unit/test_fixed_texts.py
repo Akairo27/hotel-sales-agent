@@ -36,7 +36,7 @@ _ARABIC_INDIC_DIGITS = "٠١٢٣٤٥٦٧٨٩"
 
 def test_the_owner_approved_wording_is_pinned() -> None:
     assert FALLBACK.arabic == (
-        "لحظة لو سمحت، بتأكد من هالموضوع مع زميلي وبيتواصل معك قريب إن شاء الله."
+        "لحظة لو سمحت، خلّيني أتأكد من طلبك مع زميلي، ويتواصل معك قريباً إن شاء الله."
     )
     assert FALLBACK.english == (
         "One moment — I need to double-check this with a colleague, and "
@@ -47,8 +47,8 @@ def test_the_owner_approved_wording_is_pinned() -> None:
         "saya, dan dia akan segera menghubungi Anda."
     )
     assert PLEASE_TYPE.arabic == (
-        "المعذرة، ما أقدر أسمع الرسائل الصوتية ولا أشوف الصور للحين. اكتب لي "
-        "طلبك وأخدمك على طول."
+        "المعذرة، ما أقدر أسمع الرسائل الصوتية ولا أشوف الصور حالياً. اكتب لي "
+        "طلبك وأخدمك مباشرة."
     )
     assert PLEASE_TYPE.english == (
         "Sorry, I can't read voice notes or images yet. Please type your "

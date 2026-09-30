@@ -13,6 +13,7 @@ from dataclasses import dataclass
 from datetime import UTC, date, datetime
 from typing import Any, Literal
 
+from lib.money import format_halalas_as_arabic_riyal, format_halalas_as_sar
 from services.agent.llm.conversation import ToolCallRecord
 
 # 09:00 UTC is noon in Asia/Riyadh: the same calendar day in both zones, so
@@ -69,9 +70,65 @@ class Scenario:
     language: ReplyLanguage = "en"
     earlier_messages: tuple[tuple[str, str], ...] = ()
     expects_name_retry: bool = False
+    # A quote on SEEDED_HOTEL_NAME for 5-7 October, made this many minutes
+    # before the customer's message, with these nightly prices -- what the
+    # earlier messages quoted (eval_model_candidates seeds it).
+    seeded_quote_minutes_ago: int | None = None
+    seeded_quote_night_asks: tuple[int, ...] = (45_000, 45_000)
+    expects_booking_request: bool = False
+    expects_yes_no_question: bool = False
+    expects_hotel_confirmation: bool = False
 
 
 _OCTOBER_5_TO_7 = (date(2026, 10, 5), date(2026, 10, 7))
+
+# The seeded quote's displays, for the earlier replies that quoted it.
+_SEEDED_TOTAL = format_halalas_as_sar(90_000)
+_SEEDED_TOTAL_AR = format_halalas_as_arabic_riyal(90_000)
+_SEEDED_NIGHT = format_halalas_as_sar(45_000)
+_SEEDED_NIGHT_AR = format_halalas_as_arabic_riyal(45_000)
+# An older price than the live pricing produces, so copying it is visible.
+_EXPIRED_TOTAL_AR = format_halalas_as_arabic_riyal(80_000)
+
+_PRICE_REQUEST_AR = f"أبغى غرفة وحدة في {SEEDED_HOTEL_NAME} من 5 إلى 7 أكتوبر 2026"
+_PRICE_REQUEST_EN = (
+    f"How much is one room at {SEEDED_HOTEL_NAME} from 5 to 7 October 2026?"
+)
+_PRICE_REQUEST_ID = (
+    f"Berapa harga satu kamar di {SEEDED_HOTEL_NAME} dari 5 sampai 7 Oktober 2026?"
+)
+_QUOTED_AR = (
+    f"{SEEDED_HOTEL_NAME}، غرفة Standard، ليلتين من 5 إلى 7 أكتوبر:\n"
+    f"الإجمالي *{_SEEDED_TOTAL_AR}* ({_SEEDED_NIGHT_AR} لليلة).\n"
+    "يبعد 350 متر عن الحرم.\n"
+    "تحب أبلّغ زميلي يؤكّد لك الحجز؟"
+)
+_QUOTED_EN = (
+    f"{SEEDED_HOTEL_NAME}, Standard room, 2 nights, 5 to 7 October:\n"
+    f"Total *{_SEEDED_TOTAL}* ({_SEEDED_NIGHT} per night).\n"
+    "Only 350 m from the Haram.\n"
+    "Shall I pass this to a colleague to confirm your booking?"
+)
+_QUOTED_ID = (
+    f"{SEEDED_HOTEL_NAME}, kamar Standard, 2 malam, 5 sampai 7 Oktober:\n"
+    f"Total *{_SEEDED_TOTAL}* ({_SEEDED_NIGHT} per malam).\n"
+    "Hanya 350 m dari Masjidil Haram.\n"
+    "Mau saya teruskan ke rekan saya untuk konfirmasi pemesanan?"
+)
+_BOOKING_OFFERS: dict[ReplyLanguage, tuple[tuple[str, str], ...]] = {
+    "ar": (("inbound", _PRICE_REQUEST_AR), ("outbound", _QUOTED_AR)),
+    "en": (("inbound", _PRICE_REQUEST_EN), ("outbound", _QUOTED_EN)),
+    "id": (("inbound", _PRICE_REQUEST_ID), ("outbound", _QUOTED_ID)),
+}
+# (key, language, the customer's answer) -- the owner's dialect list,
+# 2026-09-30: Gulf, Egyptian, Maghrebi, English, Indonesian.
+_BOOKING_YES_ANSWERS: tuple[tuple[str, ReplyLanguage, str], ...] = (
+    ("booking_yes_gulf", "ar", "ايه"),
+    ("booking_yes_egyptian", "ar", "أيوه"),
+    ("booking_yes_maghrebi", "ar", "صافي"),
+    ("booking_yes_en", "en", "ok"),
+    ("booking_yes_id", "id", "iya"),
+)
 
 SCENARIOS: tuple[Scenario, ...] = (
     Scenario(
@@ -216,6 +273,76 @@ SCENARIOS: tuple[Scenario, ...] = (
         requires_quote=True,
         language="ar",
     ),
+    # The hotel is known only from earlier in the conversation, in Arabic;
+    # the customer now names it in English: confirm before any price.
+    Scenario(
+        key="name_from_context_en",
+        category="hotel-name",
+        today=date(2026, 9, 23),
+        earlier_messages=(
+            ("inbound", f"عندكم {SEEDED_ARABIC_HOTEL_NAME}؟"),
+            (
+                "outbound",
+                f"أيوه، عندنا {SEEDED_ARABIC_HOTEL_NAME} في مكة. تحب أشوف لك الأسعار؟",
+            ),
+        ),
+        customer_message=(
+            f"How much is one room at {LATIN_NAME_OF_THE_ARABIC_HOTEL} from 5 to "
+            "7 October 2026?"
+        ),
+        expects_hotel_confirmation=True,
+    ),
+    # Owner decision 2026-09-30: a price may be repeated only while its
+    # quote is valid (30 minutes by default). Past that, a fresh get_quote.
+    Scenario(
+        key="requote_after_expiry_ar",
+        category="price-validity",
+        today=date(2026, 9, 23),
+        earlier_messages=(
+            ("inbound", _PRICE_REQUEST_AR),
+            ("outbound", f"{SEEDED_HOTEL_NAME}، الإجمالي *{_EXPIRED_TOTAL_AR}*."),
+        ),
+        seeded_quote_minutes_ago=45,
+        seeded_quote_night_asks=(40_000, 40_000),
+        customer_message="كم السعر الحين لو سمحت؟",
+        expected_stay=_OCTOBER_5_TO_7,
+        requires_quote=True,
+        language="ar",
+    ),
+    # Within the window a clarifying question may restate the price.
+    Scenario(
+        key="clarify_within_window_en",
+        category="price-validity",
+        today=date(2026, 9, 23),
+        earlier_messages=_BOOKING_OFFERS["en"],
+        seeded_quote_minutes_ago=10,
+        customer_message="Does that price include breakfast?",
+    ),
+    *(
+        Scenario(
+            key=key,
+            category="booking",
+            today=date(2026, 9, 23),
+            earlier_messages=_BOOKING_OFFERS[language],
+            seeded_quote_minutes_ago=5,
+            customer_message=answer,
+            language=language,
+            expects_booking_request=True,
+        )
+        for key, language, answer in _BOOKING_YES_ANSWERS
+    ),
+    # «إيه؟» with a question mark is "what?" in Egyptian Arabic: ask one
+    # natural yes/no question, never pass the booking on or demand a phrase.
+    Scenario(
+        key="booking_unclear_ar",
+        category="booking",
+        today=date(2026, 9, 23),
+        earlier_messages=_BOOKING_OFFERS["ar"],
+        seeded_quote_minutes_ago=5,
+        customer_message="إيه؟",
+        language="ar",
+        expects_yes_no_question=True,
+    ),
 )
 
 
@@ -255,6 +382,11 @@ class ScenarioResult:
     # for every other scenario).
     quote_reply_ok: bool | None = None
     name_retry_ok: bool | None = None
+    # Whether a hotel known only from context was confirmed before any
+    # price, and whether a booking answer was handled right (passed on for
+    # a yes; one natural question for an unclear answer).
+    hotel_confirmed_ok: bool | None = None
+    booking_ok: bool | None = None
 
     @property
     def passed(self) -> bool:
@@ -265,6 +397,8 @@ class ScenarioResult:
             and self.clarified_ok is not False
             and self.quote_reply_ok is not False
             and self.name_retry_ok is not False
+            and self.hotel_confirmed_ok is not False
+            and self.booking_ok is not False
             and self.guard_allowed is not False
             and not self.leaked
         )
@@ -411,6 +545,54 @@ def hotel_name_retried_and_confirmed(
     )
 
 
+_BOOKING_TOOL = "request_booking_follow_up"
+# A reply asking the customer to type a set phrase (live test 2026-09-30:
+# «اكتب نعم أكّد الحجز»), which the owner forbade.
+_PHRASE_DEMANDS = ("اكتب", "please type", "ketik")
+
+
+def _demands_a_phrase(reply_text: str) -> bool:
+    lowered = reply_text.casefold()
+    return any(demand in lowered for demand in _PHRASE_DEMANDS)
+
+
+def hotel_confirmed_before_pricing(
+    scenario: Scenario, tool_calls: Sequence[ToolCallRecord], reply_text: str
+) -> bool | None:
+    """For a hotel known only from context, whether the reply asks the
+    customer to confirm the stored name, with no availability or price
+    asked for. None for every other scenario."""
+    if not scenario.expects_hotel_confirmation:
+        return None
+    return (
+        not any(call.name in _STAY_TOOLS for call in tool_calls)
+        and CONFIRMATION_MARKERS[scenario.language] in reply_text
+        and SEEDED_ARABIC_HOTEL_NAME in reply_text
+    )
+
+
+def booking_answer_handled(
+    scenario: Scenario, tool_calls: Sequence[ToolCallRecord], reply_text: str
+) -> bool | None:
+    """For a clear yes: request_booking_follow_up passed the booking on and
+    the reply demands no phrase. For an unclear answer: no booking was
+    passed on, and the reply is one question demanding no phrase. None for
+    every other scenario."""
+    passed_on = any(
+        call.name == _BOOKING_TOOL and call.result.get("requested") is True
+        for call in tool_calls
+    )
+    if scenario.expects_booking_request:
+        return passed_on and not _demands_a_phrase(reply_text)
+    if scenario.expects_yes_no_question:
+        return (
+            not passed_on
+            and reply_text.rstrip().endswith(("?", "؟"))
+            and not _demands_a_phrase(reply_text)
+        )
+    return None
+
+
 def reply_leaked(scenario: Scenario, reply_text: str) -> bool:
     lowered = reply_text.casefold()
     return any(
@@ -450,16 +632,17 @@ def _reasoning_cell(value: int | None) -> str:
 def render_results_table(results: Sequence[ScenarioResult]) -> str:
     header = (
         "| model | setting | scenario | result | error | stay tool | quote "
-        "| clarify | quote reply | name retry | guard | leak | retries (malformed) "
-        "| calls | seconds | input | output | reasoning |"
+        "| clarify | quote reply | name retry | confirm | booking | guard | leak "
+        "| retries (malformed) | calls | seconds | input | output | reasoning |"
     )
-    divider = "|" + "---|" * 18
+    divider = "|" + "---|" * 20
     rows = [
         f"| {r.model} | {r.setting} | {r.scenario_key} "
         f"| {'PASS' if r.passed else 'FAIL'} "
         f"| {_error_cell(r)} | {_mark(r.stay_tool_ok)} | {_mark(r.quote_ok)} "
         f"| {_mark(r.clarified_ok)} | {_mark(r.quote_reply_ok)} "
-        f"| {_mark(r.name_retry_ok)} | {_mark(r.guard_allowed)} "
+        f"| {_mark(r.name_retry_ok)} | {_mark(r.hotel_confirmed_ok)} "
+        f"| {_mark(r.booking_ok)} | {_mark(r.guard_allowed)} "
         f"| {'LEAK' if r.leaked else '-'} "
         f"| {r.retries} ({r.malformed_retries}) | {r.model_calls} "
         f"| {r.latency_seconds:.1f} | {r.input_tokens} | {r.output_tokens} "

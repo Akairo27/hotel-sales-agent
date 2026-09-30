@@ -103,7 +103,7 @@ from __future__ import annotations
 import json
 import logging
 from dataclasses import dataclass
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from typing import Any, Literal
 
 import psycopg
@@ -780,20 +780,20 @@ def _booking_follow_up_log_summary(result: dict[str, Any]) -> dict[str, Any]:
 
 def _dispatch_booking_follow_up(
     conn: psycopg.Connection[Any],
-    args: dict[str, Any],
     *,
     conversation_id: int | None,
+    quote_validity: timedelta,
 ) -> dict[str, Any]:
-    """Validates quote_id and hands over to booking_follow_up.py, which
-    owns every check and the write."""
-    quote_id = _require_int(args, "quote_id")
+    """Hands over to booking_follow_up.py, which picks the quote and owns
+    every check and the write. The tool takes no arguments; whatever the
+    model sends with it is ignored, so it can never name a quote."""
     if conversation_id is None:
         raise InvalidToolArgumentsError(
             "request_booking_follow_up needs a conversation",
             code="quote_not_confirmable",
         )
     return request_booking_follow_up(
-        conn, quote_id=quote_id, conversation_id=conversation_id
+        conn, conversation_id=conversation_id, quote_validity=quote_validity
     )
 
 
@@ -862,6 +862,7 @@ def dispatch_tool(
     customer_phone: str | None,
     conversation_id: int | None,
     resolved_stays: set[ResolvedStay],
+    quote_validity: timedelta,
 ) -> dict[str, Any]:
     """Routes a model tool call by name to its handler, logging exactly one
     agent_tool_call event per call (success or failure) before returning or
@@ -927,7 +928,7 @@ def dispatch_tool(
             return result
         if name == REQUEST_BOOKING_FOLLOW_UP_TOOL:
             result = _dispatch_booking_follow_up(
-                conn, args, conversation_id=conversation_id
+                conn, conversation_id=conversation_id, quote_validity=quote_validity
             )
             _log_tool_call(
                 conversation_id=conversation_id,

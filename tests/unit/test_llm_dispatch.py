@@ -12,12 +12,13 @@ from __future__ import annotations
 import inspect
 import json
 import logging
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 from typing import Any, cast, get_args
 
 import pytest
 
 from services.agent.llm import dispatch as dispatch_module
+from services.agent.llm.config import DEFAULT_QUOTE_VALIDITY_MINUTES
 from services.agent.llm.dispatch import (
     CHECK_AVAILABILITY_LOG_SUMMARY_KEYS,
     GET_QUOTE_LOG_SUMMARY_KEYS,
@@ -51,6 +52,7 @@ from services.agent.llm.tools import TOOL_ERROR_MESSAGES
 from services.inventory.operations import StayAvailability
 from services.pricing.compute import NightPrice, Quote
 
+_QUOTE_VALIDITY = timedelta(minutes=DEFAULT_QUOTE_VALIDITY_MINUTES)
 _NOT_A_CONNECTION = cast(Any, object())
 _UNUSED_NOW = datetime(2026, 1, 1, tzinfo=UTC)  # validation raises before this is read
 
@@ -144,6 +146,7 @@ def test_dispatch_tool_raises_on_unknown_tool_name_without_touching_conn() -> No
             customer_phone=None,
             conversation_id=None,
             resolved_stays=set(),
+            quote_validity=_QUOTE_VALIDITY,
         )
 
 
@@ -161,6 +164,7 @@ def test_dispatch_tool_rejects_an_unresolved_check_availability_stay() -> None:
             customer_phone=None,
             conversation_id=None,
             resolved_stays=set(),
+            quote_validity=_QUOTE_VALIDITY,
         )
 
 
@@ -174,6 +178,7 @@ def test_dispatch_tool_rejects_an_unresolved_get_quote_stay() -> None:
             customer_phone=None,
             conversation_id=None,
             resolved_stays=set(),
+            quote_validity=_QUOTE_VALIDITY,
         )
 
 
@@ -516,6 +521,7 @@ def test_dispatch_tool_logs_and_reraises_invalid_tool_arguments_error(
             customer_phone=None,
             conversation_id=7,
             resolved_stays=set(),
+            quote_validity=_QUOTE_VALIDITY,
         )
 
     records = [json.loads(r.getMessage()) for r in caplog.records]
@@ -544,6 +550,7 @@ def test_dispatch_tool_logs_and_reraises_unknown_tool_error(
             customer_phone=None,
             conversation_id=None,
             resolved_stays=set(),
+            quote_validity=_QUOTE_VALIDITY,
         )
 
     records = [json.loads(r.getMessage()) for r in caplog.records]
@@ -573,6 +580,7 @@ def test_dispatch_tool_logs_unresolved_stay_code_for_an_id_search_hotels_never_r
             customer_phone=None,
             conversation_id=None,
             resolved_stays=set(),
+            quote_validity=_QUOTE_VALIDITY,
         )
 
     assert exc_info.value.code == "unresolved_stay"

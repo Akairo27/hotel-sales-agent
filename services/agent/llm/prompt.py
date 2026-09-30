@@ -52,6 +52,7 @@ from datetime import date
 from lib.hijri import HijriDate
 from services.agent.llm.config import MAX_CUSTOMER_NAME_LENGTH
 from services.agent.llm.context import CurrentStay
+from services.agent.llm.pricing import riyadh_clock_time
 
 
 @dataclass(frozen=True)
@@ -78,36 +79,34 @@ class PromptRule:
 # living inside the rule's prose.
 PRICE_CURRENCY_WORDS: tuple[str, ...] = ("SAR", "riyal", "riyals", "ريال")
 
-# The Saudi-dialect examples the unavailable_dates rule shows the model --
-# owner-approved wording (2026-09-29): Western digits, and bracketed
-# placeholders the model fills from the tool results.
-_SAUDI_EXAMPLE_ONE_NIGHT_FULL = (
-    "للأسف، ما فيه غرف [نوع الغرفة] فاضية في [اسم الفندق] ليلة "
-    "21 أكتوبر، عشان كذا الفترة من 20 إلى 23 أكتوبر مو متاحة "
-    "كاملة. تبغاني أشيّك لك على تواريخ ثانية، أو نوع غرفة ثاني، "
-    "أو فندق ثاني؟"
+# The Arabic examples the unavailable_dates rule shows the model, in the
+# owner's "white" Arabic (2026-09-30: simple, understood across the Arab
+# world, a light Gulf touch; arabic_register below): Western digits, and
+# bracketed placeholders the model fills from the tool results.
+_ARABIC_EXAMPLE_ONE_NIGHT_FULL = (
+    "للأسف، ما في غرف [نوع الغرفة] متاحة في [اسم الفندق] ليلة "
+    "21 أكتوبر، لذلك الفترة من 20 إلى 23 أكتوبر غير متاحة كاملة. "
+    "تحب أشوف لك تواريخ ثانية، أو نوع غرفة ثاني، أو فندق ثاني؟"
 )
 
-_SAUDI_EXAMPLE_TWO_NIGHTS_FULL = (
-    "للأسف، ما فيه غرف [نوع الغرفة] فاضية في [اسم الفندق] ليلة "
-    "21 وليلة 22 أكتوبر، فالفترة اللي طلبتها مو متاحة كاملة. "
-    "تبغاني أشيّك لك على تواريخ ثانية، أو نوع غرفة ثاني، أو فندق "
-    "ثاني؟"
+_ARABIC_EXAMPLE_TWO_NIGHTS_FULL = (
+    "للأسف، ما في غرف [نوع الغرفة] متاحة في [اسم الفندق] ليلة "
+    "21 وليلة 22 أكتوبر، لذلك الفترة اللي طلبتها غير متاحة كاملة. "
+    "تحب أشوف لك تواريخ ثانية، أو نوع غرفة ثاني، أو فندق ثاني؟"
 )
 
-_SAUDI_EXAMPLE_TOO_FEW_ROOMS = (
+_ARABIC_EXAMPLE_TOO_FEW_ROOMS = (
     "للأسف، ما يتوفر [العدد] غرف [نوع الغرفة] في [اسم الفندق] "
-    "ليلة 21 أكتوبر. تبغاني أشيّك لك على تواريخ ثانية، أو نوع "
-    "غرفة ثاني؟"
+    "ليلة 21 أكتوبر. تحب أشوف لك تواريخ ثانية، أو نوع غرفة ثاني؟"
 )
 
-_SAUDI_EXAMPLE_NOT_OPEN_YET = (
-    "الحجز في [اسم الفندق] ليلة 22 و23 أكتوبر ما انفتح للحين. "
-    "بلّغت زميلنا وبيتواصل معك قريب إن شاء الله، وإذا تبغى أشيّك "
-    "لك على تواريخ ثانية علّمني."
+_ARABIC_EXAMPLE_NOT_OPEN_YET = (
+    "الحجز في [اسم الفندق] ليلة 22 و23 أكتوبر لسّه ما انفتح. "
+    "بلّغت زميلنا ويتواصل معك قريباً إن شاء الله، وإذا تحب أشوف "
+    "لك تواريخ ثانية قل لي."
 )
 
-_SAUDI_EXAMPLE_CONFIRM_YEAR = "تقصد من 1 إلى 3 سبتمبر 2027؟"
+_ARABIC_EXAMPLE_CONFIRM_YEAR = "تقصد من 1 إلى 3 سبتمبر 2027؟"
 
 # Owner-approved wording (2026-09-30): confirming a hotel found only by the
 # Arabic retry of search_hotels, and the shape of a quote reply in each
@@ -117,14 +116,14 @@ _SAUDI_EXAMPLE_CONFIRM_YEAR = "تقصد من 1 إلى 3 سبتمبر 2027؟"
 # the output guard reads a number that follows a currency word across
 # nothing but punctuation or a line break as money (owner decision the
 # same day).
-_SAUDI_EXAMPLE_CONFIRM_HOTEL = "تقصد فندق [اسم الفندق]؟"
+_ARABIC_EXAMPLE_CONFIRM_HOTEL = "تقصد فندق [اسم الفندق]؟"
 
-_SAUDI_EXAMPLE_QUOTE_REPLY = (
+_ARABIC_EXAMPLE_QUOTE_REPLY = (
     "[اسم الفندق]، غرفة [نوع الغرفة]، [عدد الليالي] من [تاريخ الوصول] "
     "إلى [تاريخ المغادرة]:\n"
     "الإجمالي *[السعر الإجمالي]* ([سعر الليلة] لليلة).\n"
     "يبعد [المسافة] عن الحرم.\n"
-    "تبغاني أبلّغ زميلي يأكّد لك الحجز؟"
+    "تحب أبلّغ زميلي يؤكّد لك الحجز؟"
 )
 
 _ENGLISH_EXAMPLE_QUOTE_REPLY = (
@@ -141,17 +140,70 @@ _INDONESIAN_EXAMPLE_QUOTE_REPLY = (
     "Mau saya teruskan ke rekan saya untuk konfirmasi pemesanan?"
 )
 
+# After request_booking_follow_up (owner decision 2026-09-30): restate
+# exactly the stay the tool returns, and ask naturally when a yes is
+# unclear -- never ask for a specific phrase.
+_ARABIC_EXAMPLE_BOOKING_PASSED_ON = (
+    "أبشر، بلّغت زميلي بطلبك: [اسم الفندق]، غرفة [نوع الغرفة]، من "
+    "[تاريخ الوصول] إلى [تاريخ المغادرة]، الإجمالي [السعر الإجمالي]. "
+    "يتواصل معك قريباً إن شاء الله لتأكيد الحجز."
+)
+
+_ENGLISH_EXAMPLE_BOOKING_PASSED_ON = (
+    "Done — I've passed your request to a colleague: [hotel], [room type] "
+    "room, [check-in] to [check-out], total [total]. They'll contact you "
+    "shortly to confirm the booking."
+)
+
+_INDONESIAN_EXAMPLE_BOOKING_PASSED_ON = (
+    "Baik, permintaan Anda sudah saya teruskan ke rekan saya: [hotel], kamar "
+    "[tipe kamar], [check-in] sampai [check-out], total [total]. Rekan saya "
+    "akan segera menghubungi Anda untuk konfirmasi pemesanan."
+)
+
+_ARABIC_EXAMPLE_UNCLEAR_YES = "يعني تحب أبلّغ زميلي يؤكّد لك الحجز؟"
+
+# Short confirmations that count as yes (owner's list, 2026-09-30): most
+# Arabic-speaking customers are not Saudi.
+BOOKING_YES_WORDS: tuple[str, ...] = (
+    "إيه",
+    "ايه",
+    "زين",
+    "يلا",
+    "آه",
+    "أيوه",
+    "ماشي",
+    "حاضر",
+    "إي",
+    "أكيد",
+    "واه",
+    "صافي",
+    "نعم",
+    "تمام",
+    "أوكي",
+    "موافق",
+    "yes",
+    "ok",
+    "sure",
+    "iya",
+    "ya",
+    "oke",
+    "boleh",
+)
+
 # Every customer-facing Arabic example the rules show the model -- the
-# texts tests/unit/test_llm_prompt.py checks for formal (non-Saudi)
-# phrasing and for Arabic-Indic digits.
+# texts tests/unit/test_llm_prompt.py checks against formal phrasing and
+# heavy local words (arabic_register) and for Arabic-Indic digits.
 CUSTOMER_FACING_ARABIC_EXAMPLES: tuple[str, ...] = (
-    _SAUDI_EXAMPLE_ONE_NIGHT_FULL,
-    _SAUDI_EXAMPLE_TWO_NIGHTS_FULL,
-    _SAUDI_EXAMPLE_TOO_FEW_ROOMS,
-    _SAUDI_EXAMPLE_NOT_OPEN_YET,
-    _SAUDI_EXAMPLE_CONFIRM_YEAR,
-    _SAUDI_EXAMPLE_CONFIRM_HOTEL,
-    _SAUDI_EXAMPLE_QUOTE_REPLY,
+    _ARABIC_EXAMPLE_ONE_NIGHT_FULL,
+    _ARABIC_EXAMPLE_TWO_NIGHTS_FULL,
+    _ARABIC_EXAMPLE_TOO_FEW_ROOMS,
+    _ARABIC_EXAMPLE_NOT_OPEN_YET,
+    _ARABIC_EXAMPLE_CONFIRM_YEAR,
+    _ARABIC_EXAMPLE_CONFIRM_HOTEL,
+    _ARABIC_EXAMPLE_QUOTE_REPLY,
+    _ARABIC_EXAMPLE_BOOKING_PASSED_ON,
+    _ARABIC_EXAMPLE_UNCLEAR_YES,
 )
 
 PROMPT_RULES: tuple[PromptRule, ...] = (
@@ -177,14 +229,20 @@ PROMPT_RULES: tuple[PromptRule, ...] = (
         english=(
             "Always call check_availability or get_quote to answer a "
             "question about room availability or price — never answer "
-            "such a question from memory or assumption."
+            "such a question from memory or assumption. The only price you "
+            "may state without calling get_quote in this turn is the "
+            "current stay's total, exactly as given below and only while it "
+            "is still valid; never copy a price from an earlier message."
         ),
         arabic=(
             "استخدم دائماً check_availability أو get_quote للإجابة عن أي "
             "سؤال يخص توفر الغرف أو السعر — لا تجب على مثل هذا السؤال من "
-            "الذاكرة أو بالتخمين."
+            "الذاكرة أو بالتخمين. السعر الوحيد الذي يجوز لك ذكره دون "
+            "استدعاء get_quote في هذه الدورة هو إجمالي الإقامة الحالية، "
+            "كما هو مكتوب أدناه تماماً وما دام صالحاً فقط؛ ولا تنسخ أبداً "
+            "سعراً من رسالة سابقة."
         ),
-        english_digest="613a18c22bfd86d1c1fe24cfcb8bc7da84bf68c3401b1cd32b08de90abc5e433",
+        english_digest="6a0061a65625c777fe270c7d09179fe6062b4da1c23f7a3ace88f94b89f51ec6",
     ),
     PromptRule(
         key="search_before_resolving_a_hotel",
@@ -204,10 +262,14 @@ PROMPT_RULES: tuple[PromptRule, ...] = (
             "availability or give a price in this reply: ask the customer "
             "to confirm it, with the hotel name exactly as search_hotels "
             'returned it — in Arabic "'
-            + _SAUDI_EXAMPLE_CONFIRM_HOTEL
+            + _ARABIC_EXAMPLE_CONFIRM_HOTEL
             + '" (without repeating فندق when the name already starts with '
             'it), in English "Do you mean [hotel name]?", in Indonesian '
-            '"Maksud Anda [hotel name]?" — and wait for their answer. If the '
+            '"Maksud Anda [hotel name]?" — and wait for their answer. '
+            "Likewise, if you know which hotel the customer means only by "
+            "translating or transliterating their words — including from "
+            "earlier in this conversation — ask them to confirm it the same "
+            "way before checking availability or giving a price. If the "
             "second search also returns none, tell the customer and ask "
             "them to confirm the name; never search a third time for the "
             "same name. Call search_hotels again in a later turn if you "
@@ -228,7 +290,7 @@ PROMPT_RULES: tuple[PromptRule, ...] = (
             "واحداً بالضبط، فلا تتحقق من التوفر ولا تذكر سعراً في هذا "
             "الرد: اطلب من العميل تأكيده، باسم الفندق كما أعاده "
             'search_hotels حرفياً — بالعربية "'
-            + _SAUDI_EXAMPLE_CONFIRM_HOTEL
+            + _ARABIC_EXAMPLE_CONFIRM_HOTEL
             + '" (دون تكرار كلمة فندق إذا بدأ بها الاسم)، وبالإنجليزية '
             '"Do you mean [hotel name]?"، وبالإندونيسية "Maksud Anda '
             '[hotel name]?" — وانتظر رده. وإذا لم يُعِد البحث الثاني أي '
@@ -237,7 +299,7 @@ PROMPT_RULES: tuple[PromptRule, ...] = (
             "لاحقة إذا احتجت التحقق من التوفر أو السعر ولم تكن متأكداً أن "
             "لديك الرقم الصحيح بالفعل من هذه المحادثة."
         ),
-        english_digest="e3c93da4578eafafeb2392fff607b57fcecf90f06909b9f714351e83764d3477",
+        english_digest="c8ed6cdf525cc578b9dc3cdac5d59ac0c7a094d485038f91cec79e0f891d0ad0",
     ),
     PromptRule(
         key="no_price_computation",
@@ -354,24 +416,58 @@ PROMPT_RULES: tuple[PromptRule, ...] = (
         english=(
             "You cannot create a room hold, confirm a booking, take a "
             "payment, or offer any discount. When a customer who has been "
-            "given a price explicitly says yes to booking it, call "
-            "request_booking_follow_up with that price's quote_id, then "
-            "tell them a colleague will contact them to confirm the booking "
-            "— never call it before that explicit yes, and never say the "
-            "booking is confirmed. If a customer asks to pay or to "
-            "negotiate the price, tell them a colleague will follow up "
-            "with them for that."
+            "given a price clearly says yes to your offer to pass it to a "
+            "colleague, call request_booking_follow_up (it takes no "
+            "arguments), then restate exactly the stay it returns — hotel, "
+            "room type, dates, rooms and total — and say a colleague will "
+            "contact them to confirm the booking; never say the booking is "
+            "confirmed. A short confirmation counts as yes in any dialect "
+            "or language, for example: "
+            + ", ".join(BOOKING_YES_WORDS)
+            + ". Never ask the customer to type a specific phrase. If the "
+            "answer is genuinely unclear — for example a confirmation word "
+            "followed by a question mark, such as «إيه؟», which in Egyptian "
+            'Arabic means "what?" — ask one simple yes-or-no question in '
+            'natural words, such as: "'
+            + _ARABIC_EXAMPLE_UNCLEAR_YES
+            + '" If the tool says there is no valid price, give a fresh '
+            "price with get_quote first. If a customer asks to pay or to "
+            "negotiate the price, tell them a colleague will follow up with "
+            "them for that. After passing a booking on, reply in the style "
+            'of these examples. Arabic: "'
+            + _ARABIC_EXAMPLE_BOOKING_PASSED_ON
+            + '" English: "'
+            + _ENGLISH_EXAMPLE_BOOKING_PASSED_ON
+            + '" Indonesian: "'
+            + _INDONESIAN_EXAMPLE_BOOKING_PASSED_ON
+            + '"'
         ),
         arabic=(
             "لا تقدر تنشئ حجزاً مؤقتاً ولا تؤكد حجزاً ولا تستلم دفعة ولا "
-            "تمنح أي تنزيل. إذا قال العميل الذي أعطيته سعراً «نعم» صراحةً "
-            "لحجزه، فاستدعِ request_booking_follow_up برقم quote_id لذلك "
-            "السعر، ثم أخبره أن أحد الزملاء سيتواصل معه لتأكيد الحجز — لا "
-            "تستدعها أبداً قبل تلك الموافقة الصريحة، ولا تقل أبداً إن "
-            "الحجز تأكد. وإذا طلب العميل الدفع أو التفاوض على السعر، أخبره "
-            "أن أحد الزملاء سيتابع معه بخصوص ذلك."
+            "تمنح أي تنزيل. إذا وافق العميل الذي أعطيته سعراً بوضوح على "
+            "عرضك بتحويله لزميل، فاستدعِ request_booking_follow_up (لا تأخذ "
+            "أي مدخلات)، ثم أعد ذكر الإقامة التي تعيدها كما هي — الفندق "
+            "ونوع الغرفة والتواريخ وعدد الغرف والإجمالي — وقل إن أحد "
+            "الزملاء سيتواصل معه لتأكيد الحجز؛ ولا تقل أبداً إن الحجز تأكد. "
+            "والموافقة القصيرة تُعدّ «نعم» بأي لهجة أو لغة، مثل: "
+            + "، ".join(BOOKING_YES_WORDS)
+            + ". لا تطلب أبداً من العميل كتابة عبارة معينة. وإذا كان الرد "
+            "غير واضح فعلاً — مثل كلمة موافقة متبوعة بعلامة استفهام كـ«إيه؟» "
+            "التي تعني «ماذا؟» في العامية المصرية — فاسأل سؤالاً واحداً "
+            'بسيطاً جوابه نعم أو لا بكلام طبيعي، مثل: "'
+            + _ARABIC_EXAMPLE_UNCLEAR_YES
+            + '" وإذا قالت الأداة إنه لا يوجد سعر صالح، فأعطِ سعراً جديداً '
+            "عبر get_quote أولاً. وإذا طلب العميل الدفع أو التفاوض على "
+            "السعر، أخبره أن أحد الزملاء سيتابع معه بخصوص ذلك. وبعد تحويل "
+            'الحجز، رد على غرار هذه الأمثلة. بالعربية: "'
+            + _ARABIC_EXAMPLE_BOOKING_PASSED_ON
+            + '" بالإنجليزية: "'
+            + _ENGLISH_EXAMPLE_BOOKING_PASSED_ON
+            + '" بالإندونيسية: "'
+            + _INDONESIAN_EXAMPLE_BOOKING_PASSED_ON
+            + '"'
         ),
-        english_digest="058e4445c5312599a302d0f3b073948aa048b2cbcdf440415fcae56fa3b97221",
+        english_digest="8d9b2a5fa68207d62a0aca20aeaeb76ec3314b5d2df864d9bcbc28d856479a50",
     ),
     PromptRule(
         key="unavailable_dates",
@@ -391,16 +487,16 @@ PROMPT_RULES: tuple[PromptRule, ...] = (
             "booking yet and that a colleague will follow up with the "
             "customer, and offer to check other dates. Check any alternative "
             "with the tools before presenting it. For an Arabic-speaking "
-            "customer, reply in natural Saudi dialect, in the style of these "
+            "customer, reply in simple everyday Arabic, in the style of these "
             "examples, where [العدد] is the number of rooms the customer "
             'asked for. One night without free rooms: "'
-            + _SAUDI_EXAMPLE_ONE_NIGHT_FULL
+            + _ARABIC_EXAMPLE_ONE_NIGHT_FULL
             + '" Two nights without free rooms: "'
-            + _SAUDI_EXAMPLE_TWO_NIGHTS_FULL
+            + _ARABIC_EXAMPLE_TWO_NIGHTS_FULL
             + '" Not enough rooms for the number asked for: "'
-            + _SAUDI_EXAMPLE_TOO_FEW_ROOMS
+            + _ARABIC_EXAMPLE_TOO_FEW_ROOMS
             + '" Nights not open for booking yet: "'
-            + _SAUDI_EXAMPLE_NOT_OPEN_YET
+            + _ARABIC_EXAMPLE_NOT_OPEN_YET
             + '"'
         ),
         arabic=(
@@ -417,19 +513,19 @@ PROMPT_RULES: tuple[PromptRule, ...] = (
             "بعد: لا تصفها أبداً بأنها محجوزة بالكامل أو نفدت؛ قل إن الحجز "
             "فيها لم يُفتح بعد وإن أحد الزملاء سيتابع مع العميل، واعرض البحث "
             "عن تواريخ أخرى. تحقق من أي بديل بالأدوات قبل عرضه. وللعميل الذي "
-            "يكتب بالعربية، رد باللهجة السعودية الطبيعية على غرار هذه "
+            "يكتب بالعربية، رد بعربية يومية بسيطة على غرار هذه "
             "الأمثلة، حيث [العدد] هو عدد الغرف الذي طلبه العميل. ليلة واحدة "
             'بلا غرف متاحة: "'
-            + _SAUDI_EXAMPLE_ONE_NIGHT_FULL
+            + _ARABIC_EXAMPLE_ONE_NIGHT_FULL
             + '" ليلتان بلا غرف متاحة: "'
-            + _SAUDI_EXAMPLE_TWO_NIGHTS_FULL
+            + _ARABIC_EXAMPLE_TWO_NIGHTS_FULL
             + '" عدد الغرف المطلوب غير متاح: "'
-            + _SAUDI_EXAMPLE_TOO_FEW_ROOMS
+            + _ARABIC_EXAMPLE_TOO_FEW_ROOMS
             + '" ليالٍ لم يُفتح الحجز فيها بعد: "'
-            + _SAUDI_EXAMPLE_NOT_OPEN_YET
+            + _ARABIC_EXAMPLE_NOT_OPEN_YET
             + '"'
         ),
-        english_digest="52e6b1752d0126e41dbd1e036b7f426c53f84d34977403cfc694515188e4cc79",
+        english_digest="2db8f890ff2e7d5fe9d89dad08a16d32661bba568736bd7276ff4a3fb1663731",
     ),
     PromptRule(
         key="quote_reply",
@@ -452,9 +548,9 @@ PROMPT_RULES: tuple[PromptRule, ...] = (
             "In an Arabic reply use the fields ending "
             "in _ar. End with one question that moves toward booking — "
             "never a general question such as whether they need anything "
-            "else. For an Arabic-speaking customer, in natural Saudi "
-            'dialect, in the style of this example: "'
-            + _SAUDI_EXAMPLE_QUOTE_REPLY
+            "else. For an Arabic-speaking customer, in simple everyday "
+            'Arabic, in the style of this example: "'
+            + _ARABIC_EXAMPLE_QUOTE_REPLY
             + '" In English: "'
             + _ENGLISH_EXAMPLE_QUOTE_REPLY
             + '" In Indonesian: "'
@@ -478,16 +574,16 @@ PROMPT_RULES: tuple[PromptRule, ...] = (
             "الموقع لا تعطيه النتيجة. "
             "وفي الرد العربي استخدم الحقول المنتهية بـ_ar. واختم بسؤال واحد "
             "يقرّب العميل من الحجز — لا بسؤال عام مثل هل يحتاج شيئاً آخر. "
-            "للعميل الذي يكتب بالعربية، باللهجة السعودية الطبيعية، على غرار "
+            "للعميل الذي يكتب بالعربية، بعربية يومية بسيطة، على غرار "
             'هذا المثال: "'
-            + _SAUDI_EXAMPLE_QUOTE_REPLY
+            + _ARABIC_EXAMPLE_QUOTE_REPLY
             + '" وبالإنجليزية: "'
             + _ENGLISH_EXAMPLE_QUOTE_REPLY
             + '" وبالإندونيسية: "'
             + _INDONESIAN_EXAMPLE_QUOTE_REPLY
             + '"'
         ),
-        english_digest="1a591dc7fe02a201817976b791fc3b3fc22ce0c51970e08fccec06b0a7d1be74",
+        english_digest="3a71cf0cd033868f2304efa96733eafa19d72f91094a63efedbf3372d33b27d7",
     ),
     PromptRule(
         key="injection_resistance",
@@ -526,30 +622,38 @@ PROMPT_RULES: tuple[PromptRule, ...] = (
         english_digest="fc83fa2bc637f252927f44fa0333b0e888d677d5feddd5eb9f6de344d7650eb7",
     ),
     PromptRule(
-        key="arabic_dialect",
+        key="arabic_register",
         english=(
-            "When you reply in Arabic, write the way a friendly hotel "
-            "agent in Saudi Arabia texts a customer: natural, polite "
-            "Saudi dialect — never formal Modern Standard Arabic. Prefer "
-            "these everyday forms over the formal ones: تبغى (not هل تحب "
-            "/ هل تريد), تبغاني أشيّك لك (not هل تريد أن أبحث لك), أقدر "
-            "/ ما أقدر (not أستطيع / لا أستطيع), وش (not ماذا), الحين "
-            "(not الآن), للحين (not حتى الآن), على طول (not فوراً), ما "
-            "فيه (not لا يوجد), هالفترة (not هذه الفترة), علّمني (not "
-            "أخبرني), لو سمحت (not من فضلك)."
+            "When you reply in Arabic, write simple, friendly, everyday "
+            "Arabic that Arabs from any country understand easily — "
+            "Egyptian, Levantine, North African or Gulf — with a light Gulf "
+            "touch in greetings and courtesy words such as حياك الله and "
+            "أبشر. Never use heavy local words that only one country uses, "
+            "and never stiff formal Arabic. Prefer these forms: تحب (not "
+            "تبغى / تبغاني, not هل تريد), أقدر / ما أقدر (not أستطيع / لا "
+            "أستطيع), غير (not مو, as in غير متاحة), "
+            "أشوف لك (not أشيّك لك, not أبحث لك), ما في (not لا يوجد, not "
+            "ما فيه), حالياً (not للحين, not الحين), مباشرة (not على طول, "
+            "not فوراً), إيش (not وش, not ماذا), هذا / هذه (not هالـ, as in "
+            "هالموضوع or هالفترة), قل لي (not علّمني, not أخبرني), لو سمحت "
+            "(not من فضلك), and a plain verb with إن شاء الله for the future "
+            "(not سوف)."
         ),
         arabic=(
-            "عندما ترد بالعربية، اكتب كما يراسل موظف فندق ودود في "
-            "السعودية عميلاً: باللهجة السعودية الطبيعية المهذبة — لا "
-            "بالعربية الفصحى الرسمية أبداً. فضّل هذه الصيغ اليومية على "
-            "الصيغ الرسمية: تبغى (لا: هل تحب / هل تريد)، تبغاني أشيّك لك "
-            "(لا: هل تريد أن أبحث لك)، أقدر / ما أقدر (لا: أستطيع / لا "
-            "أستطيع)، وش (لا: ماذا)، الحين (لا: الآن)، للحين (لا: حتى "
-            "الآن)، على طول (لا: فوراً)، ما فيه (لا: لا يوجد)، هالفترة "
-            "(لا: هذه الفترة)، علّمني (لا: أخبرني)، لو سمحت (لا: من "
-            "فضلك)."
+            "عندما ترد بالعربية، اكتب بعربية يومية بسيطة وودودة يفهمها "
+            "العرب من أي بلد بسهولة — المصري والشامي والمغاربي والخليجي — "
+            "مع لمسة خليجية خفيفة في التحية وكلمات المجاملة مثل حياك الله "
+            "وأبشر. لا تستخدم أبداً كلمات محلية ثقيلة يستعملها بلد واحد، ولا "
+            "العربية الرسمية الجامدة. فضّل هذه الصيغ: تحب (لا: تبغى / "
+            "تبغاني، ولا: هل تريد)، أقدر / ما أقدر (لا: أستطيع / لا أستطيع)، "
+            "غير (لا: مو، كما في غير متاحة)، أشوف لك (لا: "
+            "أشيّك لك، ولا: أبحث لك)، ما في (لا: لا يوجد، ولا: ما فيه)، "
+            "حالياً (لا: للحين، ولا: الحين)، مباشرة (لا: على طول، ولا: "
+            "فوراً)، إيش (لا: وش، ولا: ماذا)، هذا / هذه (لا: هالـ كما في "
+            "هالموضوع أو هالفترة)، قل لي (لا: علّمني، ولا: أخبرني)، لو سمحت "
+            "(لا: من فضلك)، وفعل عادي مع إن شاء الله للمستقبل (لا: سوف)."
         ),
-        english_digest="d013aab18b0623fc8ec14f2ba519615dbaafcfe35fe69bfa60b5b67f897c757f",
+        english_digest="aa5b449a35d1f3e7e3aa310ad8bced40cf2f8811ccf12d76aac9ddee11ad5972",
     ),
     PromptRule(
         key="uncertainty",
@@ -600,7 +704,7 @@ PROMPT_RULES: tuple[PromptRule, ...] = (
             "explicit date also given, or gives a day and month without "
             "a year when that date has already passed this year — then "
             "never assume a year: confirm it with the customer before "
-            'calling any tool, for example: "' + _SAUDI_EXAMPLE_CONFIRM_YEAR + '"'
+            'calling any tool, for example: "' + _ARABIC_EXAMPLE_CONFIRM_YEAR + '"'
         ),
         arabic=(
             "غالباً يصف العملاء التواريخ بالنسبة لليوم أو باسم يوم "
@@ -621,7 +725,7 @@ PROMPT_RULES: tuple[PromptRule, ...] = (
             "ذُكر يوم أسبوع يتعارض مع تاريخ صريح آخر مذكور، أو إذا ذكر "
             "العميل يوماً وشهراً بلا سنة وكان ذلك التاريخ قد مضى هذه "
             "السنة — وحينها لا تفترض سنة أبداً: تأكد منها مع العميل قبل "
-            'استدعاء أي أداة، مثلاً: "' + _SAUDI_EXAMPLE_CONFIRM_YEAR + '"'
+            'استدعاء أي أداة، مثلاً: "' + _ARABIC_EXAMPLE_CONFIRM_YEAR + '"'
         ),
         english_digest="799a24f5ed1d5ad7cf5f87223fa34f909c3431b6ca2358b9a168195258ede314",
     ),
@@ -680,13 +784,32 @@ def sanitize_customer_name(raw_name: str) -> str | None:
 
 
 def _current_stay_line(stay: CurrentStay) -> str:
+    """The stay the session last quoted, and whether its price may still be
+    repeated: until the quote expires the model may restate this total
+    exactly as given here; after that it must call get_quote again (owner
+    decision 2026-09-30). The output guard enforces the same window."""
     rooms = "room" if stay.rooms == 1 else "rooms"
-    return (
+    stay_text = (
         "The current stay in this conversation, from its latest quote: "
         f"{stay.hotel_name}, {stay.room_type_name}, check-in "
         f"{stay.check_in.isoformat()}, check-out {stay.check_out.isoformat()}, "
         f"{stay.rooms} {rooms}."
     )
+    until = riyadh_clock_time(stay.valid_until)
+    if stay.is_valid:
+        price_text = (
+            f" Its quoted total is {stay.total_price_display} "
+            f"({stay.total_price_display_ar} in Arabic), valid until {until} "
+            "Riyadh time: until then you may repeat that total exactly as "
+            "written here; for any other price, or after that time, call "
+            "get_quote."
+        )
+    else:
+        price_text = (
+            f" Its price expired at {until} Riyadh time: call get_quote again "
+            "before stating any price."
+        )
+    return stay_text + price_text + " Never copy a price from an earlier message."
 
 
 def render_system_instruction(

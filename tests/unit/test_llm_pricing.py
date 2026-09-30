@@ -19,6 +19,7 @@ from services.agent.llm.pricing import (
     TokenRates,
     estimate_cost_usd,
     riyadh_calendar_day,
+    riyadh_clock_time,
     riyadh_day_bounds_utc,
 )
 
@@ -124,3 +125,14 @@ def test_riyadh_day_bounds_utc_spans_exactly_one_riyadh_day() -> None:
     assert end == datetime(2026, 9, 2, 21, 0, 0, tzinfo=UTC)
     assert riyadh_calendar_day(start) == date(2026, 9, 2)
     assert riyadh_calendar_day(end) == date(2026, 9, 3)
+
+
+def test_riyadh_clock_time_is_utc_plus_three() -> None:
+    assert riyadh_clock_time(datetime(2026, 9, 30, 20, 55, tzinfo=UTC)) == "23:55"
+    assert riyadh_clock_time(datetime(2026, 9, 30, 21, 5, tzinfo=UTC)) == "00:05"
+
+
+def test_riyadh_clock_time_refuses_a_naive_timestamp() -> None:
+    naive = datetime(2026, 9, 30, 20, 55, tzinfo=UTC).replace(tzinfo=None)
+    with pytest.raises(ValueError, match="timezone-aware"):
+        riyadh_clock_time(naive)

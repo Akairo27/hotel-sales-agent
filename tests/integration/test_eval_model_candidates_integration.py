@@ -163,7 +163,7 @@ def _write_the_arabic_quote_reply(turns: list[Turn]) -> ModelTurn:
             f"الإجمالي *{quote['total_price_display_ar']}* "
             f"({quote['price_per_night_display_ar']} لليلة).\n"
             f"يبعد {quote['distance_to_haram_display_ar']} عن الحرم.\n"
-            "تبغاني أبلّغ زميلي يأكّد لك الحجز؟"
+            "تحب أبلّغ زميلي يؤكّد لك الحجز؟"
         ),
         tool_calls=(),
     )
@@ -472,3 +472,104 @@ def test_a_database_without_the_schema_gets_a_clear_error(
             require_only_seeded_hotels(db_conn)
     finally:
         db_conn.execute("RESET search_path")
+
+
+def _pass_the_booking_on(_turns: list[Turn]) -> ModelTurn:
+    return ModelTurn(
+        text=None,
+        tool_calls=(ToolCall(id="call_0", name="request_booking_follow_up", args={}),),
+    )
+
+
+def _restate_what_was_passed_on(turns: list[Turn]) -> ModelTurn:
+    """The approved Arabic reply after a booking is passed on, filled from
+    the tool's own summary."""
+    passed_on = _last_quote(turns)
+    return ModelTurn(
+        text=(
+            f"أبشر، بلّغت زميلي بطلبك: {passed_on['hotel_name']}، غرفة "
+            f"{passed_on['room_type_name']}، من 5 إلى 7 أكتوبر، الإجمالي "
+            f"{passed_on['total_price_display_ar']}. يتواصل معك قريباً إن شاء "
+            "الله لتأكيد الحجز."
+        ),
+        tool_calls=(),
+    )
+
+
+def test_a_clear_yes_passes_the_seeded_quote_on_and_restates_it(
+    db_conn: psycopg.Connection[Any],
+) -> None:
+    """Fix for the live test of 2026-09-30: the argument-free tool finds the
+    quote the customer answered (seeded 5 minutes earlier), opens the real
+    escalation, and the restated total passes the guard inside the window."""
+    transport = _ScriptedTransport([_pass_the_booking_on, _restate_what_was_passed_on])
+
+    result = _run(db_conn, _scenario("booking_yes_gulf"), transport)
+
+    assert result.booking_ok is True
+    assert result.guard_allowed is True
+    assert result.passed
+    requests = db_conn.execute(
+        "SELECT count(*) FROM escalations WHERE reason = 'booking_requested' "
+        "AND quote_id IS NOT NULL"
+    ).fetchone()
+    assert requests == (1,)
+
+
+def test_the_seeded_quote_is_as_old_as_the_scenario_says(
+    db_conn: psycopg.Connection[Any],
+) -> None:
+    _run(db_conn, _scenario("requote_after_expiry_ar"), _ScriptedTransport([_say("x")]))
+
+    row = db_conn.execute(
+        "SELECT ask_price_total, extract(epoch FROM now() - created_at) / 60 "
+        "FROM quotes ORDER BY id LIMIT 1"
+    ).fetchone()
+    assert row is not None
+    total, age_minutes = row
+    assert total == 80_000
+    assert 45 <= age_minutes < 46
+
+
+def test_copying_an_expired_price_is_blocked_by_the_guard(
+    db_conn: psycopg.Connection[Any],
+) -> None:
+    """The live-test failure, replayed: the price from the earlier reply is
+    past its validity, so restating it fails the guard and the scenario."""
+    transport = _ScriptedTransport([_say("Test Hotel، الإجمالي *800.00 ريال*.")])
+
+    result = _run(db_conn, _scenario("requote_after_expiry_ar"), transport)
+
+    assert result.guard_allowed is False
+    assert result.quote_ok is False
+    assert not result.passed
+
+
+def test_a_fresh_quote_after_expiry_passes(db_conn: psycopg.Connection[Any]) -> None:
+    transport = _ScriptedTransport(
+        [
+            _search_hotels_step(),
+            _call_tool("get_quote", "2026-10-05", "2026-10-07"),
+            _write_the_arabic_quote_reply,
+        ]
+    )
+
+    result = _run(db_conn, _scenario("requote_after_expiry_ar"), transport)
+
+    assert result.quote_ok is True
+    assert result.quote_reply_ok is True
+    assert result.guard_allowed is True
+    assert result.passed
+
+
+def test_restating_the_price_within_the_window_passes_the_guard(
+    db_conn: psycopg.Connection[Any],
+) -> None:
+    transport = _ScriptedTransport(
+        [_say("The total of 900.00 SAR covers the room only, without breakfast.")]
+    )
+
+    result = _run(db_conn, _scenario("clarify_within_window_en"), transport)
+
+    assert result.guard_allowed is True
+    assert result.passed

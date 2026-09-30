@@ -7,7 +7,9 @@ the tripwire real.
 
 from __future__ import annotations
 
-from datetime import date
+import dataclasses
+import re
+from datetime import UTC, date, datetime
 
 import pytest
 
@@ -294,6 +296,11 @@ _STAY = CurrentStay(
     check_in=date(2026, 10, 20),
     check_out=date(2026, 10, 22),
     rooms=1,
+    total_price_display="687.70 SAR",
+    total_price_display_ar="687.70 ريال",
+    # 23:55 in Riyadh (UTC+3).
+    valid_until=datetime(2026, 9, 30, 20, 55, tzinfo=UTC),
+    is_valid=True,
 )
 
 
@@ -321,6 +328,35 @@ def test_current_stay_line_is_absent_without_a_quoted_stay() -> None:
     assert "The current stay" not in _render_with_stay(None)
 
 
+def test_a_valid_quote_may_be_repeated_until_its_riyadh_expiry_time() -> None:
+    """Owner decision 2026-09-30: the only price the model may state without
+    calling get_quote is this total, exactly as given, until it expires."""
+    text = _render_with_stay(_STAY)
+    assert (
+        "Its quoted total is 687.70 SAR (687.70 ريال in Arabic), valid until "
+        "23:55 Riyadh time"
+    ) in text
+    assert "Never copy a price from an earlier message." in text
+
+
+def test_an_expired_quote_gives_no_price_and_demands_a_fresh_one() -> None:
+    expired = dataclasses.replace(_STAY, is_valid=False)
+    text = _render_with_stay(expired)
+    assert "687.70" not in text
+    assert (
+        "Its price expired at 23:55 Riyadh time: call get_quote again before "
+        "stating any price."
+    ) in text
+    assert "Never copy a price from an earlier message." in text
+
+
+def test_tool_grounding_allows_only_the_valid_current_stay_total() -> None:
+    rule = _rule("tool_grounding")
+    assert "current stay's total, exactly as given below" in rule.english
+    assert "only while it is still valid" in rule.english
+    assert "never copy a price from an earlier message" in rule.english
+
+
 def test_relative_date_resolution_restates_dates_only_when_needed() -> None:
     rule = _rule("relative_date_resolution")
     assert "when you first resolve them" in rule.english
@@ -342,11 +378,19 @@ def test_language_matching_forbids_an_appended_translation() -> None:
         assert language in rule.english
 
 
-def test_arabic_dialect_rule_prefers_the_approved_saudi_forms() -> None:
-    rule = _rule("arabic_dialect")
-    assert "never formal Modern Standard Arabic" in rule.english
-    for saudi_form in ("تبغى", "أقدر", "وش", "للحين", "على طول", "ما فيه", "علّمني"):
-        assert saudi_form in rule.english
+def test_arabic_register_rule_is_white_arabic_with_a_light_gulf_touch() -> None:
+    """Owner decision 2026-09-30: most Arabic-speaking customers are not
+    Saudi -- simple Arabic every Arab understands, a light Gulf touch in
+    courtesy words, no heavy local words and no stiff formal Arabic."""
+    rule = _rule("arabic_register")
+    assert "Arabs from any country understand easily" in rule.english
+    assert "light Gulf touch" in rule.english
+    for preferred in ("تحب", "أقدر", "أشوف لك", "ما في", "حالياً", "مباشرة", "قل لي"):
+        assert preferred in rule.english
+    for courtesy in ("حياك الله", "أبشر"):
+        assert courtesy in rule.english
+    for avoided in _HEAVY_LOCAL_WORDS + _FORMAL_ARABIC_PHRASES:
+        assert avoided in rule.english, avoided
 
 
 def test_price_currency_word_covers_every_price_display_get_quote_returns() -> None:
@@ -388,7 +432,6 @@ _ARABIC_INDIC_DIGITS = frozenset(
 # Formal (Modern Standard) phrasing the owner does not want in a customer
 # reply (2026-09-30) -- the formal side of arabic_dialect's pairs.
 _FORMAL_ARABIC_PHRASES = (
-    "هل تحب",
     "هل تريد",
     "أستطيع",
     "ماذا",
@@ -396,6 +439,29 @@ _FORMAL_ARABIC_PHRASES = (
     "سوف",
     "لا يوجد",
 )
+# Heavy local words the owner does not want in a customer reply
+# (2026-09-30, "white" Arabic): Saudi/Gulf forms most non-Gulf Arabs find
+# foreign. Matched as whole words, so مو never flags موافق or الموقع.
+_HEAVY_LOCAL_WORDS = (
+    "أشيّك",
+    "هالموضوع",
+    "هالفترة",
+    "للحين",
+    "على طول",
+    "وش",
+    "تبغى",
+    "تبغاني",
+    "مو",
+)
+_ARABIC_WORD = re.compile("[\u0621-\u064a\u0670\u064b-\u0652]+")
+
+
+def _uses(text: str, phrase: str) -> bool:
+    """Whether text uses phrase: as a whole word for one word, as a
+    substring for several."""
+    if " " in phrase:
+        return phrase in text
+    return phrase in _ARABIC_WORD.findall(text)
 
 
 def test_no_rule_or_example_uses_arabic_indic_digits() -> None:
@@ -405,13 +471,21 @@ def test_no_rule_or_example_uses_arabic_indic_digits() -> None:
         assert not _ARABIC_INDIC_DIGITS & set(example)
 
 
-def test_customer_facing_arabic_examples_are_saudi_not_formal() -> None:
-    """Every customer-facing Arabic text we write ourselves: the rules'
-    examples and the fixed texts (services/agent/fixed_texts.py)."""
+def test_customer_facing_arabic_texts_are_white_arabic() -> None:
+    """Every customer-facing Arabic text we write ourselves -- the rules'
+    examples and the fixed texts (services/agent/fixed_texts.py) -- uses
+    neither stiff formal phrasing nor heavy local words (arabic_register)."""
     texts = (*CUSTOMER_FACING_ARABIC_EXAMPLES, FALLBACK.arabic, PLEASE_TYPE.arabic)
     for text in texts:
-        for phrase in _FORMAL_ARABIC_PHRASES:
-            assert phrase not in text, (phrase, text)
+        for phrase in _FORMAL_ARABIC_PHRASES + _HEAVY_LOCAL_WORDS:
+            assert not _uses(text, phrase), (phrase, text)
+
+
+def test_heavy_local_words_match_whole_words_only() -> None:
+    assert _uses("الفترة مو متاحة", "مو")
+    assert not _uses("أنا موافق على الموقع", "مو")
+    assert _uses("أخدمك على طول", "على طول")
+    assert not _uses("وشكراً", "وش")
 
 
 def test_quote_reply_names_every_field_a_complete_reply_copies() -> None:
@@ -438,7 +512,7 @@ def test_quote_reply_names_every_field_a_complete_reply_copies() -> None:
 
 def test_quote_reply_examples_are_short_and_end_with_a_question() -> None:
     examples = {
-        "ar": prompt_module._SAUDI_EXAMPLE_QUOTE_REPLY,
+        "ar": prompt_module._ARABIC_EXAMPLE_QUOTE_REPLY,
         "en": prompt_module._ENGLISH_EXAMPLE_QUOTE_REPLY,
         "id": prompt_module._INDONESIAN_EXAMPLE_QUOTE_REPLY,
     }
@@ -455,13 +529,41 @@ def test_search_rule_retries_once_in_arabic_and_confirms_before_quoting() -> Non
     assert "call search_hotels once more" in rule.english
     assert "do not check availability or give a price in this reply" in rule.english
     assert "never search a third time" in rule.english
-    assert prompt_module._SAUDI_EXAMPLE_CONFIRM_HOTEL in rule.english
+    assert prompt_module._ARABIC_EXAMPLE_CONFIRM_HOTEL in rule.english
     assert '"Do you mean [hotel name]?"' in rule.english
     assert '"Maksud Anda [hotel name]?"' in rule.english
 
 
-def test_no_booking_actions_hands_an_explicit_yes_to_the_follow_up_tool() -> None:
+def test_no_booking_actions_takes_a_yes_in_any_dialect_and_never_a_phrase() -> None:
+    """Live test 2026-09-30: «ايه» was not taken as a yes and the customer
+    was asked to type a phrase. The owner's yes list is in the rule, the
+    phrase demand is forbidden, and an unclear answer gets one natural
+    question."""
     rule = _rule("no_booking_actions")
-    assert "request_booking_follow_up" in rule.english
-    assert "explicitly says yes" in rule.english
+    assert "request_booking_follow_up (it takes no arguments)" in rule.english
+    assert "restate exactly the stay it returns" in rule.english
     assert "never say the booking is confirmed" in rule.english
+    assert "Never ask the customer to type a specific phrase" in rule.english
+    for word in prompt_module.BOOKING_YES_WORDS:
+        assert word in rule.english
+    for word in ("ايه", "أيوه", "صافي", "iya", "ok"):
+        assert word in prompt_module.BOOKING_YES_WORDS
+    assert "«إيه؟»" in rule.english
+    assert prompt_module._ARABIC_EXAMPLE_UNCLEAR_YES in rule.english
+
+
+def test_booking_passed_on_examples_restate_the_stay_and_its_total() -> None:
+    for example in (
+        prompt_module._ARABIC_EXAMPLE_BOOKING_PASSED_ON,
+        prompt_module._ENGLISH_EXAMPLE_BOOKING_PASSED_ON,
+        prompt_module._INDONESIAN_EXAMPLE_BOOKING_PASSED_ON,
+    ):
+        assert example in _rule("no_booking_actions").english
+    assert "[السعر الإجمالي]" in prompt_module._ARABIC_EXAMPLE_BOOKING_PASSED_ON
+    assert "أبشر" in prompt_module._ARABIC_EXAMPLE_BOOKING_PASSED_ON
+
+
+def test_search_rule_confirms_a_hotel_known_only_by_translation_or_context() -> None:
+    rule = _rule("search_before_resolving_a_hotel")
+    assert "only by translating or transliterating their words" in rule.english
+    assert "including from earlier in this conversation" in rule.english
