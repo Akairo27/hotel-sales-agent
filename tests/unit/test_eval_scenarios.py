@@ -22,11 +22,16 @@ from tests.eval_model_candidates import (
 )
 from tests.eval_scenarios import (
     EVAL_NOW_HOUR_UTC,
+    LATIN_NAME_OF_THE_ARABIC_HOTEL,
     SCENARIOS,
+    SEEDED_ARABIC_HOTEL_NAME,
     SEEDED_HOTEL_NAME,
     Scenario,
     ScenarioResult,
     asked_instead_of_guessing,
+    hotel_name_retried_and_confirmed,
+    mentions_night_count,
+    quote_reply_complete,
     quote_was_priced,
     render_model_summary,
     render_results_table,
@@ -69,27 +74,42 @@ def _result(**overrides: Any) -> ScenarioResult:
     return ScenarioResult(**fields)
 
 
-def test_there_are_nine_scenarios_with_unique_keys_and_the_planned_mix() -> None:
-    assert len(SCENARIOS) == 9
-    assert len({s.key for s in SCENARIOS}) == 9
+def test_there_are_thirteen_scenarios_with_unique_keys_and_the_planned_mix() -> None:
+    assert len(SCENARIOS) == 13
+    assert len({s.key for s in SCENARIOS}) == 13
     assert Counter(s.category for s in SCENARIOS) == {
         "relative-date": 3,
-        "price": 2,
+        "price": 4,
         "attack": 3,
         "clarify": 1,
+        "hotel-name": 2,
     }
 
 
-def test_every_scenario_but_the_no_hotel_one_names_the_hotel_as_stored() -> None:
+def test_every_scenario_names_the_hotel_as_stored_but_the_approved_exceptions() -> None:
     """Owner condition (2026-09-30): the exact stored name, never a
-    translation or transliteration -- alternate names are a known gap this
-    eval must not measure."""
+    translation or transliteration -- except the no-hotel scenario, which
+    names none, and the two hotel-name scenarios, which measure exactly the
+    Arabic retry of a Latin name (owner-approved the same day)."""
     assert SEEDED_HOTEL_NAME == "Test Hotel"
     for scenario in SCENARIOS:
         if scenario.expects_clarification:
             assert SEEDED_HOTEL_NAME not in scenario.customer_message
+        elif scenario.category == "hotel-name":
+            texts = [scenario.customer_message] + [
+                body
+                for direction, body in scenario.earlier_messages
+                if direction == "inbound"
+            ]
+            assert not any(SEEDED_ARABIC_HOTEL_NAME in text for text in texts)
+            assert any(LATIN_NAME_OF_THE_ARABIC_HOTEL in text for text in texts)
         else:
             assert SEEDED_HOTEL_NAME in scenario.customer_message, scenario.key
+
+
+def test_every_price_scenario_language_is_covered() -> None:
+    languages = {s.language for s in SCENARIOS if s.requires_quote}
+    assert languages == {"ar", "en", "id"}
 
 
 def test_only_the_no_hotel_scenario_expects_a_clarifying_question() -> None:
@@ -322,3 +342,150 @@ def test_the_results_table_shows_the_setting_and_the_token_split() -> None:
     assert "| vendor/model-1 | low | price_direct |" in table
     assert "| 120 | 30 | 12 |" in table
     assert table.rstrip().endswith("| - |")
+
+
+def _priced_quote(**overrides: Any) -> ToolCallRecord:
+    result: dict[str, Any] = {
+        "priced": True,
+        "hotel_name": "Test Hotel",
+        "room_type_name": "Standard",
+        "night_count": 2,
+        "total_price_display": "900.00 SAR",
+        "total_price_display_ar": "900.00 ريال",
+        "price_per_night_display": "450.00 SAR",
+        "price_per_night_display_ar": "450.00 ريال",
+        "lowest_night_price_display": None,
+        "lowest_night_price_display_ar": None,
+        "highest_night_price_display": None,
+        "highest_night_price_display_ar": None,
+        "distance_to_haram_display": "350 m",
+        "distance_to_haram_display_ar": "350 متر",
+    }
+    result.update(overrides)
+    return ToolCallRecord(name="get_quote", args={}, result=result)
+
+
+_COMPLETE_ENGLISH_REPLY = (
+    "Test Hotel, Standard room, 2 nights, 5 to 7 October:\n"
+    "Total *900.00 SAR* (450.00 SAR per night).\n"
+    "350 m from the Haram.\n"
+    "Shall I pass this to a colleague to confirm your booking?"
+)
+_COMPLETE_ARABIC_REPLY = (
+    "Test Hotel، غرفة Standard، ليلتين من 5 إلى 7 أكتوبر:\n"
+    "الإجمالي *900.00 ريال* (450.00 ريال لليلة).\n"
+    "يبعد 350 متر عن الحرم.\n"
+    "تبغاني أبلّغ زميلي يأكّد لك الحجز؟"
+)
+
+
+def test_a_complete_quote_reply_passes_in_english_and_arabic() -> None:
+    assert quote_reply_complete(
+        _scenario("price_direct"), [_priced_quote()], _COMPLETE_ENGLISH_REPLY
+    )
+    assert quote_reply_complete(
+        _scenario("price_direct_ar"), [_priced_quote()], _COMPLETE_ARABIC_REPLY
+    )
+
+
+@pytest.mark.parametrize(
+    "reply",
+    [
+        "The total is 900.00 SAR.",
+        _COMPLETE_ENGLISH_REPLY.replace("350 m from the Haram.\n", ""),
+        _COMPLETE_ENGLISH_REPLY.replace(
+            "Shall I pass this to a colleague to confirm your booking?",
+            "Is there anything else I can help with?",
+        ),
+        _COMPLETE_ENGLISH_REPLY.rstrip("?") + ".",
+        _COMPLETE_ENGLISH_REPLY + "\nThank you!",
+    ],
+)
+def test_an_incomplete_or_generic_quote_reply_fails(reply: str) -> None:
+    assert (
+        quote_reply_complete(_scenario("price_direct"), [_priced_quote()], reply)
+        is False
+    )
+
+
+def test_a_quote_reply_with_nights_that_differ_needs_both_night_prices() -> None:
+    quote = _priced_quote(
+        price_per_night_display=None,
+        lowest_night_price_display="400.00 SAR",
+        highest_night_price_display="500.00 SAR",
+    )
+    ranged = _COMPLETE_ENGLISH_REPLY.replace(
+        "450.00 SAR per night", "from 400.00 SAR to 500.00 SAR per night"
+    )
+    assert quote_reply_complete(_scenario("price_direct"), [quote], ranged)
+    assert not quote_reply_complete(
+        _scenario("price_direct"), [quote], _COMPLETE_ENGLISH_REPLY
+    )
+
+
+def test_quote_reply_is_not_applicable_without_a_required_quote() -> None:
+    assert quote_reply_complete(_scenario("attack_authority"), [], "No.") is None
+
+
+def test_mentions_night_count_ignores_the_digit_inside_a_year() -> None:
+    assert not mentions_night_count("5 to 7 October 2026", 2, "en")
+    assert mentions_night_count("2 nights", 2, "en")
+    assert mentions_night_count("ليلتين من 5 إلى 7 أكتوبر", 2, "ar")
+    assert not mentions_night_count("ليلتين", 2, "en")
+
+
+def _search(name: str) -> ToolCallRecord:
+    return ToolCallRecord(
+        name="search_hotels", args={"hotel_name": name}, result={"hotels": []}
+    )
+
+
+def test_an_arabic_retry_and_a_confirmation_pass_the_name_scenario() -> None:
+    calls = [_search("Al Nokhba Hotel"), _search("النخبة")]
+    reply = f"Do you mean {SEEDED_ARABIC_HOTEL_NAME}?"
+
+    assert hotel_name_retried_and_confirmed(_scenario("name_retry_en"), calls, reply)
+
+
+@pytest.mark.parametrize(
+    ("calls", "reply"),
+    [
+        # no retry at all
+        ([_search("Al Nokhba Hotel")], f"Do you mean {SEEDED_ARABIC_HOTEL_NAME}?"),
+        # a retry that is not in Arabic
+        (
+            [_search("Al Nokhba Hotel"), _search("Nokhba")],
+            f"Do you mean {SEEDED_ARABIC_HOTEL_NAME}?",
+        ),
+        # priced before asking
+        (
+            [_search("Al Nokhba Hotel"), _search("النخبة"), _priced_quote()],
+            f"Do you mean {SEEDED_ARABIC_HOTEL_NAME}?",
+        ),
+        # asked, but without the stored name
+        ([_search("Al Nokhba Hotel"), _search("النخبة")], "Do you mean that hotel?"),
+    ],
+)
+def test_the_name_scenario_fails_without_retry_confirmation_or_restraint(
+    calls: list[ToolCallRecord], reply: str
+) -> None:
+    assert (
+        hotel_name_retried_and_confirmed(_scenario("name_retry_en"), calls, reply)
+        is False
+    )
+
+
+def test_name_retry_is_not_applicable_elsewhere() -> None:
+    assert hotel_name_retried_and_confirmed(_scenario("price_direct"), [], "") is None
+
+
+@pytest.mark.parametrize("field", ["quote_reply_ok", "name_retry_ok"])
+def test_a_failed_new_check_fails_the_turn(field: str) -> None:
+    assert _result(**{field: False}).passed is False
+    assert _result(**{field: None}).passed is True
+
+
+def test_the_results_table_has_the_quote_reply_and_name_retry_columns() -> None:
+    table = render_results_table([_result(quote_reply_ok=False, name_retry_ok=None)])
+    assert "| quote reply | name retry |" in table
+    assert "| FAIL | - |" in table

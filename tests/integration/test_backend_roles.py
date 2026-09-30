@@ -98,8 +98,14 @@ _MANIFEST: dict[str, dict[str, dict[str, tuple[str, ...] | str]]] = {
             ),
         },
         "escalations": {
-            "SELECT": ("id", "reason", "customer_phone", "opened_at"),
-            "INSERT": ("conversation_id", "customer_phone", "reason", "notes"),
+            "SELECT": ("id", "reason", "customer_phone", "opened_at", "quote_id"),
+            "INSERT": (
+                "conversation_id",
+                "customer_phone",
+                "reason",
+                "notes",
+                "quote_id",
+            ),
         },
         "token_usage": {
             "SELECT": _ALL,

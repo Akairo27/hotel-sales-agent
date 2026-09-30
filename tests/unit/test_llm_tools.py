@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from typing import get_args
 
+from services.agent.llm.booking_follow_up import REQUEST_BOOKING_FOLLOW_UP_TOOL
 from services.agent.llm.dispatch import (
     CHECK_AVAILABILITY_TOOL,
     GET_QUOTE_TOOL,
@@ -12,6 +13,7 @@ from services.agent.llm.tools import (
     AGENT_TOOLS,
     CHECK_AVAILABILITY,
     GET_QUOTE,
+    REQUEST_BOOKING_FOLLOW_UP,
     SEARCH_HOTELS,
     TOOL_ERROR_MESSAGES,
 )
@@ -86,7 +88,8 @@ def test_get_quote_description_says_it_checks_availability_itself() -> None:
 
 
 def test_tool_error_messages_cover_exactly_the_tool_error_codes() -> None:
-    """One fixed message per ToolErrorCode (owner decision: three messages)
+    """One fixed message per ToolErrorCode (owner decisions: three
+    messages, then quote_not_confirmable with request_booking_follow_up)
     -- a code added without a message would KeyError mid-turn, and a
     message without a code could never be sent."""
     assert set(TOOL_ERROR_MESSAGES) == set(get_args(ToolErrorCode))
@@ -94,11 +97,49 @@ def test_tool_error_messages_cover_exactly_the_tool_error_codes() -> None:
         assert message.startswith("Not done:")
 
 
-def test_agent_tools_declares_exactly_the_three_read_only_tools() -> None:
+def test_agent_tools_declares_exactly_the_approved_tools() -> None:
     """PLAN.md's المرحلة ٤ scopes the agent to check_availability and
     get_quote; search_hotels is the prerequisite id-resolution tool added
-    alongside them (2026-09-28). search_alternatives has no implementation
-    anywhere in the repo yet (see dispatch.py's module docstring) and must
-    not be declared until it does."""
+    alongside them (2026-09-28), and request_booking_follow_up the
+    owner-approved booking handoff (2026-09-30). search_alternatives has no
+    implementation anywhere in the repo yet and must not be declared until
+    it does."""
     names = {declaration.name for declaration in AGENT_TOOLS}
-    assert names == {SEARCH_HOTELS_TOOL, CHECK_AVAILABILITY_TOOL, GET_QUOTE_TOOL}
+    assert names == {
+        SEARCH_HOTELS_TOOL,
+        CHECK_AVAILABILITY_TOOL,
+        GET_QUOTE_TOOL,
+        REQUEST_BOOKING_FOLLOW_UP_TOOL,
+    }
+
+
+def test_request_booking_follow_up_name_matches_dispatch_routing() -> None:
+    assert REQUEST_BOOKING_FOLLOW_UP.name == REQUEST_BOOKING_FOLLOW_UP_TOOL
+
+
+def test_request_booking_follow_up_takes_only_a_quote_id() -> None:
+    parameters = REQUEST_BOOKING_FOLLOW_UP.parameters
+    assert set(parameters["properties"]) == {"quote_id"}
+    assert parameters["required"] == ["quote_id"]
+
+
+def test_request_booking_follow_up_description_demands_an_explicit_yes() -> None:
+    """The owner's condition (2026-09-30): only after an explicit yes. The
+    database check in booking_follow_up.py backs this up; the model reads
+    it here first."""
+    description = REQUEST_BOOKING_FOLLOW_UP.description
+    assert "only after the customer has explicitly said yes" in description
+    assert "books, holds and charges nothing" in description
+
+
+def test_get_quote_description_names_every_reply_field() -> None:
+    for field in (
+        "hotel_name",
+        "room_type_name",
+        "night_count",
+        "price_per_night_display",
+        "lowest_night_price_display",
+        "highest_night_price_display",
+        "distance_to_haram_display",
+    ):
+        assert field in GET_QUOTE.description

@@ -109,6 +109,34 @@ _SAUDI_EXAMPLE_NOT_OPEN_YET = (
 
 _SAUDI_EXAMPLE_CONFIRM_YEAR = "تقصد من 1 إلى 3 سبتمبر 2027؟"
 
+# Owner-approved wording (2026-09-30): confirming a hotel found only by the
+# Arabic retry of search_hotels, and the shape of a quote reply in each
+# language. Bracketed placeholders are filled from the tool results; the
+# model is never shown an example price.
+_SAUDI_EXAMPLE_CONFIRM_HOTEL = "تقصد فندق [اسم الفندق]؟"
+
+_SAUDI_EXAMPLE_QUOTE_REPLY = (
+    "[اسم الفندق]، غرفة [نوع الغرفة]، [عدد الليالي] من [تاريخ الوصول] "
+    "إلى [تاريخ المغادرة]:\n"
+    "الإجمالي *[السعر الإجمالي]* ([سعر الليلة] لليلة).\n"
+    "يبعد [المسافة] عن الحرم.\n"
+    "تبغاني أبلّغ زميلي يأكّد لك الحجز؟"
+)
+
+_ENGLISH_EXAMPLE_QUOTE_REPLY = (
+    "[Hotel], [room type] room, [N] nights, [check-in] to [check-out]:\n"
+    "Total *[total]* ([price per night] per night).\n"
+    "[distance] from the Haram.\n"
+    "Shall I pass this to a colleague to confirm your booking?"
+)
+
+_INDONESIAN_EXAMPLE_QUOTE_REPLY = (
+    "[Hotel], kamar [tipe kamar], [N] malam, [check-in] sampai [check-out]:\n"
+    "Total *[total]* ([harga per malam] per malam).\n"
+    "[jarak] dari Masjidil Haram.\n"
+    "Mau saya teruskan ke rekan saya untuk konfirmasi pemesanan?"
+)
+
 # Every customer-facing Arabic example the rules show the model -- the
 # texts tests/unit/test_llm_prompt.py checks for formal (non-Saudi)
 # phrasing and for Arabic-Indic digits.
@@ -118,6 +146,8 @@ CUSTOMER_FACING_ARABIC_EXAMPLES: tuple[str, ...] = (
     _SAUDI_EXAMPLE_TOO_FEW_ROOMS,
     _SAUDI_EXAMPLE_NOT_OPEN_YET,
     _SAUDI_EXAMPLE_CONFIRM_YEAR,
+    _SAUDI_EXAMPLE_CONFIRM_HOTEL,
+    _SAUDI_EXAMPLE_QUOTE_REPLY,
 )
 
 PROMPT_RULES: tuple[PromptRule, ...] = (
@@ -161,11 +191,24 @@ PROMPT_RULES: tuple[PromptRule, ...] = (
             "hotel_id or room_type_id, including one a customer states "
             "directly as a number. If search_hotels returns more than one "
             "hotel, ask the customer which one they mean before calling "
-            "any other tool. If it returns none, tell the customer and "
-            "ask them to confirm the name. Call search_hotels again in a "
-            "later turn if you need availability or a price and are not "
-            "certain you already have the right id from this "
-            "conversation."
+            "any other tool. If it returns none for a name written in "
+            "Latin letters or possibly misspelled, call search_hotels once "
+            "more with the distinctive part of the name in Arabic — its "
+            "Arabic translation or transliteration, without the word hotel "
+            "or فندق (for example, Al Nokhba Hotel becomes النخبة). If that "
+            "second search returns exactly one hotel, do not check "
+            "availability or give a price in this reply: ask the customer "
+            "to confirm it, with the hotel name exactly as search_hotels "
+            'returned it — in Arabic "'
+            + _SAUDI_EXAMPLE_CONFIRM_HOTEL
+            + '" (without repeating فندق when the name already starts with '
+            'it), in English "Do you mean [hotel name]?", in Indonesian '
+            '"Maksud Anda [hotel name]?" — and wait for their answer. If the '
+            "second search also returns none, tell the customer and ask "
+            "them to confirm the name; never search a third time for the "
+            "same name. Call search_hotels again in a later turn if you "
+            "need availability or a price and are not certain you already "
+            "have the right id from this conversation."
         ),
         arabic=(
             "قبل استدعاء check_availability أو get_quote، يجب عليك أولاً "
@@ -173,13 +216,24 @@ PROMPT_RULES: tuple[PromptRule, ...] = (
             "ذكره العميل عبر رقمه الحقيقي — يمنع عليك اختلاق أو تخمين "
             "hotel_id أو room_type_id، حتى لو ذكره العميل بنفسه كرقم. "
             "إذا أعاد search_hotels أكثر من فندق، اسأل العميل عن أيهما "
-            "يقصد قبل استدعاء أي أداة أخرى. وإذا لم يُعِد أي نتيجة، "
-            "أخبر العميل واطلب منه تأكيد الاسم. استدعِ search_hotels "
-            "مرة أخرى في دورة لاحقة إذا احتجت التحقق من التوفر أو السعر "
-            "ولم تكن متأكداً أن لديك الرقم الصحيح بالفعل من هذه "
-            "المحادثة."
+            "يقصد قبل استدعاء أي أداة أخرى. وإذا لم يُعِد أي نتيجة لاسم "
+            "مكتوب بحروف لاتينية أو ربما بخطأ إملائي، فاستدعِ search_hotels "
+            "مرة واحدة أخرى بالجزء المميز من الاسم بالعربية — ترجمته "
+            "العربية أو نقله الحرفي، دون كلمة hotel أو فندق (مثلاً Al "
+            "Nokhba Hotel تصبح النخبة). وإذا أعاد هذا البحث الثاني فندقاً "
+            "واحداً بالضبط، فلا تتحقق من التوفر ولا تذكر سعراً في هذا "
+            "الرد: اطلب من العميل تأكيده، باسم الفندق كما أعاده "
+            'search_hotels حرفياً — بالعربية "'
+            + _SAUDI_EXAMPLE_CONFIRM_HOTEL
+            + '" (دون تكرار كلمة فندق إذا بدأ بها الاسم)، وبالإنجليزية '
+            '"Do you mean [hotel name]?"، وبالإندونيسية "Maksud Anda '
+            '[hotel name]?" — وانتظر رده. وإذا لم يُعِد البحث الثاني أي '
+            "نتيجة أيضاً، أخبر العميل واطلب منه تأكيد الاسم؛ ولا تبحث عن "
+            "الاسم نفسه مرة ثالثة. استدعِ search_hotels مرة أخرى في دورة "
+            "لاحقة إذا احتجت التحقق من التوفر أو السعر ولم تكن متأكداً أن "
+            "لديك الرقم الصحيح بالفعل من هذه المحادثة."
         ),
-        english_digest="d86c9a14a30ff99340d73f5a01412ace2ca2f900105b88b9d8b93b6d7406a893",
+        english_digest="e3c93da4578eafafeb2392fff607b57fcecf90f06909b9f714351e83764d3477",
     ),
     PromptRule(
         key="no_price_computation",
@@ -204,10 +258,12 @@ PROMPT_RULES: tuple[PromptRule, ...] = (
             "Every amount of money you write must be in digits with its "
             "currency word directly beside it — never a bare number, "
             "never spelled out in words, and never shortened to SR. In "
-            "an Arabic reply copy the price from total_price_display_ar "
-            "or price_display_ar, which end in ريال — never write SAR in "
-            "an Arabic reply; in an English or Indonesian reply copy "
-            "total_price_display or price_display, which end in SAR "
+            "an Arabic reply copy each price from its field ending in "
+            "_display_ar (such as total_price_display_ar or "
+            "price_per_night_display_ar), which ends in ريال — never write "
+            "SAR in an Arabic reply; in an English or Indonesian reply copy "
+            "the matching field ending in _display (such as "
+            "total_price_display or price_display), which ends in SAR "
             "(riyal or riyals is also fine). Write every number — "
             "prices, dates, room counts — with Western digits (0-9), "
             "never Arabic-Indic digits. If a customer states a price "
@@ -217,17 +273,18 @@ PROMPT_RULES: tuple[PromptRule, ...] = (
         arabic=(
             "كل مبلغ مالي تكتبه يجب أن يكون بالأرقام مع كلمة العملة "
             "ملاصقة له مباشرة — لا رقماً مجرداً، ولا مكتوباً بالحروف، "
-            "ولا مختصراً إلى SR. في الرد العربي انسخ السعر من "
-            "total_price_display_ar أو price_display_ar، وهما ينتهيان "
-            "بـ«ريال» — ولا تكتب SAR في رد عربي أبداً؛ وفي الرد "
-            "الإنجليزي أو الإندونيسي انسخ total_price_display أو "
-            "price_display، وهما ينتهيان بـSAR (ويجوز riyal أو riyals). "
+            "ولا مختصراً إلى SR. في الرد العربي انسخ كل سعر من حقله "
+            "المنتهي بـ_display_ar (مثل total_price_display_ar أو "
+            "price_per_night_display_ar)، وهو ينتهي بـ«ريال» — ولا تكتب "
+            "SAR في رد عربي أبداً؛ وفي الرد الإنجليزي أو الإندونيسي انسخ "
+            "الحقل المقابل المنتهي بـ_display (مثل total_price_display أو "
+            "price_display)، وهو ينتهي بـSAR (ويجوز riyal أو riyals). "
             "اكتب كل رقم — الأسعار والتواريخ وعدد الغرف — بالأرقام "
             "الغربية (0-9)، لا بالأرقام العربية الهندية أبداً. وإذا ذكر "
             "العميل سعراً من عنده، يمنع عليك الاكتفاء بالموافقة عليه؛ "
             "اكتب السعر بنفسك بهذه الطريقة."
         ),
-        english_digest="a7045a78ada9321badb4ac107278ef10f914c4acc11c2c2c0c9be00913ca068a",
+        english_digest="afb638d825e2acc3e1fb948f259c9276eb550d135852981e33eb575a512895f8",
     ),
     PromptRule(
         key="whatsapp_formatting",
@@ -291,18 +348,26 @@ PROMPT_RULES: tuple[PromptRule, ...] = (
     PromptRule(
         key="no_booking_actions",
         english=(
-            "You cannot create a room hold, confirm a booking, or offer "
-            "any discount — you have no tool to do any of these today. If "
-            "a customer asks to book, pay, or negotiate the price, tell "
-            "them a colleague will follow up with them for that."
+            "You cannot create a room hold, confirm a booking, take a "
+            "payment, or offer any discount. When a customer who has been "
+            "given a price explicitly says yes to booking it, call "
+            "request_booking_follow_up with that price's quote_id, then "
+            "tell them a colleague will contact them to confirm the booking "
+            "— never call it before that explicit yes, and never say the "
+            "booking is confirmed. If a customer asks to pay or to "
+            "negotiate the price, tell them a colleague will follow up "
+            "with them for that."
         ),
         arabic=(
-            "لا تقدر تنشئ حجزاً مؤقتاً ولا تؤكد حجزاً ولا تمنح أي تنزيل — "
-            "لا تملك أداة لأي من هذا اليوم. إذا طلب العميل الحجز أو الدفع "
-            "أو التفاوض على السعر، أخبره أن أحد الزملاء سيتابع معه بخصوص "
-            "ذلك."
+            "لا تقدر تنشئ حجزاً مؤقتاً ولا تؤكد حجزاً ولا تستلم دفعة ولا "
+            "تمنح أي تنزيل. إذا قال العميل الذي أعطيته سعراً «نعم» صراحةً "
+            "لحجزه، فاستدعِ request_booking_follow_up برقم quote_id لذلك "
+            "السعر، ثم أخبره أن أحد الزملاء سيتواصل معه لتأكيد الحجز — لا "
+            "تستدعها أبداً قبل تلك الموافقة الصريحة، ولا تقل أبداً إن "
+            "الحجز تأكد. وإذا طلب العميل الدفع أو التفاوض على السعر، أخبره "
+            "أن أحد الزملاء سيتابع معه بخصوص ذلك."
         ),
-        english_digest="b444f2654314bc9885dfb796c5b1127c33253e10f773a1f421feb1bae2eb1dc2",
+        english_digest="058e4445c5312599a302d0f3b073948aa048b2cbcdf440415fcae56fa3b97221",
     ),
     PromptRule(
         key="unavailable_dates",
@@ -361,6 +426,60 @@ PROMPT_RULES: tuple[PromptRule, ...] = (
             + '"'
         ),
         english_digest="52e6b1752d0126e41dbd1e036b7f426c53f84d34977403cfc694515188e4cc79",
+    ),
+    PromptRule(
+        key="quote_reply",
+        english=(
+            "When get_quote returns priced=true, reply in at most four short "
+            "lines and copy every value from that result, never computing "
+            "one: the hotel name (hotel_name), the room type "
+            "(room_type_name), the number of nights (night_count) with the "
+            "dates, the total (total_price_display) in bold, and the price "
+            "per night — price_per_night_display, or from "
+            "lowest_night_price_display to highest_night_price_display when "
+            "that is null. When rooms is more than 1, give the number of "
+            "rooms and say the nightly price is per room. If "
+            "distance_to_haram_display is not null, add the distance: from "
+            "the Haram when city is makkah (الحرم, Masjidil Haram), from the "
+            "Prophet's Mosque when city is madinah (المسجد النبوي, Masjid "
+            "Nabawi); never add a walking time or any location detail the "
+            "result does not give. In an Arabic reply use the fields ending "
+            "in _ar. End with one question that moves toward booking — "
+            "never a general question such as whether they need anything "
+            "else. For an Arabic-speaking customer, in natural Saudi "
+            'dialect, in the style of this example: "'
+            + _SAUDI_EXAMPLE_QUOTE_REPLY
+            + '" In English: "'
+            + _ENGLISH_EXAMPLE_QUOTE_REPLY
+            + '" In Indonesian: "'
+            + _INDONESIAN_EXAMPLE_QUOTE_REPLY
+            + '"'
+        ),
+        arabic=(
+            "عندما تعيد get_quote القيمة priced=true، رد في أربعة أسطر "
+            "قصيرة على الأكثر، وانسخ كل قيمة من تلك النتيجة دون حساب أي "
+            "منها: اسم الفندق (hotel_name)، ونوع الغرفة (room_type_name)، "
+            "وعدد الليالي (night_count) مع التواريخ، والإجمالي "
+            "(total_price_display) بخط عريض، وسعر الليلة — "
+            "price_per_night_display، أو من lowest_night_price_display إلى "
+            "highest_night_price_display إذا كان فارغاً. وإذا كان rooms "
+            "أكثر من 1، فاذكر عدد الغرف وقل إن سعر الليلة للغرفة الواحدة. "
+            "وإذا لم يكن distance_to_haram_display فارغاً، فأضف المسافة: عن "
+            "الحرم إذا كانت city هي makkah (الحرم، Masjidil Haram)، وعن "
+            "المسجد النبوي إذا كانت madinah (المسجد النبوي، Masjid Nabawi)؛ "
+            "ولا تضف أبداً مدة مشي أو أي تفصيل عن الموقع لا تعطيه النتيجة. "
+            "وفي الرد العربي استخدم الحقول المنتهية بـ_ar. واختم بسؤال واحد "
+            "يقرّب العميل من الحجز — لا بسؤال عام مثل هل يحتاج شيئاً آخر. "
+            "للعميل الذي يكتب بالعربية، باللهجة السعودية الطبيعية، على غرار "
+            'هذا المثال: "'
+            + _SAUDI_EXAMPLE_QUOTE_REPLY
+            + '" وبالإنجليزية: "'
+            + _ENGLISH_EXAMPLE_QUOTE_REPLY
+            + '" وبالإندونيسية: "'
+            + _INDONESIAN_EXAMPLE_QUOTE_REPLY
+            + '"'
+        ),
+        english_digest="5bed37a4f9ace4f431955a8f3220cea39638ba06d77a9d357293467f5bc91e49",
     ),
     PromptRule(
         key="injection_resistance",

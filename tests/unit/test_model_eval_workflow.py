@@ -51,7 +51,16 @@ def test_the_artifact_is_the_results_report_only() -> None:
     assert "path: model-eval-results.md" in upload
 
 
-def test_the_run_compares_the_four_approved_settings() -> None:
-    """Owner-approved (2026-09-30): default, low, minimal and none."""
-    settings = re.findall(r"--reasoning-effort (\w+)", _text())
-    assert settings == ["default", "low", "minimal", "none"]
+def test_the_settings_come_from_the_dispatch_and_default_to_production() -> None:
+    """Owner-approved (2026-09-30): the prompt PR's run uses low, the
+    production setting, alone; a comparison names its settings at dispatch.
+    The input reaches the script through the environment, never pasted
+    into it, and globbing is off."""
+    text = _text()
+    settings_input = text.split("      settings:\n", 1)[1].split("\n\n", 1)[0]
+    assert 'default: "low"' in settings_input
+    assert "SETTINGS: ${{ inputs.settings }}" in text
+    run_script = text.split("Run the eval", 1)[1]
+    assert "${{ inputs" not in run_script.split("run: |", 1)[1]
+    assert "set -euf -o pipefail" in run_script
+    assert '--reasoning-effort "$setting"' in run_script

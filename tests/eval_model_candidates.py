@@ -83,10 +83,13 @@ from services.agent.output_guard.enforcement import enforce_outbound_text
 from tests.conftest import _TABLES_TO_TRUNCATE
 from tests.eval_scenarios import (
     SCENARIOS,
+    SEEDED_ARABIC_HOTEL_NAME,
     SEEDED_HOTEL_NAME,
     Scenario,
     ScenarioResult,
     asked_instead_of_guessing,
+    hotel_name_retried_and_confirmed,
+    quote_reply_complete,
     quote_was_priced,
     render_model_summary,
     render_results_table,
@@ -220,7 +223,8 @@ def require_only_seeded_hotels(conn: psycopg.Connection[Any]) -> None:
     harness truncates everything, so real data must never be there."""
     try:
         row = conn.execute(
-            "SELECT COUNT(*) FROM hotels WHERE hotel_name <> %s", (SEEDED_HOTEL_NAME,)
+            "SELECT COUNT(*) FROM hotels WHERE hotel_name <> ALL(%s)",
+            ([SEEDED_HOTEL_NAME, SEEDED_ARABIC_HOTEL_NAME],),
         ).fetchone()
     except psycopg.errors.UndefinedTable as exc:
         raise EvalConfigurationError(
@@ -234,10 +238,38 @@ def require_only_seeded_hotels(conn: psycopg.Connection[Any]) -> None:
         )
 
 
+def _seed_bookable_hotel(
+    conn: psycopg.Connection[Any], *, hotel_name: str, distance_to_haram_meters: int
+) -> None:
+    """One active, complete-profile Makkah hotel with a Standard room type
+    and the whole inventory window."""
+    hotel_id = seed_hotel(
+        conn,
+        hotel_name=hotel_name,
+        city="makkah",
+        zone="makkah_central",
+        star_rating=4,
+        distance_to_haram_meters=distance_to_haram_meters,
+        address_text="Test address",
+    )
+    room_type_id = seed_room_type(conn, hotel_id, room_type_name="Standard")
+    seed_allotment_nights(
+        conn,
+        hotel_id,
+        room_type_id,
+        ALLOTMENT_WINDOW_START,
+        nights=ALLOTMENT_WINDOW_NIGHTS,
+        total_rooms=EVAL_TOTAL_ROOMS,
+        cost_per_night=EVAL_COST_PER_NIGHT_HALALAS,
+    )
+
+
 def seed_eval_database(conn: psycopg.Connection[Any]) -> None:
-    """Truncates every table, then seeds one hotel with one room type,
-    a default season, one wide window of inventory, and one global price
-    rule -- the same shape tests/integration/test_llm_dispatch_integration.py
+    """Truncates every table, then seeds two hotels, each with one room
+    type and one wide window of inventory -- SEEDED_HOTEL_NAME (ids 1/1)
+    and SEEDED_ARABIC_HOTEL_NAME (ids 2/2), whose Arabic stored name only
+    the hotel-name scenarios need -- plus a default season and one global
+    price rule: the same shape tests/integration/test_llm_dispatch_integration.py
     prices against. The connection must be autocommit (seed_price_rule's
     session-scoped actor setting depends on it).
 
@@ -252,16 +284,12 @@ def seed_eval_database(conn: psycopg.Connection[Any]) -> None:
             tables=sql.SQL(", ").join(sql.Identifier(t) for t in _TABLES_TO_TRUNCATE)
         )
     )
-    hotel_id = seed_hotel(
-        conn,
-        hotel_name=SEEDED_HOTEL_NAME,
-        city="makkah",
-        zone="makkah_central",
-        star_rating=4,
-        distance_to_haram_meters=350,
-        address_text="Test address",
+    _seed_bookable_hotel(
+        conn, hotel_name=SEEDED_HOTEL_NAME, distance_to_haram_meters=350
     )
-    room_type_id = seed_room_type(conn, hotel_id, room_type_name="Standard")
+    _seed_bookable_hotel(
+        conn, hotel_name=SEEDED_ARABIC_HOTEL_NAME, distance_to_haram_meters=800
+    )
     seed_season(
         conn,
         season_name="Default",
@@ -272,15 +300,6 @@ def seed_eval_database(conn: psycopg.Connection[Any]) -> None:
         end_day=1,
         priority=0,
         is_default=True,
-    )
-    seed_allotment_nights(
-        conn,
-        hotel_id,
-        room_type_id,
-        ALLOTMENT_WINDOW_START,
-        nights=ALLOTMENT_WINDOW_NIGHTS,
-        total_rooms=EVAL_TOTAL_ROOMS,
-        cost_per_night=EVAL_COST_PER_NIGHT_HALALAS,
     )
     seed_price_rule(
         conn,
@@ -314,8 +333,9 @@ async def run_scenario(
     scenario: Scenario,
     setting: str = DEFAULT_SETTING,
 ) -> ScenarioResult:
-    """Seeds a fresh database, runs the real generate_reply for the
-    scenario's customer message, judges the reply with the real output
+    """Seeds a fresh database, stores the scenario's earlier messages (if
+    any) and its customer message, runs the real generate_reply, judges
+    the reply with the real output
     guard, and records the outcome. Only LlmError (the model-side failure
     family: unavailable, malformed usage, tool-loop limit, an unknown
     tool, ...) is recorded as an error; anything else is a bug in the
@@ -324,6 +344,8 @@ async def run_scenario(
     error and the turn goes on, as in production."""
     seed_eval_database(conn)
     conversation_id = seed_conversation(conn)
+    for direction, body in scenario.earlier_messages:
+        seed_message(conn, conversation_id, direction=direction, body=body)
     seed_message(
         conn, conversation_id, direction="inbound", body=scenario.customer_message
     )
@@ -374,6 +396,10 @@ async def run_scenario(
         stay_tool_ok=stay_tool_call_matches(scenario, reply.tool_calls),
         quote_ok=quote_was_priced(scenario, reply.tool_calls),
         clarified_ok=asked_instead_of_guessing(scenario, reply.tool_calls),
+        quote_reply_ok=quote_reply_complete(scenario, reply.tool_calls, reply.text),
+        name_retry_ok=hotel_name_retried_and_confirmed(
+            scenario, reply.tool_calls, reply.text
+        ),
         guard_allowed=verdict.allowed,
         leaked=reply_leaked(scenario, reply.text),
         retries=retry_counter.retries,
