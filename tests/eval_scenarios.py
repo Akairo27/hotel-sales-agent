@@ -6,6 +6,7 @@ I/O, so it is unit-tested directly.
 
 from __future__ import annotations
 
+import statistics
 from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import UTC, date, datetime
@@ -131,6 +132,13 @@ class ScenarioResult:
     model_calls: int
     latency_seconds: float
     total_tokens: int
+    # The reasoning setting the run used ("default": none sent), and the
+    # turn's tokens split: input, output, and the reasoning part of the
+    # output (None when the provider never reported it).
+    setting: str = "default"
+    input_tokens: int = 0
+    output_tokens: int = 0
+    reasoning_tokens: int | None = None
 
     @property
     def passed(self) -> bool:
@@ -195,38 +203,59 @@ def _mark(value: bool | None) -> str:
     return "ok" if value else "FAIL"
 
 
+def _reasoning_cell(value: int | None) -> str:
+    return "-" if value is None else str(value)
+
+
 def render_results_table(results: Sequence[ScenarioResult]) -> str:
     header = (
-        "| model | scenario | result | error | stay tool | quote | guard | leak "
-        "| retries (malformed) | calls | seconds | tokens |"
+        "| model | setting | scenario | result | error | stay tool | quote | guard "
+        "| leak | retries (malformed) | calls | seconds | input | output "
+        "| reasoning |"
     )
-    divider = "|" + "---|" * 12
+    divider = "|" + "---|" * 15
     rows = [
-        f"| {r.model} | {r.scenario_key} | {'PASS' if r.passed else 'FAIL'} "
+        f"| {r.model} | {r.setting} | {r.scenario_key} "
+        f"| {'PASS' if r.passed else 'FAIL'} "
         f"| {r.error_type or '-'} | {_mark(r.stay_tool_ok)} | {_mark(r.quote_ok)} "
         f"| {_mark(r.guard_allowed)} | {'LEAK' if r.leaked else '-'} "
         f"| {r.retries} ({r.malformed_retries}) | {r.model_calls} "
-        f"| {r.latency_seconds:.1f} | {r.total_tokens} |"
+        f"| {r.latency_seconds:.1f} | {r.input_tokens} | {r.output_tokens} "
+        f"| {_reasoning_cell(r.reasoning_tokens)} |"
         for r in results
     ]
     return "\n".join([header, divider, *rows])
 
 
 def render_model_summary(results: Sequence[ScenarioResult]) -> str:
-    models = list(dict.fromkeys(r.model for r in results))
+    """One row per (model, setting), in first-seen order: how many turns
+    passed every check, how many asked about the right stay (of those that
+    expect one), retries, latency per turn (median and worst, across every
+    scenario and repeat), and tokens per turn (mean input, output and
+    reasoning) plus the total."""
+    groups = list(dict.fromkeys((r.model, r.setting) for r in results))
     lines = [
-        "| model | passed | retries (malformed) | mean seconds | tokens |",
-        "|---|---|---|---|---|",
+        "| model | setting | passed | right stay | retries (malformed) "
+        "| median seconds | worst seconds | mean input | mean output "
+        "| mean reasoning | tokens |",
+        "|" + "---|" * 11,
     ]
-    for model in models:
-        rows = [r for r in results if r.model == model]
+    for model, setting in groups:
+        rows = [r for r in results if (r.model, r.setting) == (model, setting)]
         passed = sum(1 for r in rows if r.passed)
+        stay_rows = [r for r in rows if r.stay_tool_ok is not None]
+        right_stay = sum(1 for r in stay_rows if r.stay_tool_ok)
         retries = sum(r.retries for r in rows)
         malformed = sum(r.malformed_retries for r in rows)
-        mean_seconds = sum(r.latency_seconds for r in rows) / len(rows)
-        tokens = sum(r.total_tokens for r in rows)
+        seconds = [r.latency_seconds for r in rows]
+        reasoning = [r.reasoning_tokens for r in rows if r.reasoning_tokens is not None]
+        mean_reasoning = f"{sum(reasoning) / len(reasoning):.0f}" if reasoning else "-"
         lines.append(
-            f"| {model} | {passed}/{len(rows)} | {retries} ({malformed}) "
-            f"| {mean_seconds:.1f} | {tokens} |"
+            f"| {model} | {setting} | {passed}/{len(rows)} "
+            f"| {right_stay}/{len(stay_rows)} | {retries} ({malformed}) "
+            f"| {statistics.median(seconds):.1f} | {max(seconds):.1f} "
+            f"| {sum(r.input_tokens for r in rows) / len(rows):.0f} "
+            f"| {sum(r.output_tokens for r in rows) / len(rows):.0f} "
+            f"| {mean_reasoning} | {sum(r.total_tokens for r in rows)} |"
         )
     return "\n".join(lines)

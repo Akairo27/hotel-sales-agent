@@ -25,7 +25,9 @@ from google.genai import types
 
 from services.agent.llm.client import (
     OPENROUTER_CHAT_COMPLETIONS_URL,
+    REASONING_EFFORTS,
     OpenRouterTransport,
+    ReasoningEffort,
     _OpenRouterAssistantMessage,
 )
 from services.agent.llm.dispatch import tool_error_result
@@ -59,13 +61,16 @@ _FAR_FUTURE_DEADLINE = time.monotonic() + 3600
 Handler = Callable[[httpx.Request], httpx.Response]
 
 
-def _make_transport(handler: Handler) -> OpenRouterTransport:
+def _make_transport(
+    handler: Handler, *, reasoning_effort: ReasoningEffort | None = None
+) -> OpenRouterTransport:
     return OpenRouterTransport(
         model=_MODEL,
         api_key=_API_KEY,
         providers=_PROVIDERS,
         timeout_ms=10_000,
         http_transport=httpx.MockTransport(handler),
+        reasoning_effort=reasoning_effort,
     )
 
 
@@ -213,6 +218,8 @@ def test_request_body_carries_the_model_tools_and_deny_by_default_routing() -> N
         "require_parameters": True,
     }
     assert "ignore" not in body["provider"]
+    # No reasoning setting unless one is chosen: the model's own default.
+    assert "reasoning" not in body
     assert body["tools"] == [
         {
             "type": "function",
@@ -224,6 +231,29 @@ def test_request_body_carries_the_model_tools_and_deny_by_default_routing() -> N
         }
         for declaration in AGENT_TOOLS
     ]
+
+
+@pytest.mark.parametrize("effort", ["low", "none"])
+def test_a_chosen_reasoning_effort_is_sent_as_reasoning_effort(
+    effort: ReasoningEffort,
+) -> None:
+    handler, requests = _sequence([_ok()])
+
+    _generate(_make_transport(handler, reasoning_effort=effort))
+
+    assert json.loads(requests[0].content)["reasoning"] == {"effort": effort}
+
+
+def test_the_reasoning_efforts_are_openrouters_documented_values() -> None:
+    assert REASONING_EFFORTS == (
+        "max",
+        "xhigh",
+        "high",
+        "medium",
+        "low",
+        "minimal",
+        "none",
+    )
 
 
 def test_request_messages_start_with_the_system_instruction_then_the_turns() -> None:
@@ -349,6 +379,57 @@ def test_reasoning_tokens_are_not_added_on_top_of_completion_tokens() -> None:
     response = _generate(_make_transport(handler))
 
     assert response.usage.candidates_tokens == 20
+    # ...but kept as its own breakdown, for the per-call log.
+    assert response.usage.reasoning_tokens == 7
+
+
+@pytest.mark.parametrize(
+    "details",
+    [
+        pytest.param(None, id="absent"),
+        pytest.param({}, id="no-reasoning-field"),
+        pytest.param({"reasoning_tokens": True}, id="a-boolean"),
+        pytest.param({"reasoning_tokens": "7"}, id="a-string"),
+    ],
+)
+def test_unreported_reasoning_tokens_are_unknown_not_an_error(
+    details: dict[str, object] | None,
+) -> None:
+    body = _text_body()
+    if details is not None:
+        body["usage"] = {**_usage(), "completion_tokens_details": details}
+    handler, _ = _sequence([_ok(body)])
+
+    response = _generate(_make_transport(handler))
+
+    assert response.usage.reasoning_tokens is None
+
+
+def test_a_successful_call_logs_its_tokens_including_reasoning(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    body = _text_body()
+    body["usage"] = {
+        **_usage(prompt=100, completion=40, total=140),
+        "completion_tokens_details": {"reasoning_tokens": 35},
+    }
+    handler, _ = _sequence([_ok(body)])
+    caplog.set_level(logging.INFO, logger="services.agent.llm.client")
+
+    _generate(_make_transport(handler))
+
+    (record,) = [
+        json.loads(r.getMessage())
+        for r in caplog.records
+        if r.levelno == logging.INFO and "model_call_attempt" in r.getMessage()
+    ]
+    assert record["outcome"] == "success"
+    assert (
+        record["prompt_tokens"],
+        record["completion_tokens"],
+        record["reasoning_tokens"],
+    ) == (100, 40, 35)
+    assert _API_KEY not in caplog.text
 
 
 def test_a_tool_call_reply_is_decoded_with_its_arguments_and_id() -> None:

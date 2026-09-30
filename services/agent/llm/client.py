@@ -24,7 +24,7 @@ import logging
 import random
 import time
 from dataclasses import dataclass
-from typing import Any, Protocol
+from typing import Any, Literal, Protocol, get_args
 
 import httpx
 from google import genai
@@ -346,6 +346,7 @@ def _gemini_response_to_model_response(
         prompt_tokens=usage.prompt_token_count,
         candidates_tokens=candidates_tokens,
         total_tokens=usage.total_token_count,
+        reasoning_tokens=usage.thoughts_token_count,
     )
 
     calls = response.function_calls or []
@@ -417,24 +418,29 @@ def _attempt_timeout_seconds(*, deadline: float, max_attempt_timeout_ms: int) ->
     return min(max_attempt_timeout_ms / 1000, remaining)
 
 
-def _log_model_call_attempt(*, attempt: int, elapsed_ms: int, outcome: str) -> None:
+def _log_model_call_attempt(
+    *, attempt: int, elapsed_ms: int, outcome: str, usage: ModelUsage | None = None
+) -> None:
     """INFO for every model-call attempt, success or failure alike --
     unlike _log_retry_attempt below (WARNING, fired only for a failed
     attempt that will be retried), this fires unconditionally so
     per-attempt latency is visible even when every attempt succeeds on
     the first try. Same scoping as _log_retry_attempt: attempt number,
-    elapsed time and outcome only, never anything about the prompt or the
-    model's response."""
-    logger.info(
-        json.dumps(
-            {
-                "event": "model_call_attempt",
-                "attempt": attempt,
-                "elapsed_ms": elapsed_ms,
-                "outcome": outcome,
-            }
-        )
-    )
+    elapsed time and outcome, plus -- for a successful attempt -- its
+    token counts (input, output, and the reasoning part of the output,
+    null when the provider does not report it); never anything about the
+    prompt or the model's response."""
+    fields: dict[str, Any] = {
+        "event": "model_call_attempt",
+        "attempt": attempt,
+        "elapsed_ms": elapsed_ms,
+        "outcome": outcome,
+    }
+    if usage is not None:
+        fields["prompt_tokens"] = usage.prompt_tokens
+        fields["completion_tokens"] = usage.candidates_tokens
+        fields["reasoning_tokens"] = usage.reasoning_tokens
+    logger.info(json.dumps(fields))
 
 
 def _log_retry_attempt(
@@ -590,10 +596,14 @@ class GeminiTransport:
                 await asyncio.sleep(_retry_delay_seconds(attempt))
                 continue
             elapsed_ms = int((time.monotonic() - started) * 1000)
+            model_response = _gemini_response_to_model_response(response)
             _log_model_call_attempt(
-                attempt=attempt, elapsed_ms=elapsed_ms, outcome="success"
+                attempt=attempt,
+                elapsed_ms=elapsed_ms,
+                outcome="success",
+                usage=model_response.usage,
             )
-            return _gemini_response_to_model_response(response)
+            return model_response
         raise AssertionError("unreachable: the loop above always returns or raises")
 
 
@@ -617,6 +627,11 @@ _OPENROUTER_RETRYABLE_STATUS_CODES = (408, 429, 500, 502, 503, 504)
 # back unchanged (its "Reasoning Tokens" page) -- the OpenRouter analogue
 # of the Gemini thought_signature ModelTurn.provider_state exists for.
 _OPENROUTER_REASONING_FIELDS = ("reasoning", "reasoning_details")
+
+# OpenRouter's documented reasoning.effort values ("Reasoning Tokens" page,
+# read 2026-09-30); "none" disables reasoning entirely.
+ReasoningEffort = Literal["max", "xhigh", "high", "medium", "low", "minimal", "none"]
+REASONING_EFFORTS: tuple[ReasoningEffort, ...] = get_args(ReasoningEffort)
 
 
 class OpenRouterCallError(Exception):
@@ -822,7 +837,21 @@ def _openrouter_usage(body: dict[str, Any]) -> ModelUsage:
         prompt_tokens=_require_token_count(usage, "prompt_tokens"),
         candidates_tokens=_require_token_count(usage, "completion_tokens"),
         total_tokens=_require_token_count(usage, "total_tokens"),
+        reasoning_tokens=_optional_reasoning_tokens(usage),
     )
+
+
+def _optional_reasoning_tokens(usage: dict[str, Any]) -> int | None:
+    """completion_tokens_details.reasoning_tokens when the provider reports
+    it as an integer, else None -- a breakdown only, so its absence is not
+    an error."""
+    details = usage.get("completion_tokens_details")
+    if not isinstance(details, dict):
+        return None
+    value = details.get("reasoning_tokens")
+    if isinstance(value, bool) or not isinstance(value, int):
+        return None
+    return value
 
 
 def _require_token_count(usage: dict[str, Any], key: str) -> int:
@@ -906,8 +935,13 @@ class OpenRouterTransport:
         providers: tuple[str, ...],
         timeout_ms: int,
         http_transport: httpx.AsyncBaseTransport | None = None,
+        reasoning_effort: ReasoningEffort | None = None,
     ) -> None:
-        """
+        """reasoning_effort, when given, is sent as OpenRouter's
+        reasoning.effort; None sends no reasoning field at all, leaving the
+        model's own default -- what production does until an owner-approved
+        setting is chosen (2026-09-30).
+
         Raises:
             LlmConfigurationError: providers is empty (no provider has
                 been approved -- an empty `only` list could be read by the
@@ -931,6 +965,7 @@ class OpenRouterTransport:
         self._provider_routing = _openrouter_provider_routing(providers)
         self._tools = [_tool_declaration_to_openrouter(d) for d in AGENT_TOOLS]
         self._http_transport = http_transport
+        self._reasoning_effort = reasoning_effort
 
     async def _call_once(
         self, body: dict[str, Any], *, timeout_seconds: float
@@ -985,6 +1020,8 @@ class OpenRouterTransport:
             "tool_choice": "auto",
             "provider": self._provider_routing,
         }
+        if self._reasoning_effort is not None:
+            body["reasoning"] = {"effort": self._reasoning_effort}
         last_exc: OpenRouterCallError | httpx.HTTPError
         for attempt in range(1, _RETRY_ATTEMPTS + 1):
             attempt_timeout_seconds = _attempt_timeout_seconds(
@@ -1013,7 +1050,10 @@ class OpenRouterTransport:
                 continue
             elapsed_ms = int((time.monotonic() - started) * 1000)
             _log_model_call_attempt(
-                attempt=attempt, elapsed_ms=elapsed_ms, outcome="success"
+                attempt=attempt,
+                elapsed_ms=elapsed_ms,
+                outcome="success",
+                usage=response.usage,
             )
             return response
         raise AssertionError("unreachable: the loop above always returns or raises")

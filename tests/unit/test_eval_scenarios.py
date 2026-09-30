@@ -199,5 +199,71 @@ def test_the_model_summary_counts_passes_retries_and_tokens_per_model() -> None:
             _result(model="vendor/model-2", total_tokens=7),
         ]
     )
-    assert "| vendor/model-1 | 1/2 | 3 (1) | 2.0 | 200 |" in summary
-    assert "| vendor/model-2 | 1/1 | 0 (0) | 1.5 | 7 |" in summary
+    assert (
+        "| vendor/model-1 | default | 1/2 | 2/2 | 3 (1) | 2.0 | 3.0 | 0 | 0 | - | 200 |"
+        in summary
+    )
+    assert (
+        "| vendor/model-2 | default | 1/1 | 1/1 | 0 (0) | 1.5 | 1.5 | 0 | 0 | - | 7 |"
+        in summary
+    )
+
+
+def test_the_summary_has_one_row_per_setting_with_latency_and_token_split() -> None:
+    """Median and worst latency per turn across every scenario and repeat,
+    and mean input/output/reasoning tokens per turn."""
+    summary = render_model_summary(
+        [
+            _result(
+                setting="default",
+                latency_seconds=2.0,
+                input_tokens=100,
+                output_tokens=60,
+                reasoning_tokens=50,
+            ),
+            _result(
+                setting="default",
+                latency_seconds=9.0,
+                input_tokens=300,
+                output_tokens=140,
+                reasoning_tokens=110,
+            ),
+            _result(
+                setting="default",
+                latency_seconds=4.0,
+                input_tokens=200,
+                output_tokens=100,
+                reasoning_tokens=80,
+            ),
+            _result(
+                setting="none",
+                latency_seconds=1.0,
+                stay_tool_ok=False,
+                input_tokens=90,
+                output_tokens=10,
+                reasoning_tokens=None,
+            ),
+        ]
+    )
+    assert (
+        "| vendor/model-1 | default | 3/3 | 3/3 | 0 (0) | 4.0 | 9.0 | 200 | 100 "
+        "| 80 | 300 |" in summary
+    )
+    assert (
+        "| vendor/model-1 | none | 0/1 | 0/1 | 0 (0) | 1.0 | 1.0 | 90 | 10 | - |"
+        in (summary)
+    )
+
+
+def test_the_results_table_shows_the_setting_and_the_token_split() -> None:
+    table = render_results_table(
+        [
+            _result(
+                setting="low", input_tokens=120, output_tokens=30, reasoning_tokens=12
+            ),
+            _result(setting="none", reasoning_tokens=None),
+        ]
+    )
+    assert "| vendor/model-1 | low | price_direct |" in table
+    assert "| 120 | 30 | 12 |" in table
+    assert table.rstrip().endswith("| - |")
