@@ -30,6 +30,7 @@ from fastapi.testclient import TestClient
 
 from services.agent import staff_follow_up as staff_follow_up_module
 from services.agent import webhook as webhook_module
+from services.agent.fixed_texts import FALLBACK, PLEASE_TYPE
 from services.agent.llm import dispatch as dispatch_module
 from services.agent.llm.caps import record_token_usage
 from services.agent.llm.client import ModelTransport
@@ -60,11 +61,9 @@ from services.agent.llm.model_types import (
 from services.agent.llm.session import touch_last_message_at
 from services.agent.main import app
 from services.agent.output_guard.enforcement import (
-    OUTPUT_GUARD_FALLBACK_MESSAGE,
     REASON_MISMATCH,
     GuardVerdict,
 )
-from services.agent.webhook import PLEASE_TYPE_MESSAGE
 from services.agent.whatsapp_send import (
     WHATSAPP_TEXT_BODY_MAX_CHARS,
     WhatsAppSendConfigurationError,
@@ -540,12 +539,17 @@ def _assert_fallback_sent_and_escalated(
     sender: _FakeWhatsAppSender,
     *,
     reason: str,
+    expected_text: str = FALLBACK.english,
 ) -> dict[str, Any]:
     """CLAUDE.md rule 12's invariant for a failed turn: the customer got
     exactly the fallback message (sent and recorded), and exactly one
-    escalation was opened, for `reason`. Returns that escalation's notes."""
-    assert sender.calls == [(_WA_ID, OUTPUT_GUARD_FALLBACK_MESSAGE)]
-    assert _outbound_bodies(db_conn) == [OUTPUT_GUARD_FALLBACK_MESSAGE]
+    escalation was opened, for `reason`. Returns that escalation's notes.
+
+    expected_text defaults to the English fallback: every test customer here
+    writes in English, and the fallback goes out in the language of their
+    latest written message (services/agent/fixed_texts.py)."""
+    assert sender.calls == [(_WA_ID, expected_text)]
+    assert _outbound_bodies(db_conn) == [expected_text]
     ((escalation_reason, notes),) = _escalations(db_conn)
     assert escalation_reason == reason
     return notes
@@ -778,13 +782,13 @@ def test_receive_message_blocks_a_guard_violating_reply_and_sends_the_fallback(
     assert len(transport.calls) == 1
     # The fallback was sent, not the guard-violating text.
     assert len(sender.calls) == 1
-    assert sender.calls[0][1] == OUTPUT_GUARD_FALLBACK_MESSAGE
+    assert sender.calls[0][1] == FALLBACK.english
     outbound_row = db_conn.execute(
         "SELECT direction, body FROM messages "
         "WHERE customer_phone = %s AND direction = 'outbound'",
         (_PHONE,),
     ).fetchone()
-    assert outbound_row == ("outbound", OUTPUT_GUARD_FALLBACK_MESSAGE)
+    assert outbound_row == ("outbound", FALLBACK.english)
     escalation_row = db_conn.execute(
         "SELECT reason FROM escalations WHERE customer_phone = %s", (_PHONE,)
     ).fetchone()
@@ -824,9 +828,9 @@ def test_receive_message_sends_the_fallback_and_escalates_when_the_reply_send_fa
     assert response.json() == {"status": "accepted"}
     assert sender.calls == [
         (_WA_ID, "hello from the model"),
-        (_WA_ID, OUTPUT_GUARD_FALLBACK_MESSAGE),
+        (_WA_ID, FALLBACK.english),
     ]
-    assert _outbound_bodies(db_conn) == [OUTPUT_GUARD_FALLBACK_MESSAGE]
+    assert _outbound_bodies(db_conn) == [FALLBACK.english]
     ((reason, notes),) = _escalations(db_conn)
     assert reason == "delivery_failed"
     assert notes == {}
@@ -962,8 +966,8 @@ def test_receive_message_logs_a_blocked_fallback_if_it_ever_happens(
     monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    """Structurally impossible for the real OUTPUT_GUARD_FALLBACK_MESSAGE
-    -- test_output_guard_fallback_message_is_always_allowed
+    """Structurally impossible for the real fallback text
+    -- test_every_fixed_text_rendering_is_always_allowed
     (tests/integration/test_output_guard.py) proves that end to end
     against the real guard -- so this test forces the scenario directly
     by faking enforce_outbound_text's verdict, to prove webhook.py's own
@@ -1375,7 +1379,7 @@ def test_receive_message_escalates_and_sends_fallback_when_the_spend_cap_is_exce
     assert response.json() == {"status": "accepted"}
     assert transport.calls == []
     assert len(sender.calls) == 1
-    assert sender.calls[0][1] == OUTPUT_GUARD_FALLBACK_MESSAGE
+    assert sender.calls[0][1] == FALLBACK.english
     inbound_row = db_conn.execute(
         "SELECT whatsapp_message_id FROM messages "
         "WHERE conversation_id = %s AND direction = 'inbound' "
@@ -1388,7 +1392,7 @@ def test_receive_message_escalates_and_sends_fallback_when_the_spend_cap_is_exce
         "WHERE conversation_id = %s AND direction = 'outbound'",
         (conversation_id,),
     ).fetchone()
-    assert outbound_row == ("outbound", OUTPUT_GUARD_FALLBACK_MESSAGE)
+    assert outbound_row == ("outbound", FALLBACK.english)
     escalation_row = db_conn.execute(
         "SELECT reason FROM escalations WHERE conversation_id = %s",
         (conversation_id,),
@@ -1439,13 +1443,13 @@ def test_receive_message_escalates_and_sends_fallback_when_the_turn_cap_is_excee
     assert response.json() == {"status": "accepted"}
     assert transport.calls == []
     assert len(sender.calls) == 1
-    assert sender.calls[0][1] == OUTPUT_GUARD_FALLBACK_MESSAGE
+    assert sender.calls[0][1] == FALLBACK.english
     outbound_row = db_conn.execute(
         "SELECT direction, body FROM messages "
         "WHERE conversation_id = %s AND direction = 'outbound'",
         (conversation_id,),
     ).fetchone()
-    assert outbound_row == ("outbound", OUTPUT_GUARD_FALLBACK_MESSAGE)
+    assert outbound_row == ("outbound", FALLBACK.english)
     escalation_row = db_conn.execute(
         "SELECT reason FROM escalations WHERE conversation_id = %s",
         (conversation_id,),
@@ -1466,8 +1470,8 @@ def test_receive_message_logs_a_blocked_turn_cap_fallback_if_it_ever_happens(
     db_conn: psycopg.Connection[Any],
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    """Structurally impossible for the real OUTPUT_GUARD_FALLBACK_MESSAGE
-    -- test_output_guard_fallback_message_is_always_allowed
+    """Structurally impossible for the real fallback text
+    -- test_every_fixed_text_rendering_is_always_allowed
     (tests/integration/test_output_guard.py) proves that end to end --
     so this test forces the scenario directly by faking
     enforce_outbound_text's verdict, mirroring test_receive_message_
@@ -1539,8 +1543,8 @@ def test_receive_message_still_sends_the_fallback_when_the_escalation_insert_fai
     assert response.status_code == 200
     assert response.json() == {"status": "accepted"}
     assert _escalations(db_conn) == []
-    assert sender.calls == [(_WA_ID, OUTPUT_GUARD_FALLBACK_MESSAGE)]
-    assert _outbound_bodies(db_conn) == [OUTPUT_GUARD_FALLBACK_MESSAGE]
+    assert sender.calls == [(_WA_ID, FALLBACK.english)]
+    assert _outbound_bodies(db_conn) == [FALLBACK.english]
     error_records = [
         r
         for r in caplog.records
@@ -1638,7 +1642,7 @@ def test_receive_message_records_partial_usage_when_the_cap_crosses_mid_turn(
     ).fetchone()
     assert usage_row == (50, 10, 60)
     assert len(sender.calls) == 1
-    assert sender.calls[0][1] == OUTPUT_GUARD_FALLBACK_MESSAGE
+    assert sender.calls[0][1] == FALLBACK.english
     escalation_row = db_conn.execute(
         "SELECT reason FROM escalations WHERE customer_phone = %s", (_PHONE,)
     ).fetchone()
@@ -1691,7 +1695,7 @@ def test_receive_message_records_partial_usage_when_the_daily_cap_crosses_mid_tu
     ).fetchone()
     assert usage_row == (1000, 0, 1000)
     assert len(sender.calls) == 1
-    assert sender.calls[0][1] == OUTPUT_GUARD_FALLBACK_MESSAGE
+    assert sender.calls[0][1] == FALLBACK.english
     escalation_row = db_conn.execute(
         "SELECT reason FROM escalations WHERE customer_phone = %s", (_PHONE,)
     ).fetchone()
@@ -1822,7 +1826,7 @@ def test_receive_message_escalates_and_sends_fallback_when_the_transport_fails_m
     ).fetchone()
     assert usage_row == (50, 10, 60)
     assert len(sender.calls) == 1
-    assert sender.calls[0][1] == OUTPUT_GUARD_FALLBACK_MESSAGE
+    assert sender.calls[0][1] == FALLBACK.english
     escalation_row = db_conn.execute(
         "SELECT reason FROM escalations WHERE customer_phone = %s", (_PHONE,)
     ).fetchone()
@@ -1875,7 +1879,7 @@ def test_receive_message_escalates_and_notifies_when_the_transport_fails_first(
     assert response.json() == {"status": "accepted"}
     assert len(transport.calls) == 1
     assert len(sender.calls) == 1
-    assert sender.calls[0][1] == OUTPUT_GUARD_FALLBACK_MESSAGE
+    assert sender.calls[0][1] == FALLBACK.english
     escalation_row = db_conn.execute(
         "SELECT reason FROM escalations WHERE customer_phone = %s", (_PHONE,)
     ).fetchone()
@@ -2758,7 +2762,7 @@ def test_receive_message_never_logs_or_stores_cost_for_a_price_floor_above_the_a
         (_PHONE,),
     ).fetchone()
     assert usage_row == (50, 10, 60)
-    assert sender.calls == [(_WA_ID, OUTPUT_GUARD_FALLBACK_MESSAGE)]
+    assert sender.calls == [(_WA_ID, FALLBACK.english)]
     events = [entry["event"] for entry in _error_events(caplog)]
     if escalation_insert_fails:
         assert _escalations(db_conn) == []
@@ -3208,7 +3212,7 @@ def test_receive_message_asks_the_customer_to_type_after_a_voice_note_or_image(
     message_type: str,
 ) -> None:
     """Owner decision A: stored, never sent to the model, answered with
-    PLEASE_TYPE_MESSAGE through the guard, and escalated for staff."""
+    fixed_texts.PLEASE_TYPE through the guard, and escalated for staff."""
     _set_llm_settings(monkeypatch, _settings())
     transport = _FakeTransport()
     _set_transport(monkeypatch, transport)
@@ -3224,8 +3228,9 @@ def test_receive_message_asks_the_customer_to_type_after_a_voice_note_or_image(
     assert response.json() == {"status": "unsupported_type"}
     assert transport.calls == []
     assert _inbound_bodies(db_conn) == [f"[{message_type} message]"]
-    assert sender.calls == [(_WA_ID, PLEASE_TYPE_MESSAGE)]
-    assert _outbound_bodies(db_conn) == [PLEASE_TYPE_MESSAGE]
+    # No written message yet, so Arabic then English.
+    assert sender.calls == [(_WA_ID, PLEASE_TYPE.render(None))]
+    assert _outbound_bodies(db_conn) == [PLEASE_TYPE.render(None)]
     assert _escalations(db_conn) == [
         ("unsupported_message_type", {"message_type": message_type})
     ]
@@ -3254,8 +3259,12 @@ def test_receive_message_answers_other_media_with_the_fallback(
     assert response.status_code == 200
     assert response.json() == {"status": "unsupported_type"}
     assert transport.calls == []
+    # No written message yet, so the fallback goes out Arabic then English.
     notes = _assert_fallback_sent_and_escalated(
-        db_conn, sender, reason="unsupported_message_type"
+        db_conn,
+        sender,
+        reason="unsupported_message_type",
+        expected_text=FALLBACK.render(None),
     )
     assert notes == {"message_type": message_type}
 
@@ -3285,6 +3294,97 @@ def test_receive_message_ignores_reactions_stickers_and_unknown_types(
     assert _conversation_count(db_conn) == 0
     assert transport.calls == []
     assert sender.calls == []
+
+
+def _seed_written_message(db_conn: psycopg.Connection[Any], body: str) -> None:
+    """An earlier written message from _PHONE -- the one that decides the
+    language of a fixed text sent afterwards."""
+    conversation_id = seed_conversation(db_conn, customer_phone=_PHONE)
+    seed_message(
+        db_conn,
+        conversation_id,
+        direction="inbound",
+        body=body,
+        customer_phone=_PHONE,
+        created_at=datetime.now(UTC) - timedelta(minutes=1),
+    )
+
+
+def test_receive_message_asks_an_arabic_customer_to_type_in_arabic_only(
+    webhook_client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+    db_conn: psycopg.Connection[Any],
+) -> None:
+    """Owner decision (2026-09-30): once the customer has written, a fixed
+    text goes out in their language alone -- Saudi dialect for Arabic."""
+    _set_llm_settings(monkeypatch, _settings())
+    _set_transport(monkeypatch, _FakeTransport())
+    sender = _FakeWhatsAppSender()
+    _set_whatsapp_sender(monkeypatch, sender)
+    _seed_written_message(db_conn, "السلام عليكم، أبغى غرفة")
+
+    _post_messages(webhook_client, [_media_message("wamid.voice-ar", "audio")])
+
+    assert sender.calls == [(_WA_ID, PLEASE_TYPE.arabic)]
+
+
+def test_receive_message_sends_an_indonesian_customer_the_indonesian_fallback(
+    webhook_client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+    db_conn: psycopg.Connection[Any],
+) -> None:
+    """A failed turn after an Indonesian message: the fallback in Indonesian
+    alone, never English (the client's customers write Arabic, English and
+    Indonesian)."""
+    _set_llm_settings(monkeypatch, _settings())
+    _set_transport(
+        monkeypatch, _ScriptedTransport([ModelUnavailableError("simulated outage")])
+    )
+    sender = _FakeWhatsAppSender()
+    _set_whatsapp_sender(monkeypatch, sender)
+    payload = _whatsapp_payload(
+        wa_id=_WA_ID, message_id="wamid.indonesian", body="Halo, berapa harga kamar?"
+    )
+
+    _post(webhook_client, payload, signature=_sign(json.dumps(payload).encode()))
+
+    _assert_fallback_sent_and_escalated(
+        db_conn,
+        sender,
+        reason="model_unavailable",
+        expected_text=FALLBACK.indonesian,
+    )
+
+
+def test_receive_message_falls_back_to_both_languages_when_the_lookup_fails(
+    webhook_client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+    db_conn: psycopg.Connection[Any],
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The language read failing never blocks the notice: it goes out
+    Arabic then English, and the failure is a warning in the log."""
+    _set_llm_settings(monkeypatch, _settings())
+    _set_transport(monkeypatch, _FakeTransport())
+    sender = _FakeWhatsAppSender()
+    _set_whatsapp_sender(monkeypatch, sender)
+    _seed_written_message(db_conn, "السلام عليكم، أبغى غرفة")
+
+    def _lookup_fails(*_args: Any, **_kwargs: Any) -> str:
+        raise psycopg.OperationalError("simulated read failure")
+
+    monkeypatch.setattr(webhook_module, "customer_language", _lookup_fails)
+    caplog.set_level(logging.WARNING, logger="services.agent.webhook")
+
+    _post_messages(webhook_client, [_media_message("wamid.voice-lookup", "audio")])
+
+    assert sender.calls == [(_WA_ID, PLEASE_TYPE.render(None))]
+    warnings = [
+        json.loads(r.getMessage())
+        for r in caplog.records
+        if r.levelno == logging.WARNING and r.name == "services.agent.webhook"
+    ]
+    assert [w["event"] for w in warnings] == ["notice_language_lookup_failed"]
 
 
 def test_receive_message_processes_every_message_in_a_batch(
@@ -3491,7 +3591,7 @@ def test_receive_message_second_message_hits_the_cap_from_the_first_recording(
     # fallback outbound reply sent by _escalate_cap_exceeded.
     assert _message_count(db_conn) == 4
     assert len(second_sender.calls) == 1
-    assert second_sender.calls[0][1] == OUTPUT_GUARD_FALLBACK_MESSAGE
+    assert second_sender.calls[0][1] == FALLBACK.english
     escalation_row = db_conn.execute(
         "SELECT reason FROM escalations WHERE customer_phone = %s", (_PHONE,)
     ).fetchone()
