@@ -17,12 +17,13 @@ test there a second time with the app connected as hotel_agent.
 from __future__ import annotations
 
 import logging
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 from typing import Any
 
 import psycopg
 import pytest
 
+from services.agent.llm.config import DEFAULT_QUOTE_VALIDITY_MINUTES
 from services.agent.output_guard.quotes import load_allowed_amounts
 from services.inventory.operations import check_availability, create_hold
 from services.pricing.compute import compute_quote
@@ -39,6 +40,8 @@ from tests.integration._seed import (
 )
 
 pytestmark = pytest.mark.usefixtures("db_conn")
+
+_QUOTE_VALIDITY = timedelta(minutes=DEFAULT_QUOTE_VALIDITY_MINUTES)
 
 _ROLES = ("hotel_agent", "hotel_worker")
 
@@ -512,7 +515,9 @@ def test_agent_prices_records_and_reads_back_a_quote(
             customer_phone="+966500000001",
             conversation_id=conversation_id,
         )
-        allowed = load_allowed_amounts(agent, conversation_id)
+        allowed = load_allowed_amounts(
+            agent, conversation_id, quote_validity=_QUOTE_VALIDITY
+        )
 
     assert available is True
     assert quote.ask_price_total == 12_000

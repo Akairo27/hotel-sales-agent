@@ -27,11 +27,12 @@ generate_reply from that payload, never write it to the database.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import date
+from datetime import date, datetime, timedelta
 from typing import Any
 
 import psycopg
 
+from lib.money import format_halalas_as_arabic_riyal, format_halalas_as_sar
 from services.agent.llm.errors import ConversationNotFoundError
 from services.agent.llm.model_types import ModelTurn, Turn, UserTurn
 from services.agent.llm.session import load_session_start
@@ -110,29 +111,42 @@ def load_recent_messages(
 @dataclass(frozen=True)
 class CurrentStay:
     """The stay the session's latest quote priced -- what the system prompt
-    names as the current stay (prompt.render_system_instruction). No
-    price and no cost: only what the customer asked for."""
+    names as the current stay (prompt.render_system_instruction): what the
+    customer asked for, and the quote's total and how long it stays valid
+    (owner decision 2026-09-30). The total is a get_quote display string,
+    copied, never a number the model could compute with; no cost."""
 
     hotel_name: str
     room_type_name: str
     check_in: date
     check_out: date
     rooms: int
+    total_price_display: str
+    total_price_display_ar: str
+    valid_until: datetime
+    is_valid: bool
 
 
+# Validity is judged by the database's now(), the clock that stamped
+# quotes.created_at -- the same test the output guard applies
+# (services/agent/output_guard/quotes.py).
 _CURRENT_STAY_SQL = """
-    SELECT h.hotel_name, rt.room_type_name, q.check_in, q.check_out, q.rooms
+    SELECT h.hotel_name, rt.room_type_name, q.check_in, q.check_out, q.rooms,
+           q.ask_price_total,
+           q.created_at + %(validity)s::interval,
+           q.created_at + %(validity)s::interval > now()
     FROM quotes AS q
     JOIN hotels AS h ON h.id = q.hotel_id
     JOIN room_types AS rt ON rt.id = q.room_type_id
-    WHERE q.conversation_id = %s AND q.created_at >= %s
+    WHERE q.conversation_id = %(conversation_id)s
+      AND q.created_at >= %(session_start)s
     ORDER BY q.created_at DESC, q.id DESC
     LIMIT 1
 """
 
 
 def load_current_stay(
-    conn: psycopg.Connection[Any], conversation_id: int
+    conn: psycopg.Connection[Any], conversation_id: int, *, quote_validity: timedelta
 ) -> CurrentStay | None:
     """The current session's most recently quoted stay, or None when the
     session has no quote yet (or no messages at all).
@@ -148,16 +162,36 @@ def load_current_stay(
     session_start = load_session_start(conn, conversation_id)
     if session_start is None:
         return None
-    row = conn.execute(_CURRENT_STAY_SQL, (conversation_id, session_start)).fetchone()
+    row = conn.execute(
+        _CURRENT_STAY_SQL,
+        {
+            "conversation_id": conversation_id,
+            "session_start": session_start,
+            "validity": quote_validity,
+        },
+    ).fetchone()
     if row is None:
         return None
-    hotel_name, room_type_name, check_in, check_out, rooms = row
+    (
+        hotel_name,
+        room_type_name,
+        check_in,
+        check_out,
+        rooms,
+        total,
+        valid_until,
+        valid,
+    ) = row
     return CurrentStay(
         hotel_name=hotel_name,
         room_type_name=room_type_name,
         check_in=check_in,
         check_out=check_out,
         rooms=int(rooms),
+        total_price_display=format_halalas_as_sar(int(total)),
+        total_price_display_ar=format_halalas_as_arabic_riyal(int(total)),
+        valid_until=valid_until,
+        is_valid=bool(valid),
     )
 
 

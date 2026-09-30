@@ -141,7 +141,7 @@ import os
 import traceback
 from collections.abc import Iterator
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import psycopg
@@ -729,6 +729,11 @@ _REASON_DELIVERY_FAILED = "delivery_failed"
 # A log label only, never stored: the output guard opens (and names) its
 # own escalation for a blocked reply before the fallback is sent.
 _REASON_OUTPUT_GUARD_BLOCKED = "output_guard_blocked"
+# The quote validity the guard applies to a fixed text: none. Every
+# fixed_texts rendering is digit-free, so no quote may ever be what makes
+# one allowed, and this path must not depend on settings that might be the
+# very thing that failed to load.
+_FIXED_TEXT_QUOTE_VALIDITY = timedelta(0)
 # Anything else -- a bug, a database error inside the turn -- deliberately
 # left as one open category, the same way migration 0024's comment on
 # escalations.reason leaves the full set of reasons open.
@@ -882,7 +887,10 @@ async def _send_fallback_or_log_failure(
     notice_text = notice.render(_notice_language(conn, conversation_id))
     try:
         verdict = enforce_outbound_text(
-            conn, conversation_id=conversation_id, text=notice_text
+            conn,
+            conversation_id=conversation_id,
+            text=notice_text,
+            quote_validity=_FIXED_TEXT_QUOTE_VALIDITY,
         )
         if not verdict.allowed:
             logger.error(
@@ -1230,6 +1238,7 @@ async def _process_turn(
         conversation_id=conversation_id,
         customer_phone=customer_phone,
         reply_text=outcome.text,
+        quote_validity=llm_settings.quote_validity,
     )
 
 
@@ -1276,7 +1285,11 @@ def _undeliverable_reply_reason(text: str) -> str | None:
 
 
 def _check_reply_and_prepare_sender(
-    conn: psycopg.Connection[Any], *, conversation_id: int, text: str
+    conn: psycopg.Connection[Any],
+    *,
+    conversation_id: int,
+    text: str,
+    quote_validity: timedelta,
 ) -> WhatsAppSender | GuardVerdict | Exception:
     """Runs the output guard on the reply, then builds the WhatsApp sender
     for an allowed one. Returns the sender (allowed), the blocking
@@ -1287,7 +1300,10 @@ def _check_reply_and_prepare_sender(
     outside this `except` block."""
     try:
         verdict = enforce_outbound_text(
-            conn, conversation_id=conversation_id, text=text
+            conn,
+            conversation_id=conversation_id,
+            text=text,
+            quote_validity=quote_validity,
         )
         if not verdict.allowed:
             return verdict
@@ -1312,6 +1328,7 @@ async def _send_reply(
     conversation_id: int,
     customer_phone: str,
     reply_text: str,
+    quote_validity: timedelta,
 ) -> _DeliveryFailure | None:
     """Sends a model reply; returns None when it was delivered, otherwise
     why not: blank or over-length (not sendable at all), a guard or
@@ -1338,7 +1355,10 @@ async def _send_reply(
         return _DeliveryFailure(reason=undeliverable_reason)
 
     prepared = _check_reply_and_prepare_sender(
-        conn, conversation_id=conversation_id, text=formatted_text
+        conn,
+        conversation_id=conversation_id,
+        text=formatted_text,
+        quote_validity=quote_validity,
     )
     if isinstance(prepared, Exception):
         logger.error(
@@ -1377,6 +1397,7 @@ async def _deliver_reply(
     conversation_id: int,
     customer_phone: str,
     reply_text: str,
+    quote_validity: timedelta,
 ) -> str:
     """Delivers a model reply ("processed"), or hands the turn to
     _escalate_and_notify for whatever stopped it (_send_reply). Never
@@ -1386,6 +1407,7 @@ async def _deliver_reply(
         conversation_id=conversation_id,
         customer_phone=customer_phone,
         reply_text=reply_text,
+        quote_validity=quote_validity,
     )
     if failure is None:
         return _STATUS_PROCESSED

@@ -14,6 +14,7 @@ from typing import Any
 
 import pytest
 
+from services.agent.llm.config import DEFAULT_QUOTE_VALIDITY_MINUTES
 from services.agent.llm.conversation import ToolCallRecord
 from services.agent.llm.pricing import riyadh_calendar_day
 from tests.eval_model_candidates import (
@@ -29,6 +30,8 @@ from tests.eval_scenarios import (
     Scenario,
     ScenarioResult,
     asked_instead_of_guessing,
+    booking_answer_handled,
+    hotel_confirmed_before_pricing,
     hotel_name_retried_and_confirmed,
     mentions_night_count,
     quote_reply_complete,
@@ -74,15 +77,17 @@ def _result(**overrides: Any) -> ScenarioResult:
     return ScenarioResult(**fields)
 
 
-def test_there_are_thirteen_scenarios_with_unique_keys_and_the_planned_mix() -> None:
-    assert len(SCENARIOS) == 13
-    assert len({s.key for s in SCENARIOS}) == 13
+def test_there_are_twenty_two_scenarios_with_unique_keys_and_the_planned_mix() -> None:
+    assert len(SCENARIOS) == 22
+    assert len({s.key for s in SCENARIOS}) == 22
     assert Counter(s.category for s in SCENARIOS) == {
         "relative-date": 3,
         "price": 4,
         "attack": 3,
         "clarify": 1,
-        "hotel-name": 2,
+        "hotel-name": 3,
+        "price-validity": 2,
+        "booking": 6,
     }
 
 
@@ -93,18 +98,16 @@ def test_every_scenario_names_the_hotel_as_stored_but_the_approved_exceptions() 
     Arabic retry of a Latin name (owner-approved the same day)."""
     assert SEEDED_HOTEL_NAME == "Test Hotel"
     for scenario in SCENARIOS:
+        conversation = [scenario.customer_message] + [
+            body for _direction, body in scenario.earlier_messages
+        ]
         if scenario.expects_clarification:
             assert SEEDED_HOTEL_NAME not in scenario.customer_message
         elif scenario.category == "hotel-name":
-            texts = [scenario.customer_message] + [
-                body
-                for direction, body in scenario.earlier_messages
-                if direction == "inbound"
-            ]
-            assert not any(SEEDED_ARABIC_HOTEL_NAME in text for text in texts)
-            assert any(LATIN_NAME_OF_THE_ARABIC_HOTEL in text for text in texts)
+            assert SEEDED_ARABIC_HOTEL_NAME not in scenario.customer_message
+            assert any(LATIN_NAME_OF_THE_ARABIC_HOTEL in t for t in conversation)
         else:
-            assert SEEDED_HOTEL_NAME in scenario.customer_message, scenario.key
+            assert any(SEEDED_HOTEL_NAME in t for t in conversation), scenario.key
 
 
 def test_every_price_scenario_language_is_covered() -> None:
@@ -489,3 +492,70 @@ def test_the_results_table_has_the_quote_reply_and_name_retry_columns() -> None:
     table = render_results_table([_result(quote_reply_ok=False, name_retry_ok=None)])
     assert "| quote reply | name retry |" in table
     assert "| FAIL | - |" in table
+
+
+def _window_minutes() -> int:
+    return DEFAULT_QUOTE_VALIDITY_MINUTES
+
+
+def test_the_seeded_quotes_sit_on_the_right_side_of_the_validity_window() -> None:
+    """The requote scenario's quote has expired; the clarifying and booking
+    scenarios' quotes are still valid -- or they would test nothing."""
+    for scenario in SCENARIOS:
+        minutes = scenario.seeded_quote_minutes_ago
+        if scenario.key == "requote_after_expiry_ar":
+            assert minutes is not None and minutes > _window_minutes()
+        elif scenario.category in ("booking", "price-validity"):
+            assert minutes is not None and minutes < _window_minutes(), scenario.key
+
+
+def test_every_booking_yes_is_from_the_owners_dialect_list() -> None:
+    answers = {s.customer_message for s in SCENARIOS if s.expects_booking_request}
+    assert answers == {"ايه", "أيوه", "صافي", "ok", "iya"}
+    (unclear,) = [s for s in SCENARIOS if s.expects_yes_no_question]
+    assert unclear.customer_message == "إيه؟"
+
+
+def _booking_call(requested: bool) -> ToolCallRecord:
+    return ToolCallRecord(
+        name="request_booking_follow_up", args={}, result={"requested": requested}
+    )
+
+
+def test_a_clear_yes_passes_only_when_the_booking_is_passed_on() -> None:
+    scenario = _scenario("booking_yes_gulf")
+    done = "أبشر، بلّغت زميلي بطلبك. يتواصل معك قريباً إن شاء الله."
+    assert booking_answer_handled(scenario, [_booking_call(True)], done)
+    assert not booking_answer_handled(scenario, [], done)
+    assert not booking_answer_handled(
+        scenario, [_booking_call(True)], "اكتب «نعم أكّد الحجز» لو سمحت."
+    )
+
+
+def test_an_unclear_answer_passes_only_with_one_natural_question() -> None:
+    scenario = _scenario("booking_unclear_ar")
+    question = "يعني تحب أبلّغ زميلي يؤكّد لك الحجز؟"
+    assert booking_answer_handled(scenario, [], question)
+    assert not booking_answer_handled(scenario, [_booking_call(True)], question)
+    assert not booking_answer_handled(scenario, [], "اكتب نعم لو تبي تكمل.")
+
+
+def test_booking_check_is_not_applicable_elsewhere() -> None:
+    assert booking_answer_handled(_scenario("price_direct"), [], "") is None
+
+
+def test_a_hotel_from_context_needs_a_confirmation_and_no_price() -> None:
+    scenario = _scenario("name_from_context_en")
+    confirm = f"Do you mean {SEEDED_ARABIC_HOTEL_NAME}?"
+    assert hotel_confirmed_before_pricing(scenario, [], confirm)
+    assert not hotel_confirmed_before_pricing(
+        scenario, [_call("get_quote", "2026-10-05", "2026-10-07")], confirm
+    )
+    assert not hotel_confirmed_before_pricing(scenario, [], "It is 900.00 SAR.")
+    assert hotel_confirmed_before_pricing(_scenario("price_direct"), [], "") is None
+
+
+def test_the_results_table_has_the_confirm_and_booking_columns() -> None:
+    table = render_results_table([_result(hotel_confirmed_ok=True, booking_ok=False)])
+    assert "| confirm | booking |" in table
+    assert "| ok | FAIL |" in table

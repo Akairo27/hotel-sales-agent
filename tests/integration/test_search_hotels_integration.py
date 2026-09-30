@@ -9,12 +9,13 @@ lives in tests/unit/test_llm_dispatch.py.
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import psycopg
 import pytest
 
+from services.agent.llm.config import DEFAULT_QUOTE_VALIDITY_MINUTES
 from services.agent.llm.dispatch import (
     HOTEL_RESULT_KEYS,
     MAX_SEARCH_HOTELS_RESULTS,
@@ -27,6 +28,8 @@ from services.agent.llm.errors import InvalidToolArgumentsError
 from tests.integration._seed import seed_hotel, seed_room_type
 
 pytestmark = pytest.mark.usefixtures("db_conn")
+
+_QUOTE_VALIDITY = timedelta(minutes=DEFAULT_QUOTE_VALIDITY_MINUTES)
 
 _NOW = datetime(2026, 9, 28, tzinfo=UTC)
 
@@ -221,6 +224,7 @@ def test_dispatch_tool_resolves_a_stay_then_allows_check_availability(
         customer_phone=None,
         conversation_id=None,
         resolved_stays=resolved_stays,
+        quote_validity=_QUOTE_VALIDITY,
     )
     assert (hotel_id, room_type_id) in resolved_stays
 
@@ -238,6 +242,7 @@ def test_dispatch_tool_resolves_a_stay_then_allows_check_availability(
         customer_phone=None,
         conversation_id=None,
         resolved_stays=resolved_stays,
+        quote_validity=_QUOTE_VALIDITY,
     )
     assert (
         result["available"] is False
@@ -260,6 +265,7 @@ def test_dispatch_tool_still_rejects_a_pair_from_a_different_hotel(
         customer_phone=None,
         conversation_id=None,
         resolved_stays=resolved_stays,
+        quote_validity=_QUOTE_VALIDITY,
     )
 
     with pytest.raises(InvalidToolArgumentsError, match="was not returned"):
@@ -277,4 +283,5 @@ def test_dispatch_tool_still_rejects_a_pair_from_a_different_hotel(
             customer_phone=None,
             conversation_id=None,
             resolved_stays=resolved_stays,
+            quote_validity=_QUOTE_VALIDITY,
         )

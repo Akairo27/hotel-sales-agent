@@ -28,10 +28,18 @@ number forever, so without this a price quoted yesterday would still let a
 reply pass today, long after the demand and lead-time inputs that produced
 it have moved. A conversation with no messages has no session, and its
 quotes are read without a lower bound.
+
+And only quotes still VALID count (owner decision 2026-09-30): made less
+than quote_validity ago (config.DEFAULT_QUOTE_VALIDITY_MINUTES, 30 by
+default). A live test showed the model restating a price from its own
+reply hours earlier in the same session instead of calling get_quote; the
+session bound alone let that through. Measured with the database's own
+now(), the clock that stamped quotes.created_at, so no clock skew enters.
 """
 
 from __future__ import annotations
 
+from datetime import timedelta
 from typing import Any
 
 import psycopg
@@ -55,26 +63,27 @@ _LOAD_ALLOWED_AMOUNTS_SQL = """
     FROM quotes AS q
     WHERE q.conversation_id = %s
       AND q.created_at >= COALESCE(%s, '-infinity'::timestamptz)
+      AND q.created_at > now() - %s::interval
     ORDER BY q.id
 """
 
 
 def load_allowed_amounts(
-    conn: psycopg.Connection[Any], conversation_id: int
+    conn: psycopg.Connection[Any], conversation_id: int, *, quote_validity: timedelta
 ) -> AllowedAmounts:
-    """Reads every quote from conversation_id's current session and builds
-    the set of amounts a reply may legitimately state, plus the floor none
-    may fall below.
+    """Reads every still-valid quote (made less than quote_validity ago)
+    from conversation_id's current session and builds the set of amounts a
+    reply may legitimately state, plus the floor none may fall below.
 
     Returns an AllowedAmounts with an empty amounts_halalas and
-    floor_halalas=None when the session has no quotes yet — every stated
+    floor_halalas=None when the session has no valid quote — every stated
     amount is then illegitimate by construction, which is correct: a reply
-    that states any price before get_quote has run in this session has
-    nothing legitimate to have copied it from.
+    that states any price with no recent get_quote behind it has nothing
+    legitimate to have copied it from.
     """
     session_start = load_session_start(conn, conversation_id)
     rows = conn.execute(
-        _LOAD_ALLOWED_AMOUNTS_SQL, (conversation_id, session_start)
+        _LOAD_ALLOWED_AMOUNTS_SQL, (conversation_id, session_start, quote_validity)
     ).fetchall()
 
     quote_ids: list[int] = []

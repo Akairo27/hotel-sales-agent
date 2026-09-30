@@ -210,7 +210,9 @@ async def generate_reply(
         customer_name=customer_name,
         today=today,
         today_hijri=to_hijri(today),
-        current_stay=load_current_stay(conn, conversation_id),
+        current_stay=load_current_stay(
+            conn, conversation_id, quote_validity=settings.quote_validity
+        ),
     )
 
     tool_calls: list[ToolCallRecord] = []
@@ -266,6 +268,7 @@ async def generate_reply(
                         customer_phone=state.customer_phone,
                         conversation_id=state.id,
                         resolved_stays=resolved_stays,
+                        quote_validity=settings.quote_validity,
                     )
                 except InvalidToolArgumentsError as exc:
                     # A fixable model mistake, not a failed turn: the model

@@ -130,7 +130,9 @@ def _stub_conversation_state(
         lambda _conn, _conversation_id, **_kwargs: [],
     )
     monkeypatch.setattr(
-        conversation_module, "load_current_stay", lambda _conn, _conversation_id: None
+        conversation_module,
+        "load_current_stay",
+        lambda _conn, _conversation_id, **_kwargs: None,
     )
     monkeypatch.setattr(
         conversation_module,
@@ -753,11 +755,17 @@ def test_generate_reply_names_the_sessions_current_stay_in_the_system_instructio
         check_in=date(2026, 10, 20),
         check_out=date(2026, 10, 22),
         rooms=2,
+        total_price_display="1,375.40 SAR",
+        total_price_display_ar="1,375.40 ريال",
+        valid_until=datetime(2026, 9, 30, 20, 55, tzinfo=UTC),
+        is_valid=True,
     )
-    loaded_for: list[int] = []
+    loaded_for: list[tuple[int, Any]] = []
 
-    def _load_current_stay(_conn: Any, conversation_id: int) -> CurrentStay:
-        loaded_for.append(conversation_id)
+    def _load_current_stay(
+        _conn: Any, conversation_id: int, *, quote_validity: Any
+    ) -> CurrentStay:
+        loaded_for.append((conversation_id, quote_validity))
         return stay
 
     monkeypatch.setattr(conversation_module, "load_current_stay", _load_current_stay)
@@ -774,7 +782,7 @@ def test_generate_reply_names_the_sessions_current_stay_in_the_system_instructio
         )
     )
 
-    assert loaded_for == [7]
+    assert loaded_for == [(7, _SETTINGS.quote_validity)]
     (instruction,) = transport.instructions
     assert (
         "The current stay in this conversation, from its latest quote: Test Hotel, "

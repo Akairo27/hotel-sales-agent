@@ -19,6 +19,7 @@ from __future__ import annotations
 import json
 import logging
 from dataclasses import dataclass
+from datetime import timedelta
 from typing import Any
 
 import psycopg
@@ -189,11 +190,17 @@ def _open_escalation(
 
 
 def enforce_outbound_text(
-    conn: psycopg.Connection[Any], *, conversation_id: int, text: str
+    conn: psycopg.Connection[Any],
+    *,
+    conversation_id: int,
+    text: str,
+    quote_validity: timedelta,
 ) -> GuardVerdict:
-    """Checks text against conversation_id's quotes and, if any stated
-    amount does not match or falls below its floor, opens an escalation
-    and logs the block before returning.
+    """Checks text against conversation_id's still-valid quotes (made less
+    than quote_validity ago -- quotes.load_allowed_amounts) and, if any
+    stated amount does not match or falls below its floor, opens an
+    escalation and logs the block before returning. A price restated from
+    an expired quote is blocked like any other unmatched amount.
 
     Raises:
         ConversationNotFoundError: conversation_id does not exist. Only
@@ -202,7 +209,7 @@ def enforce_outbound_text(
             against it is allowed without ever reaching the database
             write that would raise this.
     """
-    allowed = load_allowed_amounts(conn, conversation_id)
+    allowed = load_allowed_amounts(conn, conversation_id, quote_validity=quote_validity)
     findings = evaluate_amounts(text, allowed)
 
     if amounts_are_allowed(findings):

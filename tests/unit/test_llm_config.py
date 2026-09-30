@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import timedelta
 from decimal import Decimal
 
 import pytest
@@ -219,3 +220,31 @@ def test_the_shipped_route_loads_with_the_openrouter_key_only() -> None:
     assert settings.api_key == "test-openrouter-key"
     assert settings.openrouter_route == OPENROUTER_ROUTES[_GLM_MODEL]
     assert settings.token_rates == OPENROUTER_ROUTES[_GLM_MODEL].token_rates
+
+
+def test_quote_validity_defaults_to_thirty_minutes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Owner decision 2026-09-30: optional, 30 minutes when not set."""
+    env = _env_with_allowed_model(monkeypatch)
+    env.pop("QUOTE_VALIDITY_MINUTES", None)
+
+    assert load_llm_settings(env).quote_validity == timedelta(minutes=30)
+
+
+def test_quote_validity_can_be_set(monkeypatch: pytest.MonkeyPatch) -> None:
+    env = {**_env_with_allowed_model(monkeypatch), "QUOTE_VALIDITY_MINUTES": "45"}
+
+    assert load_llm_settings(env).quote_validity == timedelta(minutes=45)
+
+
+@pytest.mark.parametrize("raw", ["0", "-5", "thirty", "1.5"])
+def test_a_quote_validity_that_is_not_a_positive_whole_number_is_refused(
+    monkeypatch: pytest.MonkeyPatch, raw: str
+) -> None:
+    """Refused at startup (validate_startup_configuration loads these
+    settings), never discovered on a customer's turn."""
+    env = {**_env_with_allowed_model(monkeypatch), "QUOTE_VALIDITY_MINUTES": raw}
+
+    with pytest.raises(LlmConfigurationError, match="QUOTE_VALIDITY_MINUTES"):
+        load_llm_settings(env)
