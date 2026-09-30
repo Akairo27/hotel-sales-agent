@@ -49,3 +49,9 @@ def test_the_key_reaches_only_the_eval_step_and_is_never_echoed() -> None:
 def test_the_artifact_is_the_results_report_only() -> None:
     upload = _text().split("Upload the results", 1)[1]
     assert "path: model-eval-results.md" in upload
+
+
+def test_the_run_compares_the_four_approved_settings() -> None:
+    """Owner-approved (2026-09-30): default, low, minimal and none."""
+    settings = re.findall(r"--reasoning-effort (\w+)", _text())
+    assert settings == ["default", "low", "minimal", "none"]

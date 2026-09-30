@@ -1,9 +1,9 @@
 name: Model eval (manual)
 
 # Paid model comparison (tests/eval_model_candidates.py), owner-approved
-# 2026-09-30: GLM-5.3 under three reasoning settings -- default (no
-# reasoning field, production today), effort "low" and effort "none" -- on
-# the eight synthetic scenarios, repeated. Manual only: it spends real
+# 2026-09-30: GLM-5.3 under four reasoning settings -- default (no
+# reasoning field, production today), effort "low", "minimal" and "none" --
+# on the nine synthetic scenarios, repeated. Manual only: it spends real
 # money, so it never runs on a push or a pull request.
 #
 # The database is a throwaway Postgres container that exists only for this
@@ -30,9 +30,9 @@ jobs:
   eval:
     name: model eval
     runs-on: ubuntu-24.04
-    # 8 scenarios x 3 settings x 3 repeats is 72 turns; a turn is capped at
+    # 9 scenarios x 4 settings x 3 repeats is 108 turns; a turn is capped at
     # 75s by generate_reply's own budget.
-    timeout-minutes: 120
+    timeout-minutes: 180
     services:
       postgres:
         image: postgres:17.11
@@ -74,7 +74,8 @@ jobs:
           uv run python -m tests.eval_model_candidates --confirm-scratch-db
           --model "$EVAL_MODEL"
           --provider crusoe --provider inference-net
-          --reasoning-effort default --reasoning-effort low --reasoning-effort none
+          --reasoning-effort default --reasoning-effort low
+          --reasoning-effort minimal --reasoning-effort none
           --repeat "$REPEAT"
           --output model-eval-results.md
 

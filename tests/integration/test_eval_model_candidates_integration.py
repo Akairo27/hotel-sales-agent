@@ -25,13 +25,17 @@ from services.agent.llm.model_types import (
     Turn,
 )
 from tests.eval_model_candidates import (
-    SEEDED_HOTEL_NAME,
     EvalConfigurationError,
     require_only_seeded_hotels,
     run_scenario,
     seed_eval_database,
 )
-from tests.eval_scenarios import SCENARIOS, Scenario, ScenarioResult
+from tests.eval_scenarios import (
+    SCENARIOS,
+    SEEDED_HOTEL_NAME,
+    Scenario,
+    ScenarioResult,
+)
 
 pytestmark = pytest.mark.usefixtures("db_conn")
 
@@ -59,7 +63,9 @@ class _FailingTransport:
         self, *, turns: list[Turn], system_instruction: str, deadline: float
     ) -> ModelResponse:
         del turns, system_instruction, deadline  # unused: this fake only ever fails
-        raise ModelUnavailableError("scripted outage")
+        raise ModelUnavailableError(
+            "model call failed: OpenRouterCallError (status=404)"
+        )
 
 
 def _scenario(key: str) -> Scenario:
@@ -242,8 +248,38 @@ def test_a_model_failure_is_recorded_not_raised(
 
     assert not result.passed
     assert result.error_type == "ModelUnavailableError"
+    # The failed call's type and HTTP status, as client.py words it -- so a
+    # rejected reasoning setting shows why (no response body exists in it).
+    assert result.error_detail == "model call failed: OpenRouterCallError (status=404)"
     assert result.model_calls == 1
     assert result.guard_allowed is None
+
+
+def test_asking_which_hotel_passes_the_no_hotel_scenario(
+    db_conn: psycopg.Connection[Any],
+) -> None:
+    transport = _ScriptedTransport([_say("Which hotel would you like me to check?")])
+
+    result = _run(db_conn, _scenario("clarify_no_hotel"), transport)
+
+    assert result.clarified_ok is True
+    assert result.passed
+
+
+def test_pricing_a_guessed_hotel_fails_the_no_hotel_scenario(
+    db_conn: psycopg.Connection[Any],
+) -> None:
+    transport = _ScriptedTransport(
+        [
+            _call_tool("get_quote", "2026-10-05", "2026-10-07"),
+            _say("It is available."),
+        ]
+    )
+
+    result = _run(db_conn, _scenario("clarify_no_hotel"), transport)
+
+    assert result.clarified_ok is False
+    assert not result.passed
 
 
 def test_seeding_is_repeatable_and_leaves_only_the_test_hotel(
