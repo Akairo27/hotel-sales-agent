@@ -29,6 +29,7 @@ from services.agent.llm.dispatch import tool_error_result
 from services.agent.llm.errors import (
     DailySpendCapExceededError,
     InvalidToolArgumentsError,
+    NumberDailyTokenCapExceededError,
     TokenSpendCapExceededError,
     ToolErrorCode,
     ToolLoopLimitError,
@@ -57,6 +58,7 @@ _SETTINGS = LlmSettings(
     max_tokens_per_conversation=50_000,
     max_spend_per_day_usd=Decimal("5.00"),
     max_messages_per_number_per_day=50,
+    max_tokens_per_number_per_day=100_000,
 )
 
 
@@ -270,9 +272,15 @@ def test_generate_reply_refuses_when_the_conversation_token_cap_is_hit(
     _stub_conversation_state(monkeypatch, turn_count=0)
 
     def _raise_token_cap(
-        _conn: Any, *, conversation_id: int, now: Any, settings: Any, usage_so_far: Any
+        _conn: Any,
+        *,
+        conversation_id: int,
+        customer_phone: str,
+        now: Any,
+        settings: Any,
+        usage_so_far: Any,
     ) -> None:
-        del conversation_id, now, settings, usage_so_far
+        del conversation_id, customer_phone, now, settings, usage_so_far
         raise TokenSpendCapExceededError("conversation 1 is at its token cap")
 
     monkeypatch.setattr(conversation_module, "check_token_spend_caps", _raise_token_cap)
@@ -292,15 +300,63 @@ def test_generate_reply_refuses_when_the_conversation_token_cap_is_hit(
     assert transport.calls == []
 
 
+def test_generate_reply_refuses_when_the_number_daily_token_cap_is_hit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The per-number cap is checked against the conversation's own phone
+    number, read from the database (load_conversation_state), never from
+    anything the model or the customer's message could supply."""
+    _stub_conversation_state(monkeypatch, turn_count=0)
+    seen_phones: list[str] = []
+
+    def _raise_number_cap(
+        _conn: Any,
+        *,
+        conversation_id: int,
+        customer_phone: str,
+        now: Any,
+        settings: Any,
+        usage_so_far: Any,
+    ) -> None:
+        del conversation_id, now, settings, usage_so_far
+        seen_phones.append(customer_phone)
+        raise NumberDailyTokenCapExceededError("the number is at its daily cap")
+
+    monkeypatch.setattr(
+        conversation_module, "check_token_spend_caps", _raise_number_cap
+    )
+    transport = FakeTransport([_text_response("should never be reached")])
+
+    with pytest.raises(NumberDailyTokenCapExceededError):
+        asyncio.run(
+            generate_reply(
+                _NOT_A_CONNECTION,
+                conversation_id=1,
+                customer_name=None,
+                transport=transport,
+                settings=_SETTINGS,
+                now=_NOW,
+            )
+        )
+    assert transport.calls == []
+    assert seen_phones == ["+966500000001"]
+
+
 def test_generate_reply_refuses_when_the_daily_spend_cap_is_hit(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     _stub_conversation_state(monkeypatch, turn_count=0)
 
     def _raise_daily_cap(
-        _conn: Any, *, conversation_id: int, now: Any, settings: Any, usage_so_far: Any
+        _conn: Any,
+        *,
+        conversation_id: int,
+        customer_phone: str,
+        now: Any,
+        settings: Any,
+        usage_so_far: Any,
     ) -> None:
-        del conversation_id, now, settings, usage_so_far
+        del conversation_id, customer_phone, now, settings, usage_so_far
         raise DailySpendCapExceededError("today's spend is at the daily cap")
 
     monkeypatch.setattr(conversation_module, "check_token_spend_caps", _raise_daily_cap)
@@ -340,11 +396,12 @@ def test_generate_reply_rechecks_the_spend_cap_before_every_model_call(
         _conn: Any,
         *,
         conversation_id: int,
+        customer_phone: str,
         now: Any,
         settings: Any,
         usage_so_far: UsageTotals,
     ) -> None:
-        del conversation_id, now, settings
+        del conversation_id, customer_phone, now, settings
         seen_usage_so_far.append(usage_so_far)
         if usage_so_far.total_tokens >= 20:
             raise TokenSpendCapExceededError("conversation 1 crossed its cap mid-turn")

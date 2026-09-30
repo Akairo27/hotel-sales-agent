@@ -9,7 +9,8 @@ by hand:
         --model deepseek/deepseek-v4-pro-0813 --provider <approved-slug> ...
 
 Reasoning settings (added 2026-09-30): --reasoning-effort is repeatable;
-"default" sends no reasoning field (production today), any other value is
+"default" sends no reasoning field (production until 2026-09-30, when
+"low" was chosen -- ARCHITECTURE.md §10), any other value is
 sent as OpenRouter's reasoning.effort. --repeat N runs every (setting,
 scenario) pair N times, interleaving settings within each repeat, and
 --output PATH also writes the report to a file (the manual GitHub workflow
@@ -60,16 +61,16 @@ import psycopg
 from psycopg import sql
 
 from services.agent.llm.client import (
-    REASONING_EFFORTS,
     GeminiTransport,
     ModelTransport,
     OpenRouterTransport,
-    ReasoningEffort,
 )
 from services.agent.llm.config import (
     GEMINI_MODELS,
     MODEL_ATTEMPT_TIMEOUT_MS,
+    REASONING_EFFORTS,
     LlmSettings,
+    ReasoningEffort,
 )
 from services.agent.llm.conversation import generate_reply
 from services.agent.llm.errors import (
@@ -301,6 +302,7 @@ def eval_settings(
         max_tokens_per_conversation=_EVAL_MAX_TOKENS_PER_CONVERSATION,
         max_spend_per_day_usd=_EVAL_MAX_SPEND_PER_DAY_USD,
         max_messages_per_number_per_day=_EVAL_MAX_MESSAGES_PER_NUMBER_PER_DAY,
+        max_tokens_per_number_per_day=_EVAL_MAX_TOKENS_PER_CONVERSATION,
     )
 
 

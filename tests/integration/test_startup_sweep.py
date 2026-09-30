@@ -60,6 +60,7 @@ def _llm_settings(*, max_messages_per_number_per_day: int = 1_000) -> LlmSetting
         max_tokens_per_conversation=1_000_000,
         max_spend_per_day_usd=Decimal("1000"),
         max_messages_per_number_per_day=max_messages_per_number_per_day,
+        max_tokens_per_number_per_day=10_000_000,
     )
 
 

@@ -2,7 +2,8 @@ name: Model eval (manual)
 
 # Paid model comparison (tests/eval_model_candidates.py), owner-approved
 # 2026-09-30: GLM-5.3 under four reasoning settings -- default (no
-# reasoning field, production today), effort "low", "minimal" and "none" --
+# reasoning field; production until "low" was chosen from run 36674059327),
+# effort "low", "minimal" and "none" --
 # on the nine synthetic scenarios, repeated. Manual only: it spends real
 # money, so it never runs on a push or a pull request.
 #

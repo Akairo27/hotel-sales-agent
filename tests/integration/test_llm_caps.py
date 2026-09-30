@@ -20,6 +20,7 @@ from services.agent.llm.caps import (
     MessageRateCapExceededError,
     check_message_rate_cap,
     check_token_spend_caps,
+    find_todays_cap_escalation,
     increment_turn_count,
     record_token_usage,
 )
@@ -27,15 +28,25 @@ from services.agent.llm.config import SESSION_CLOCK_SKEW_TOLERANCE, LlmSettings
 from services.agent.llm.conversation import UsageTotals
 from services.agent.llm.errors import (
     DailySpendCapExceededError,
+    NumberDailyTokenCapExceededError,
     TokenSpendCapExceededError,
 )
-from tests.integration._seed import seed_conversation, seed_message
+from tests.integration._seed import (
+    seed_conversation,
+    seed_escalation,
+    seed_message,
+)
 
 pytestmark = pytest.mark.usefixtures("db_conn")
 
 _PHONE = "+966500000001"
 _OTHER_PHONE = "+966500000002"
 _NOW = datetime(2026, 9, 1, 12, 0, 0, tzinfo=UTC)
+# _NOW's Asia/Riyadh calendar day, 2026-09-01, runs from 2026-08-31 21:00
+# UTC (fixed UTC+3, no DST) up to 2026-09-01 21:00 UTC.
+_LAST_SECOND_OF_THE_DAY_BEFORE = datetime(2026, 8, 31, 20, 59, 59, tzinfo=UTC)
+_FIRST_SECOND_OF_THE_DAY = datetime(2026, 8, 31, 21, 0, 0, tzinfo=UTC)
+_CAP_REASONS = ("turn_cap_exceeded", "token_spend_cap_exceeded")
 
 
 def _settings(
@@ -43,6 +54,7 @@ def _settings(
     max_tokens_per_conversation: int = 1_000_000,
     max_spend_per_day_usd: Decimal = Decimal("1000"),
     max_messages_per_number_per_day: int = 1_000,
+    max_tokens_per_number_per_day: int = 10_000_000,
 ) -> LlmSettings:
     return LlmSettings(
         model="test-model-v1",
@@ -52,6 +64,7 @@ def _settings(
         max_tokens_per_conversation=max_tokens_per_conversation,
         max_spend_per_day_usd=max_spend_per_day_usd,
         max_messages_per_number_per_day=max_messages_per_number_per_day,
+        max_tokens_per_number_per_day=max_tokens_per_number_per_day,
     )
 
 
@@ -71,6 +84,7 @@ def test_check_token_spend_caps_allows_one_token_under_the_conversation_cap(
     check_token_spend_caps(
         db_conn,
         conversation_id=conversation_id,
+        customer_phone=_PHONE,
         now=_NOW,
         settings=settings,
         usage_so_far=UsageTotals.zero(),
@@ -94,6 +108,7 @@ def test_check_token_spend_caps_raises_at_the_exact_conversation_cap(
         check_token_spend_caps(
             db_conn,
             conversation_id=conversation_id,
+            customer_phone=_PHONE,
             now=_NOW,
             settings=settings,
             usage_so_far=UsageTotals.zero(),
@@ -119,6 +134,7 @@ def test_check_token_spend_caps_sums_usage_across_several_calls(
         check_token_spend_caps(
             db_conn,
             conversation_id=conversation_id,
+            customer_phone=_PHONE,
             now=_NOW,
             settings=settings,
             usage_so_far=UsageTotals.zero(),
@@ -150,6 +166,7 @@ def test_check_token_spend_caps_conversation_cap_is_isolated_per_conversation(
         check_token_spend_caps(
             db_conn,
             conversation_id=capped_conversation_id,
+            customer_phone=_PHONE,
             now=_NOW,
             settings=settings,
             usage_so_far=UsageTotals.zero(),
@@ -159,6 +176,7 @@ def test_check_token_spend_caps_conversation_cap_is_isolated_per_conversation(
     check_token_spend_caps(
         db_conn,
         conversation_id=other_conversation_id,
+        customer_phone=_OTHER_PHONE,
         now=_NOW,
         settings=settings,
         usage_so_far=UsageTotals.zero(),
@@ -186,6 +204,7 @@ def test_check_token_spend_caps_daily_cap_is_global_across_phone_numbers(
     check_token_spend_caps(
         db_conn,
         conversation_id=conversation_b,
+        customer_phone=_OTHER_PHONE,
         now=_NOW,
         settings=settings,
         usage_so_far=UsageTotals.zero(),
@@ -205,6 +224,7 @@ def test_check_token_spend_caps_daily_cap_is_global_across_phone_numbers(
         check_token_spend_caps(
             db_conn,
             conversation_id=conversation_a,
+            customer_phone=_PHONE,
             now=_NOW,
             settings=settings,
             usage_so_far=UsageTotals.zero(),
@@ -233,6 +253,7 @@ def test_check_token_spend_caps_daily_cap_resets_on_the_riyadh_calendar_day(
         check_token_spend_caps(
             db_conn,
             conversation_id=conversation_id,
+            customer_phone=_PHONE,
             now=datetime(2026, 9, 1, 10, 0, 0, tzinfo=UTC),
             settings=settings,
             usage_so_far=UsageTotals.zero(),
@@ -244,6 +265,7 @@ def test_check_token_spend_caps_daily_cap_resets_on_the_riyadh_calendar_day(
     check_token_spend_caps(
         db_conn,
         conversation_id=conversation_id,
+        customer_phone=_PHONE,
         now=datetime(2026, 9, 1, 21, 0, 0, tzinfo=UTC),
         settings=settings,
         usage_so_far=UsageTotals.zero(),
@@ -269,6 +291,7 @@ def test_check_token_spend_caps_logs_the_daily_cap_block_every_time(
             check_token_spend_caps(
                 db_conn,
                 conversation_id=conversation_id,
+                customer_phone=_PHONE,
                 now=_NOW,
                 settings=settings,
                 usage_so_far=UsageTotals.zero(),
@@ -305,6 +328,7 @@ def test_check_token_spend_caps_includes_usage_so_far_in_the_conversation_total(
     check_token_spend_caps(
         db_conn,
         conversation_id=conversation_id,
+        customer_phone=_PHONE,
         now=_NOW,
         settings=settings,
         usage_so_far=UsageTotals(39, 0, 39),
@@ -316,6 +340,7 @@ def test_check_token_spend_caps_includes_usage_so_far_in_the_conversation_total(
         check_token_spend_caps(
             db_conn,
             conversation_id=conversation_id,
+            customer_phone=_PHONE,
             now=_NOW,
             settings=settings,
             usage_so_far=UsageTotals(40, 0, 40),
@@ -340,6 +365,7 @@ def test_check_token_spend_caps_includes_usage_so_far_in_the_daily_total(
         check_token_spend_caps(
             db_conn,
             conversation_id=conversation_id,
+            customer_phone=_PHONE,
             now=_NOW,
             settings=settings,
             usage_so_far=UsageTotals(1000, 0, 1000),
@@ -349,6 +375,7 @@ def test_check_token_spend_caps_includes_usage_so_far_in_the_daily_total(
     check_token_spend_caps(
         db_conn,
         conversation_id=conversation_id,
+        customer_phone=_PHONE,
         now=_NOW,
         settings=settings,
         usage_so_far=UsageTotals(999, 0, 999),
@@ -556,6 +583,7 @@ def test_check_token_spend_caps_ignores_usage_from_an_earlier_session(
     check_token_spend_caps(
         db_conn,
         conversation_id=conversation_id,
+        customer_phone=_PHONE,
         now=_NOW,
         settings=settings,
         usage_so_far=UsageTotals(8, 2, 10),
@@ -587,6 +615,7 @@ def test_check_token_spend_caps_still_counts_usage_from_the_current_session(
         check_token_spend_caps(
             db_conn,
             conversation_id=conversation_id,
+            customer_phone=_PHONE,
             now=_NOW,
             settings=settings,
             usage_so_far=UsageTotals(8, 2, 10),
@@ -632,6 +661,7 @@ def test_check_token_spend_caps_counts_first_turn_usage_stamped_before_the_sessi
         check_token_spend_caps(
             db_conn,
             conversation_id=conversation_id,
+            customer_phone=_PHONE,
             now=_NOW,
             settings=settings,
             usage_so_far=UsageTotals(8, 2, 10),
@@ -658,6 +688,7 @@ def test_check_token_spend_caps_skew_tolerance_is_exact_and_stays_small(
     check_token_spend_caps(
         db_conn,
         conversation_id=conversation_id,
+        customer_phone=_PHONE,
         now=_NOW,
         settings=settings,
         usage_so_far=UsageTotals(8, 2, 10),
@@ -674,7 +705,239 @@ def test_check_token_spend_caps_skew_tolerance_is_exact_and_stays_small(
         check_token_spend_caps(
             db_conn,
             conversation_id=conversation_id,
+            customer_phone=_PHONE,
             now=_NOW,
             settings=settings,
             usage_so_far=UsageTotals(8, 2, 10),
         )
+
+
+def test_check_token_spend_caps_number_cap_counts_every_session_of_the_day(
+    db_conn: psycopg.Connection[Any],
+) -> None:
+    """Unlike the per-session cap, the per-number cap does not reset after
+    an idle gap: tokens spent in this morning's session still count this
+    afternoon, when the per-session cap no longer sees them."""
+    settings = _settings(
+        max_tokens_per_conversation=100, max_tokens_per_number_per_day=100
+    )
+    conversation_id = seed_conversation(db_conn, customer_phone=_PHONE)
+    morning = datetime(2026, 9, 1, 0, 0, 0, tzinfo=UTC)
+    seed_message(
+        db_conn,
+        conversation_id,
+        direction="inbound",
+        body="morning",
+        customer_phone=_PHONE,
+        created_at=morning,
+    )
+    record_token_usage(
+        db_conn,
+        conversation_id=conversation_id,
+        customer_phone=_PHONE,
+        usage=UsageTotals(90, 5, 95),
+        now=morning + timedelta(minutes=1),
+    )
+    seed_message(
+        db_conn,
+        conversation_id,
+        direction="inbound",
+        body="afternoon",
+        customer_phone=_PHONE,
+        created_at=_NOW,
+    )
+
+    # 95 + 4 = 99: one token under the per-number cap.
+    check_token_spend_caps(
+        db_conn,
+        conversation_id=conversation_id,
+        customer_phone=_PHONE,
+        now=_NOW,
+        settings=settings,
+        usage_so_far=UsageTotals(3, 1, 4),
+    )
+    # 95 + 5 = 100: at the cap, reached mid-turn by usage_so_far alone.
+    with pytest.raises(NumberDailyTokenCapExceededError) as excinfo:
+        check_token_spend_caps(
+            db_conn,
+            conversation_id=conversation_id,
+            customer_phone=_PHONE,
+            now=_NOW,
+            settings=settings,
+            usage_so_far=UsageTotals(4, 1, 5),
+        )
+    assert _PHONE not in str(excinfo.value)
+    assert _PHONE.removeprefix("+") not in str(excinfo.value)
+
+
+def test_check_token_spend_caps_number_cap_resets_on_the_riyadh_calendar_day(
+    db_conn: psycopg.Connection[Any],
+) -> None:
+    settings = _settings(max_tokens_per_number_per_day=100)
+    conversation_id = seed_conversation(db_conn, customer_phone=_PHONE)
+    record_token_usage(
+        db_conn,
+        conversation_id=conversation_id,
+        customer_phone=_PHONE,
+        usage=UsageTotals(100, 0, 100),
+        now=_LAST_SECOND_OF_THE_DAY_BEFORE,
+    )
+
+    # Yesterday's (Riyadh) usage does not count today.
+    check_token_spend_caps(
+        db_conn,
+        conversation_id=conversation_id,
+        customer_phone=_PHONE,
+        now=_NOW,
+        settings=settings,
+        usage_so_far=UsageTotals.zero(),
+    )
+
+    record_token_usage(
+        db_conn,
+        conversation_id=conversation_id,
+        customer_phone=_PHONE,
+        usage=UsageTotals(100, 0, 100),
+        now=_FIRST_SECOND_OF_THE_DAY,
+    )
+    with pytest.raises(NumberDailyTokenCapExceededError):
+        check_token_spend_caps(
+            db_conn,
+            conversation_id=conversation_id,
+            customer_phone=_PHONE,
+            now=_NOW,
+            settings=settings,
+            usage_so_far=UsageTotals.zero(),
+        )
+
+
+def test_check_token_spend_caps_number_cap_is_isolated_per_phone_number(
+    db_conn: psycopg.Connection[Any],
+) -> None:
+    settings = _settings(max_tokens_per_number_per_day=100)
+    capped_conversation_id = seed_conversation(db_conn, customer_phone=_PHONE)
+    other_conversation_id = seed_conversation(db_conn, customer_phone=_OTHER_PHONE)
+    record_token_usage(
+        db_conn,
+        conversation_id=capped_conversation_id,
+        customer_phone=_PHONE,
+        usage=UsageTotals(100, 0, 100),
+        now=_NOW,
+    )
+
+    with pytest.raises(NumberDailyTokenCapExceededError):
+        check_token_spend_caps(
+            db_conn,
+            conversation_id=capped_conversation_id,
+            customer_phone=_PHONE,
+            now=_NOW,
+            settings=settings,
+            usage_so_far=UsageTotals.zero(),
+        )
+    check_token_spend_caps(
+        db_conn,
+        conversation_id=other_conversation_id,
+        customer_phone=_OTHER_PHONE,
+        now=_NOW,
+        settings=settings,
+        usage_so_far=UsageTotals.zero(),
+    )
+
+
+def test_find_todays_cap_escalation_is_none_without_one(
+    db_conn: psycopg.Connection[Any],
+) -> None:
+    seed_conversation(db_conn, customer_phone=_PHONE)
+
+    assert (
+        find_todays_cap_escalation(
+            db_conn, customer_phone=_PHONE, reasons=_CAP_REASONS, now=_NOW
+        )
+        is None
+    )
+
+
+def test_find_todays_cap_escalation_returns_the_latest_one_today(
+    db_conn: psycopg.Connection[Any],
+) -> None:
+    """Any of the given reasons matches, not only the one blocking now: a
+    number escalated for one cap is not escalated again for another."""
+    conversation_id = seed_conversation(db_conn, customer_phone=_PHONE)
+    seed_escalation(
+        db_conn,
+        conversation_id,
+        reason="turn_cap_exceeded",
+        customer_phone=_PHONE,
+        opened_at=_FIRST_SECOND_OF_THE_DAY,
+    )
+    latest_id = seed_escalation(
+        db_conn,
+        conversation_id,
+        reason="token_spend_cap_exceeded",
+        customer_phone=_PHONE,
+        opened_at=_NOW - timedelta(hours=1),
+    )
+
+    assert (
+        find_todays_cap_escalation(
+            db_conn, customer_phone=_PHONE, reasons=_CAP_REASONS, now=_NOW
+        )
+        == latest_id
+    )
+
+
+def test_find_todays_cap_escalation_ignores_other_reasons_numbers_and_days(
+    db_conn: psycopg.Connection[Any],
+) -> None:
+    conversation_id = seed_conversation(db_conn, customer_phone=_PHONE)
+    other_conversation_id = seed_conversation(db_conn, customer_phone=_OTHER_PHONE)
+    seed_escalation(
+        db_conn,
+        conversation_id,
+        reason="model_unavailable",
+        customer_phone=_PHONE,
+        opened_at=_NOW,
+    )
+    seed_escalation(
+        db_conn,
+        other_conversation_id,
+        reason="turn_cap_exceeded",
+        customer_phone=_OTHER_PHONE,
+        opened_at=_NOW,
+    )
+    seed_escalation(
+        db_conn,
+        conversation_id,
+        reason="turn_cap_exceeded",
+        customer_phone=_PHONE,
+        opened_at=_LAST_SECOND_OF_THE_DAY_BEFORE,
+    )
+
+    assert (
+        find_todays_cap_escalation(
+            db_conn, customer_phone=_PHONE, reasons=_CAP_REASONS, now=_NOW
+        )
+        is None
+    )
+
+
+def test_find_todays_cap_escalation_runs_as_hotel_agent(
+    db_conn: psycopg.Connection[Any], agent_database_url: str
+) -> None:
+    """Migration 0031's column grant is all this lookup needs: it runs as
+    the least-privilege role the webhook connects as in production."""
+    conversation_id = seed_conversation(db_conn, customer_phone=_PHONE)
+    escalation_id = seed_escalation(
+        db_conn,
+        conversation_id,
+        reason="turn_cap_exceeded",
+        customer_phone=_PHONE,
+        opened_at=_NOW,
+    )
+
+    with psycopg.connect(agent_database_url, autocommit=True) as agent:
+        found = find_todays_cap_escalation(
+            agent, customer_phone=_PHONE, reasons=_CAP_REASONS, now=_NOW
+        )
+
+    assert found == escalation_id

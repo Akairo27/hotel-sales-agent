@@ -313,6 +313,7 @@ _TEST_LLM_ENV = {
     "LLM_MAX_TOKENS_PER_CONVERSATION": "50000",
     "LLM_MAX_SPEND_PER_DAY_USD": "5.00",
     "MAX_MESSAGES_PER_NUMBER_PER_DAY": "50",
+    "LLM_MAX_TOKENS_PER_NUMBER_PER_DAY": "100000",
 }
 
 
@@ -340,6 +341,7 @@ def test_get_model_transport_returns_a_real_gemini_transport() -> None:
         max_tokens_per_conversation=50_000,
         max_spend_per_day_usd=Decimal("5.00"),
         max_messages_per_number_per_day=50,
+        max_tokens_per_number_per_day=100_000,
     )
 
     transport = get_model_transport(settings)
@@ -356,6 +358,7 @@ def _openrouter_settings(providers: tuple[str, ...]) -> LlmSettings:
         max_tokens_per_conversation=50_000,
         max_spend_per_day_usd=Decimal("5.00"),
         max_messages_per_number_per_day=50,
+        max_tokens_per_number_per_day=100_000,
         openrouter_route=OpenRouterRoute(
             providers=providers,
             token_rates=TokenRates(
@@ -388,10 +391,14 @@ def test_get_model_transport_builds_a_transport_for_the_shipped_glm_route() -> N
             "LLM_MAX_TOKENS_PER_CONVERSATION": "50000",
             "LLM_MAX_SPEND_PER_DAY_USD": "5.00",
             "MAX_MESSAGES_PER_NUMBER_PER_DAY": "50",
+            "LLM_MAX_TOKENS_PER_NUMBER_PER_DAY": "100000",
         }
     )
 
-    assert isinstance(get_model_transport(settings), OpenRouterTransport)
+    transport = get_model_transport(settings)
+
+    assert isinstance(transport, OpenRouterTransport)
+    assert transport._reasoning_effort == "low"
 
 
 # --- the no-silence funnel (CLAUDE.md rule 12) --------------------------------

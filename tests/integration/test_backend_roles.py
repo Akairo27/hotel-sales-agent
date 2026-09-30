@@ -98,7 +98,7 @@ _MANIFEST: dict[str, dict[str, dict[str, tuple[str, ...] | str]]] = {
             ),
         },
         "escalations": {
-            "SELECT": ("id",),
+            "SELECT": ("id", "reason", "customer_phone", "opened_at"),
             "INSERT": ("conversation_id", "customer_phone", "reason", "notes"),
         },
         "token_usage": {
