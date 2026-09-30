@@ -685,6 +685,112 @@ def test_every_fixed_text_rendering_is_always_allowed(
     assert with_quote_verdict.escalation_id is None
 
 
+def _quote_nights(asks: list[int]) -> str:
+    return json.dumps(
+        [
+            {
+                "date": (date(2026, 10, 5) + timedelta(days=index)).isoformat(),
+                "season_id": 1,
+                "ask": ask,
+                "min_allowed": 30_000,
+                "override_applied": True,
+            }
+            for index, ask in enumerate(asks)
+        ]
+    )
+
+
+# The owner-approved quote replies (2026-09-30, prompt.py's quote_reply
+# templates) filled in as the model would: (reply, rooms, night asks).
+_APPROVED_QUOTE_REPLIES: tuple[tuple[str, int, list[int]], ...] = (
+    (
+        "Test Hotel، غرفة Standard، ليلتين من 5 إلى 7 أكتوبر:\n"
+        "الإجمالي *900.00 ريال* (450.00 ريال لليلة).\n"
+        "يبعد 350 متر عن الحرم.\n"
+        "تبغاني أبلّغ زميلي يأكّد لك الحجز؟",
+        1,
+        [45_000, 45_000],
+    ),
+    (
+        "Test Hotel, Standard room, 2 nights, 5 to 7 October:\n"
+        "Total *900.00 SAR* (450.00 SAR per night).\n"
+        "Only 350 m from the Haram.\n"
+        "Shall I pass this to a colleague to confirm your booking?",
+        1,
+        [45_000, 45_000],
+    ),
+    (
+        "Test Hotel, kamar Standard, 2 malam, 5 sampai 7 Oktober:\n"
+        "Total *900.00 SAR* (450.00 SAR per malam).\n"
+        "Hanya 350 m dari Masjidil Haram.\n"
+        "Mau saya teruskan ke rekan saya untuk konfirmasi pemesanan?",
+        1,
+        [45_000, 45_000],
+    ),
+    (
+        "Test Hotel، غرفتين Standard، ليلتين من 5 إلى 7 أكتوبر:\n"
+        "الإجمالي *1,800.00 ريال* (450.00 ريال للغرفة في الليلة).\n"
+        "يبعد 1.3 كم عن الحرم.\n"
+        "تبغاني أبلّغ زميلي يأكّد لك الحجز؟",
+        2,
+        [45_000, 45_000],
+    ),
+    (
+        "Test Hotel, Standard room, 2 nights, 5 to 7 October:\n"
+        "Total *900.00 SAR* (from 400.00 SAR to 500.00 SAR per night).\n"
+        "Only 1.3 km from the Haram.\n"
+        "Shall I pass this to a colleague to confirm your booking?",
+        1,
+        [40_000, 50_000],
+    ),
+    # A Madinah hotel: the distance is to the Prophet's Mosque.
+    (
+        "Test Hotel، غرفة Standard، ليلتين من 5 إلى 7 أكتوبر:\n"
+        "الإجمالي *900.00 ريال* (450.00 ريال لليلة).\n"
+        "يبعد 350 متر عن المسجد النبوي.\n"
+        "تبغاني أبلّغ زميلي يأكّد لك الحجز؟",
+        1,
+        [45_000, 45_000],
+    ),
+    (
+        "Test Hotel, kamar Standard, 2 malam, 5 sampai 7 Oktober:\n"
+        "Total *900.00 SAR* (450.00 SAR per malam).\n"
+        "Hanya 350 m dari Masjid Nabawi.\n"
+        "Mau saya teruskan ke rekan saya untuk konfirmasi pemesanan?",
+        1,
+        [45_000, 45_000],
+    ),
+)
+
+
+@pytest.mark.parametrize(("reply", "rooms", "night_asks"), _APPROVED_QUOTE_REPLIES)
+def test_every_approved_quote_reply_passes_the_guard(
+    db_conn: psycopg.Connection[Any], reply: str, rooms: int, night_asks: list[int]
+) -> None:
+    """A correct quote reply, in every approved shape, is never blocked:
+    its total, nightly prices and distance all read as the guard expects
+    (the distance never as money -- tests/unit/test_llm_quote_display.py)."""
+    hotel_id, room_type_id = seed_hotel_and_room_type(db_conn)
+    conversation_id = seed_conversation(db_conn)
+    seed_quote(
+        db_conn,
+        hotel_id,
+        room_type_id,
+        conversation_id=conversation_id,
+        ask_price_total=sum(night_asks) * rooms,
+        min_allowed_total=30_000 * len(night_asks) * rooms,
+        nights=_quote_nights(night_asks),
+        rooms=rooms,
+    )
+
+    verdict = enforce_outbound_text(
+        db_conn, conversation_id=conversation_id, text=reply
+    )
+
+    assert verdict.allowed is True, verdict.findings
+    assert verdict.escalation_id is None
+
+
 def _seed_two_sessions(
     db_conn: psycopg.Connection[Any],
 ) -> tuple[int, int]:

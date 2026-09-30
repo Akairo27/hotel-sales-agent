@@ -42,9 +42,11 @@ from services.agent.llm.dispatch import (
 )
 from services.agent.llm.errors import (
     InvalidToolArgumentsError,
+    StayListingNotFoundError,
     ToolErrorCode,
     UnknownToolError,
 )
+from services.agent.llm.quote_display import QuoteListing
 from services.agent.llm.tools import TOOL_ERROR_MESSAGES
 from services.inventory.operations import StayAvailability
 from services.pricing.compute import NightPrice, Quote
@@ -212,11 +214,19 @@ def _quote_with_full_cost_detail() -> Quote:
     )
 
 
+_LISTING = QuoteListing(
+    hotel_name="Test Hotel",
+    room_type_name="Standard",
+    city="makkah",
+    distance_to_haram_meters=350,
+)
+
+
 def test_quote_to_tool_result_contains_no_cost_bearing_field() -> None:
     """CLAUDE.md rule 2's enforcement point: even given a Quote with every
     cost field populated, the tool-facing dict is exactly the whitelist —
     nothing rides along by virtue of being an attribute on NightPrice."""
-    result = quote_to_tool_result(_quote_with_full_cost_detail())
+    result = quote_to_tool_result(_quote_with_full_cost_detail(), _LISTING)
 
     assert result.keys() == QUOTE_RESULT_KEYS
     for night in result["nights"]:
@@ -230,7 +240,7 @@ def test_quote_to_tool_result_contains_no_cost_bearing_field() -> None:
 def test_quote_to_tool_result_formats_prices_as_display_strings_not_raw_integers() -> (
     None
 ):
-    result = quote_to_tool_result(_quote_with_full_cost_detail())
+    result = quote_to_tool_result(_quote_with_full_cost_detail(), _LISTING)
     assert result["total_price_display"] == "150.00 SAR"
     assert result["nights"][0]["price_display"] == "150.00 SAR"
     assert result["total_price_display_ar"] == "150.00 ريال"
@@ -260,7 +270,7 @@ def test_get_quote_log_summary_contains_no_cost_bearing_field() -> None:
     proves the log summary narrows further still, to exactly priced,
     quote_id and reason (None for a priced result), not everything
     quote_to_tool_result happens to return."""
-    result = quote_to_tool_result(_quote_with_full_cost_detail())
+    result = quote_to_tool_result(_quote_with_full_cost_detail(), _LISTING)
     summary = _get_quote_log_summary(result)
 
     assert summary.keys() == GET_QUOTE_LOG_SUMMARY_KEYS
@@ -394,6 +404,9 @@ def test_dispatch_get_quote_prices_when_rooms_are_free(
 ) -> None:
     _stub_stay_availability(monkeypatch)
     monkeypatch.setattr(
+        dispatch_module, "load_quote_listing", lambda *_args, **_kwargs: _LISTING
+    )
+    monkeypatch.setattr(
         dispatch_module,
         "compute_quote",
         lambda *_args, **_kwargs: _quote_with_full_cost_detail(),
@@ -409,6 +422,11 @@ def test_dispatch_get_quote_prices_when_rooms_are_free(
 
     assert result["priced"] is True
     assert result["quote_id"] == 42
+    assert result["hotel_name"] == "Test Hotel"
+    assert result["room_type_name"] == "Standard"
+    assert result["night_count"] == 1
+    assert result["price_per_night_display"] == "150.00 SAR"
+    assert result["distance_to_haram_display"] == "350 m"
 
 
 def test_dispatch_get_quote_rejects_a_past_check_in_before_any_inventory_read(
@@ -433,12 +451,39 @@ def test_dispatch_get_quote_rejects_a_past_check_in_before_any_inventory_read(
     assert exc_info.value.code == "past_check_in"
 
 
+def test_dispatch_get_quote_reads_the_listing_before_writing_any_quote(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A hotel or room type gone since search_hotels fails the call before
+    compute_quote runs, so no quote row is written for a stay the reply
+    could not name."""
+    _stub_stay_availability(monkeypatch)
+
+    def _gone(*_args: Any, **_kwargs: Any) -> Any:
+        raise StayListingNotFoundError("gone")
+
+    monkeypatch.setattr(dispatch_module, "load_quote_listing", _gone)
+    monkeypatch.setattr(dispatch_module, "compute_quote", _must_not_be_called)
+
+    with pytest.raises(StayListingNotFoundError):
+        dispatch_get_quote(
+            _NOT_A_CONNECTION,
+            _VALID_ARGS,
+            now=_UNUSED_NOW,
+            customer_phone=None,
+            conversation_id=None,
+        )
+
+
 def test_dispatch_get_quote_accepts_a_check_in_of_today(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """The boundary of the date rule: check_in equal to now's date is not
     in the past (strictly earlier is), so the stay goes on to be priced."""
     _stub_stay_availability(monkeypatch)
+    monkeypatch.setattr(
+        dispatch_module, "load_quote_listing", lambda *_args, **_kwargs: _LISTING
+    )
     monkeypatch.setattr(
         dispatch_module,
         "compute_quote",

@@ -30,9 +30,14 @@ USAGE_SO_FAR_ATTR: Final[str] = "usage_so_far"
 # Why a tool call's arguments were rejected, as the model is told it
 # (services.agent.llm.tools.TOOL_ERROR_MESSAGES holds the fixed text for
 # each). A closed set so the result handed back to the model is always one
-# of three reviewed messages, never the exception's own text -- which can
+# of four reviewed messages, never the exception's own text -- which can
 # quote model- or customer-supplied argument values back verbatim.
-ToolErrorCode = Literal["past_check_in", "unresolved_stay", "invalid_arguments"]
+ToolErrorCode = Literal[
+    "past_check_in",
+    "unresolved_stay",
+    "invalid_arguments",
+    "quote_not_confirmable",
+]
 
 
 class LlmError(Exception):
@@ -113,6 +118,16 @@ class InvalidToolArgumentsError(LlmError):
     ) -> None:
         super().__init__(message)
         self.code: ToolErrorCode = code
+
+
+class StayListingNotFoundError(LlmError):
+    """Raised when get_quote priced a stay but its hotel or room type row
+    is gone by the time the reply's names and distance are read
+    (services/agent/llm/quote_display.load_quote_listing). search_hotels
+    returned the pair earlier in the same turn, so only a row deleted in
+    between reaches this; the turn fails into the no-silence funnel rather
+    than quoting a price without its hotel.
+    """
 
 
 class TurnCapExceededError(LlmError):

@@ -14,6 +14,7 @@ import pytest
 from lib.hijri import to_hijri
 from services.agent.fixed_texts import FALLBACK, PLEASE_TYPE
 from services.agent.llm import dispatch as dispatch_module
+from services.agent.llm import prompt as prompt_module
 from services.agent.llm.config import MAX_CUSTOMER_NAME_LENGTH
 from services.agent.llm.context import CurrentStay
 from services.agent.llm.prompt import (
@@ -348,23 +349,35 @@ def test_arabic_dialect_rule_prefers_the_approved_saudi_forms() -> None:
         assert saudi_form in rule.english
 
 
-def test_price_currency_word_names_every_price_display_get_quote_returns() -> None:
-    """The rule tells the model which display to copy in which language; if
-    quote_to_tool_result renames one, the rule must change with it."""
+def test_price_currency_word_covers_every_price_display_get_quote_returns() -> None:
+    """The rule tells the model which display to copy in which language by
+    suffix: every price display quote_to_tool_result returns must follow
+    that convention -- a *_display with a *_display_ar twin -- or the rule
+    no longer describes it."""
     rule = _rule("price_currency_word")
-    displays = {
+    price_displays = {
         key
         for key in dispatch_module.QUOTE_RESULT_KEYS | dispatch_module.NIGHT_RESULT_KEYS
-        if "display" in key
+        if "price" in key and "display" in key
     }
-    assert displays == {
+    assert price_displays == {
         "total_price_display",
         "total_price_display_ar",
         "price_display",
         "price_display_ar",
+        "price_per_night_display",
+        "price_per_night_display_ar",
+        "lowest_night_price_display",
+        "lowest_night_price_display_ar",
+        "highest_night_price_display",
+        "highest_night_price_display_ar",
     }
-    for key in displays:
-        assert key in rule.english
+    for key in price_displays:
+        assert key.endswith(("_display", "_display_ar"))
+        if key.endswith("_display"):
+            assert f"{key}_ar" in price_displays
+    assert "ending in _display_ar" in rule.english
+    assert "ending in _display" in rule.english
     assert "never write SAR in an Arabic reply" in rule.english
     assert "Western digits" in rule.english
 
@@ -399,3 +412,56 @@ def test_customer_facing_arabic_examples_are_saudi_not_formal() -> None:
     for text in texts:
         for phrase in _FORMAL_ARABIC_PHRASES:
             assert phrase not in text, (phrase, text)
+
+
+def test_quote_reply_names_every_field_a_complete_reply_copies() -> None:
+    """Owner decision 2026-09-30: hotel, room type, nights, total, price per
+    night and the location selling point when known -- each copied from a
+    get_quote field, so each field must be named."""
+    rule = _rule("quote_reply")
+    for field in (
+        "hotel_name",
+        "room_type_name",
+        "night_count",
+        "total_price_display",
+        "price_per_night_display",
+        "lowest_night_price_display",
+        "highest_night_price_display",
+        "distance_to_haram_display",
+    ):
+        assert field in rule.english
+        assert field in dispatch_module.QUOTE_RESULT_KEYS
+    assert "at most four short lines" in rule.english
+    assert "moves toward booking" in rule.english
+    assert "never add a walking time" in rule.english
+
+
+def test_quote_reply_examples_are_short_and_end_with_a_question() -> None:
+    examples = {
+        "ar": prompt_module._SAUDI_EXAMPLE_QUOTE_REPLY,
+        "en": prompt_module._ENGLISH_EXAMPLE_QUOTE_REPLY,
+        "id": prompt_module._INDONESIAN_EXAMPLE_QUOTE_REPLY,
+    }
+    for language, example in examples.items():
+        assert len(example.split("\n")) <= 4, language
+        assert example.endswith("؟" if language == "ar" else "?"), language
+        assert example in _rule("quote_reply").english
+
+
+def test_search_rule_retries_once_in_arabic_and_confirms_before_quoting() -> None:
+    """ARCHITECTURE.md §7 follow-up #3a: one Arabic retry, then a
+    confirmation in the customer's language before any price."""
+    rule = _rule("search_before_resolving_a_hotel")
+    assert "call search_hotels once more" in rule.english
+    assert "do not check availability or give a price in this reply" in rule.english
+    assert "never search a third time" in rule.english
+    assert prompt_module._SAUDI_EXAMPLE_CONFIRM_HOTEL in rule.english
+    assert '"Do you mean [hotel name]?"' in rule.english
+    assert '"Maksud Anda [hotel name]?"' in rule.english
+
+
+def test_no_booking_actions_hands_an_explicit_yes_to_the_follow_up_tool() -> None:
+    rule = _rule("no_booking_actions")
+    assert "request_booking_follow_up" in rule.english
+    assert "explicitly says yes" in rule.english
+    assert "never say the booking is confirmed" in rule.english

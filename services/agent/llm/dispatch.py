@@ -47,11 +47,8 @@ price_rules misconfiguration — IncompletePriceRuleChainError,
 InconsistentPriceConfigurationError — or NoMatchingBandError, a value
 outside its band domain that valid data never produces) is a
 business-data problem, not a customer-facing outcome, and is
-deliberately left to propagate: this module has no escalate tool to
-route it to — this PR scopes the agent to check_availability and
-get_quote only (see tools.py's module docstring for why
-search_alternatives, the third tool PLAN.md's المرحلة ٤ names, is not
-declared yet), so the caller crashing the turn is more honest than
+deliberately left to propagate: the caller crashing the turn (into
+webhook.py's no-silence funnel, which escalates it) is more honest than
 inventing a way to paper over it here.
 
 get_quote also refuses to price a stay the inventory cannot cover (added
@@ -113,10 +110,20 @@ import psycopg
 
 from lib.money import format_halalas_as_arabic_riyal, format_halalas_as_sar
 from services.agent.hotel_profile import is_hotel_profile_complete
+from services.agent.llm.booking_follow_up import (
+    REQUEST_BOOKING_FOLLOW_UP_TOOL,
+    request_booking_follow_up,
+)
 from services.agent.llm.errors import (
     InvalidToolArgumentsError,
     ToolErrorCode,
     UnknownToolError,
+)
+from services.agent.llm.quote_display import (
+    QuoteListing,
+    listing_fields,
+    load_quote_listing,
+    night_price_fields,
 )
 from services.agent.llm.tools import TOOL_ERROR_MESSAGES
 from services.inventory.operations import StayAvailability, stay_availability
@@ -248,6 +255,19 @@ QUOTE_RESULT_KEYS = frozenset(
         "total_price_display_ar",
         "nights",
         "negotiation_open",
+        # quote_display.py: what a complete quote reply needs, copied only.
+        "hotel_name",
+        "room_type_name",
+        "city",
+        "night_count",
+        "price_per_night_display",
+        "price_per_night_display_ar",
+        "lowest_night_price_display",
+        "lowest_night_price_display_ar",
+        "highest_night_price_display",
+        "highest_night_price_display_ar",
+        "distance_to_haram_display",
+        "distance_to_haram_display_ar",
     }
 )
 UNPRICED_RESULT_KEYS = frozenset(
@@ -538,14 +558,15 @@ def dispatch_search_hotels(
     return {"hotels": hotels, "truncated": truncated}
 
 
-def quote_to_tool_result(quote: Quote) -> dict[str, Any]:
+def quote_to_tool_result(quote: Quote, listing: QuoteListing) -> dict[str, Any]:
     """Converts a priced Quote into the exact, cost-free dict shape sent
     to the model. See the module docstring for why this exists. Every
     price comes twice, the same number with a different currency word:
     *_display ("1,250.00 SAR") for English and Indonesian replies and
     *_display_ar ("1,250.00 ريال") for Arabic ones (prompt.py's
     price_currency_word) -- so the model copies a finished string in
-    either language and never relabels a price itself.
+    either language and never relabels a price itself. listing adds the
+    hotel's names and distance (quote_display.py).
     """
     return {
         "priced": True,
@@ -566,6 +587,9 @@ def quote_to_tool_result(quote: Quote) -> dict[str, Any]:
             for night in quote.nights
         ],
         "negotiation_open": quote.negotiation_open,
+        "night_count": len(quote.nights),
+        **night_price_fields(quote),
+        **listing_fields(listing),
     }
 
 
@@ -686,6 +710,9 @@ def dispatch_get_quote(
         InvalidToolArgumentsError: the arguments fail validation
             (parse_stay_args, or a check_in in the past), or compute_quote
             rejects them.
+        StayListingNotFoundError: the hotel or room type row is gone
+            (quote_display.load_quote_listing), read before pricing so no
+            quote is written for it.
         Any other services.pricing exception compute_quote raises for a
             price_rules misconfiguration -- deliberately left to propagate
             (see this module's docstring).
@@ -701,6 +728,7 @@ def dispatch_get_quote(
         return _unpriced_result(
             stay, reason="insufficient_availability", availability=availability
         )
+    listing = load_quote_listing(conn, stay.hotel_id, stay.room_type_id)
     try:
         quote = compute_quote(
             conn,
@@ -724,7 +752,7 @@ def dispatch_get_quote(
             availability=_stay_availability_for(conn, stay),
         )
 
-    return quote_to_tool_result(quote)
+    return quote_to_tool_result(quote, listing)
 
 
 def _search_hotels_log_summary(result: dict[str, Any]) -> dict[str, Any]:
@@ -741,6 +769,32 @@ def _get_quote_log_summary(result: dict[str, Any]) -> dict[str, Any]:
         "quote_id": result.get("quote_id"),
         "reason": result.get("reason"),
     }
+
+
+def _booking_follow_up_log_summary(result: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "quote_id": result["quote_id"],
+        "already_requested": result["already_requested"],
+    }
+
+
+def _dispatch_booking_follow_up(
+    conn: psycopg.Connection[Any],
+    args: dict[str, Any],
+    *,
+    conversation_id: int | None,
+) -> dict[str, Any]:
+    """Validates quote_id and hands over to booking_follow_up.py, which
+    owns every check and the write."""
+    quote_id = _require_int(args, "quote_id")
+    if conversation_id is None:
+        raise InvalidToolArgumentsError(
+            "request_booking_follow_up needs a conversation",
+            code="quote_not_confirmable",
+        )
+    return request_booking_follow_up(
+        conn, quote_id=quote_id, conversation_id=conversation_id
+    )
 
 
 def _require_resolved_stay(stay: StayArgs, resolved_stays: set[ResolvedStay]) -> None:
@@ -777,8 +831,9 @@ def _log_tool_call(
     """The one place a model tool call is logged — CLAUDE.md rule 8. Never
     logs cost or any other floor-related pricing field: `args` is the
     tool's own input (verified free of those by every declared tool's
-    schema in tools.py), and `result_summary` is always one of the two
-    hand-built whitelists above, never a spread of the tool's result dict.
+    schema in tools.py), and `result_summary` is always one of the
+    hand-built per-tool summaries (the *_LOG_SUMMARY_KEYS sets), never a
+    spread of the tool's result dict.
     error_code is set only for an InvalidToolArgumentsError -- one of the
     closed ToolErrorCode literals, so the journal shows which fixed message
     the model was handed without logging the exception's text.
@@ -817,7 +872,9 @@ def dispatch_tool(
     tool-calling loop — never persisted, never read from the database. A
     successful search_hotels call adds every (hotel_id, room_type_id) pair
     it returned; check_availability and get_quote both reject any pair not
-    already in it (_require_resolved_stay).
+    already in it (_require_resolved_stay). request_booking_follow_up
+    needs no resolved stay: it acts on a quote this conversation already
+    has (booking_follow_up.py).
 
     Raises:
         UnknownToolError: name is not one of the tools declared in
@@ -865,6 +922,18 @@ def dispatch_tool(
                 tool_name=name,
                 args=args,
                 result_summary=_get_quote_log_summary(result),
+                error_type=None,
+            )
+            return result
+        if name == REQUEST_BOOKING_FOLLOW_UP_TOOL:
+            result = _dispatch_booking_follow_up(
+                conn, args, conversation_id=conversation_id
+            )
+            _log_tool_call(
+                conversation_id=conversation_id,
+                tool_name=name,
+                args=args,
+                result_summary=_booking_follow_up_log_summary(result),
                 error_type=None,
             )
             return result

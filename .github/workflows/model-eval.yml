@@ -1,11 +1,11 @@
 name: Model eval (manual)
 
 # Paid model comparison (tests/eval_model_candidates.py), owner-approved
-# 2026-09-30: GLM-5.3 under four reasoning settings -- default (no
-# reasoning field; production until "low" was chosen from run 36674059327),
-# effort "low", "minimal" and "none" --
-# on the nine synthetic scenarios, repeated. Manual only: it spends real
-# money, so it never runs on a push or a pull request.
+# 2026-09-30: GLM-5.3 on the thirteen synthetic scenarios, repeated, under
+# the reasoning settings given at dispatch -- "low" (production since run
+# 36674059327) unless others are named, e.g. "default low minimal" to
+# compare. Manual only: it spends real money, so it never runs on a push
+# or a pull request.
 #
 # The database is a throwaway Postgres container that exists only for this
 # job, never the live database. The OpenRouter key comes from the repo
@@ -19,6 +19,10 @@ on:
         description: "Runs of every (setting, scenario) pair"
         required: true
         default: "3"
+      settings:
+        description: "Reasoning settings, space-separated (default low minimal none ...)"
+        required: true
+        default: "low"
 
 permissions:
   contents: read
@@ -31,8 +35,8 @@ jobs:
   eval:
     name: model eval
     runs-on: ubuntu-24.04
-    # 9 scenarios x 4 settings x 3 repeats is 108 turns; a turn is capped at
-    # 75s by generate_reply's own budget.
+    # 13 scenarios x 4 settings x 3 repeats would be 156 turns; a turn is
+    # capped at 75s by generate_reply's own budget.
     timeout-minutes: 180
     services:
       postgres:
@@ -64,21 +68,29 @@ jobs:
       - name: Apply migrations to the throwaway database
         run: >-
           uv run pytest
-          "tests/integration/test_eval_model_candidates_integration.py::test_seeding_is_repeatable_and_leaves_only_the_test_hotel"
+          "tests/integration/test_eval_model_candidates_integration.py::test_seeding_is_repeatable_and_leaves_only_the_test_hotels"
 
       - name: Run the eval
         env:
           OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_EVAL_API_KEY }}
           EVAL_DATABASE_URL: postgresql://postgres@localhost:5432/hotel_sales_eval
           REPEAT: ${{ inputs.repeat }}
-        run: >-
-          uv run python -m tests.eval_model_candidates --confirm-scratch-db
-          --model "$EVAL_MODEL"
-          --provider crusoe --provider inference-net
-          --reasoning-effort default --reasoning-effort low
-          --reasoning-effort minimal --reasoning-effort none
-          --repeat "$REPEAT"
-          --output model-eval-results.md
+          SETTINGS: ${{ inputs.settings }}
+        # The settings reach the harness as separate arguments, each one
+        # checked there against the known values; globbing is off so a
+        # setting can never expand into file names.
+        run: |
+          set -euf -o pipefail
+          effort_args=()
+          for setting in $SETTINGS; do
+            effort_args+=(--reasoning-effort "$setting")
+          done
+          uv run python -m tests.eval_model_candidates --confirm-scratch-db \
+            --model "$EVAL_MODEL" \
+            --provider crusoe --provider inference-net \
+            "${effort_args[@]}" \
+            --repeat "$REPEAT" \
+            --output model-eval-results.md
 
       - name: Upload the results
         if: always()

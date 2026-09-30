@@ -24,7 +24,11 @@ from services.agent.llm.dispatch import (
     dispatch_get_quote,
     dispatch_tool,
 )
-from services.agent.llm.errors import InvalidToolArgumentsError
+from services.agent.llm.errors import (
+    InvalidToolArgumentsError,
+    StayListingNotFoundError,
+)
+from services.agent.llm.quote_display import load_quote_listing
 from services.inventory.operations import StayAvailability
 from tests.integration._seed import (
     flat_demand_curve,
@@ -34,9 +38,11 @@ from tests.integration._seed import (
     seed_allotment_night,
     seed_allotment_nights,
     seed_conversation,
+    seed_hotel,
     seed_hotel_and_room_type,
     seed_price_override,
     seed_price_rule,
+    seed_room_type,
     seed_season,
 )
 
@@ -61,6 +67,15 @@ def _seed_default_season(conn: psycopg.Connection[Any]) -> None:
 
 def _seed_priceable_stay(conn: psycopg.Connection[Any]) -> tuple[int, int]:
     hotel_id, room_type_id = seed_hotel_and_room_type(conn)
+    _seed_pricing_for(conn, hotel_id, room_type_id)
+    return hotel_id, room_type_id
+
+
+def _seed_pricing_for(
+    conn: psycopg.Connection[Any], hotel_id: int, room_type_id: int
+) -> None:
+    """A default season, two nights of inventory from 2026-09-10 and one
+    global price rule for an existing hotel and room type."""
     _seed_default_season(conn)
     seed_allotment_nights(
         conn,
@@ -78,7 +93,92 @@ def _seed_priceable_stay(conn: psycopg.Connection[Any]) -> tuple[int, int]:
         min_profit_by_lead_time=flat_min_profit(1_000),
         demand_curve=flat_demand_curve(),
     )
-    return hotel_id, room_type_id
+
+
+_TWO_NIGHTS_FROM_THE_10TH = {
+    "check_in": "2026-09-10",
+    "check_out": "2026-09-12",
+    "rooms": 1,
+}
+
+
+def test_get_quote_dispatch_names_the_hotel_room_type_nights_and_distance(
+    db_conn: psycopg.Connection[Any],
+) -> None:
+    """Everything a complete quote reply copies (owner decision 2026-09-30)
+    comes from the real rows, read as part of get_quote."""
+    hotel_id = seed_hotel(
+        db_conn, hotel_name="فندق النخبة", city="makkah", distance_to_haram_meters=1250
+    )
+    room_type_id = seed_room_type(db_conn, hotel_id, room_type_name="Deluxe")
+    _seed_pricing_for(db_conn, hotel_id, room_type_id)
+    args = {
+        "hotel_id": hotel_id,
+        "room_type_id": room_type_id,
+        **_TWO_NIGHTS_FROM_THE_10TH,
+    }
+
+    result = dispatch_get_quote(
+        db_conn, args, now=_NOW, customer_phone=None, conversation_id=None
+    )
+
+    assert result["hotel_name"] == "فندق النخبة"
+    assert result["room_type_name"] == "Deluxe"
+    assert result["city"] == "makkah"
+    assert result["night_count"] == 2
+    assert result["price_per_night_display"] == result["nights"][0]["price_display"]
+    assert (
+        result["price_per_night_display_ar"] == result["nights"][0]["price_display_ar"]
+    )
+    assert result["lowest_night_price_display"] is None
+    assert result["highest_night_price_display"] is None
+    assert result["distance_to_haram_display"] == "1.3 km"
+    assert result["distance_to_haram_display_ar"] == "1.3 كم"
+
+
+def test_load_quote_listing_refuses_a_room_type_of_another_hotel(
+    db_conn: psycopg.Connection[Any],
+) -> None:
+    """The listing is read by the pair, so a room type that exists but
+    belongs to a different hotel is as missing as one that does not."""
+    hotel_id, room_type_id = seed_hotel_and_room_type(db_conn)
+    other_hotel_id, _ = seed_hotel_and_room_type(db_conn)
+
+    assert load_quote_listing(db_conn, hotel_id, room_type_id).room_type_name == (
+        "Standard"
+    )
+    with pytest.raises(StayListingNotFoundError):
+        load_quote_listing(db_conn, other_hotel_id, room_type_id)
+
+
+def test_get_quote_dispatch_gives_the_lowest_and_highest_night_when_they_differ(
+    db_conn: psycopg.Connection[Any],
+) -> None:
+    """A price override on one night makes the nights differ: the result
+    then names the two real night prices, never an average, and the hotel
+    with no distance on record gets none."""
+    hotel_id, room_type_id = _seed_priceable_stay(db_conn)
+    seed_price_override(
+        db_conn, hotel_id, room_type_id, date(2026, 9, 11), ask_price_override=50_000
+    )
+    args = {
+        "hotel_id": hotel_id,
+        "room_type_id": room_type_id,
+        **_TWO_NIGHTS_FROM_THE_10TH,
+    }
+
+    result = dispatch_get_quote(
+        db_conn, args, now=_NOW, customer_phone=None, conversation_id=None
+    )
+
+    night_prices = [night["price_display"] for night in result["nights"]]
+    assert result["price_per_night_display"] is None
+    assert result["highest_night_price_display"] == "500.00 SAR"
+    assert set(night_prices) == {
+        result["lowest_night_price_display"],
+        result["highest_night_price_display"],
+    }
+    assert result["distance_to_haram_display"] is None
 
 
 def test_get_quote_dispatch_creates_a_real_quote_and_returns_no_cost_fields(

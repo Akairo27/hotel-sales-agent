@@ -1,7 +1,8 @@
 """The versioned, reviewed tool-calling contract — CLAUDE.md §9: "Tool
 definitions live in one file, versioned, and reviewed."
 
-Three tools exist here: search_hotels, check_availability and get_quote.
+Four tools exist here: search_hotels, check_availability, get_quote and
+request_booking_follow_up.
 PLAN.md's المرحلة ٤ (WhatsApp channel, read-only) scopes the agent to
 exactly three tools — check_availability, get_quote, search_alternatives —
 but search_hotels is a distinct, prerequisite capability those three names
@@ -11,7 +12,12 @@ after an incident where the model, given no way to do that resolution,
 guessed ids that did not exist. search_alternatives itself ("alternative
 hotels for the same dates", per ARCHITECTURE.md's tool table) still has no
 implementation anywhere in the repository, so it is still not declared
-here. Adding a tool is a new entry in this file and a new case in
+here. request_booking_follow_up (owner-approved 2026-09-30) opens one
+booking_requested escalation per quote, and only after the customer
+explicitly says yes (services/agent/llm/booking_follow_up.py); the other
+three only read, apart from get_quote recording each price it gives in
+`quotes`. Adding a
+tool is a new entry in this file and a new case in
 dispatch.py — never an inline capability added elsewhere, and never
 without asking first (CLAUDE.md rule 10: "Adding a new tool the LLM can
 call").
@@ -157,22 +163,53 @@ GET_QUOTE = ToolDeclaration(
         "price_display end in SAR, total_price_display_ar and "
         "price_display_ar end in ريال — copy the one that matches your "
         "reply's language, and never recompute, convert, or round it "
-        "yourself."
+        "yourself. A priced result also gives hotel_name, room_type_name, "
+        "city, night_count, the price per room per night "
+        "(price_per_night_display, or lowest_night_price_display and "
+        "highest_night_price_display when the nights differ, each with an "
+        "_ar twin) and distance_to_haram_display / "
+        "distance_to_haram_display_ar (null when unknown)."
     ),
     parameters=_stay_parameters(),
+)
+
+REQUEST_BOOKING_FOLLOW_UP = ToolDeclaration(
+    name="request_booking_follow_up",
+    description=(
+        "Passes a quoted stay to a colleague, who contacts the customer to "
+        "confirm the booking. Call it only after the customer has explicitly "
+        "said yes to that, with the quote_id of the get_quote result they "
+        "agreed to. It books, holds and charges nothing itself; calling it "
+        "again for the same quote does not open a second request. Then tell "
+        "the customer a colleague will contact them to confirm the booking."
+    ),
+    parameters={
+        "type": "object",
+        "properties": {
+            "quote_id": {
+                "type": "integer",
+                "description": (
+                    "The quote_id of the get_quote result the customer said yes to."
+                ),
+            },
+        },
+        "required": ["quote_id"],
+    },
 )
 
 AGENT_TOOLS: tuple[ToolDeclaration, ...] = (
     SEARCH_HOTELS,
     CHECK_AVAILABILITY,
     GET_QUOTE,
+    REQUEST_BOOKING_FOLLOW_UP,
 )
 
 # The only text the model ever receives when a tool call's arguments are
 # rejected (services.agent.llm.dispatch.tool_error_result) -- one fixed,
 # reviewed message per ToolErrorCode, owner-approved as three distinct
 # messages (2026-09-29) so the model can tell a date problem from an id
-# problem. Never the exception's own text: that can quote the model's (or
+# problem; quote_not_confirmable came with request_booking_follow_up
+# (2026-09-30). Never the exception's own text: that can quote the model's (or
 # a customer's) argument values back verbatim, which would hand injected
 # text a second route into the model's context.
 TOOL_ERROR_MESSAGES: Mapping[ToolErrorCode, str] = {
@@ -191,5 +228,11 @@ TOOL_ERROR_MESSAGES: Mapping[ToolErrorCode, str] = {
         "Not done: the arguments for this tool call were invalid. Check every "
         "required field and its format, and ask the customer for anything you "
         "do not know instead of guessing."
+    ),
+    "quote_not_confirmable": (
+        "Not done: this quote_id is not a price from this conversation that "
+        "the customer has answered yet. Give the customer the price with "
+        "get_quote first, and call this tool only after they explicitly say "
+        "yes to it."
     ),
 }
