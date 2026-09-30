@@ -24,7 +24,11 @@ from services.agent.llm.dispatch import (
     dispatch_get_quote,
     dispatch_tool,
 )
-from services.agent.llm.errors import InvalidToolArgumentsError
+from services.agent.llm.errors import (
+    InvalidToolArgumentsError,
+    StayListingNotFoundError,
+)
+from services.agent.llm.quote_display import load_quote_listing
 from services.inventory.operations import StayAvailability
 from tests.integration._seed import (
     flat_demand_curve,
@@ -130,6 +134,21 @@ def test_get_quote_dispatch_names_the_hotel_room_type_nights_and_distance(
     assert result["highest_night_price_display"] is None
     assert result["distance_to_haram_display"] == "1.3 km"
     assert result["distance_to_haram_display_ar"] == "1.3 كم"
+
+
+def test_load_quote_listing_refuses_a_room_type_of_another_hotel(
+    db_conn: psycopg.Connection[Any],
+) -> None:
+    """The listing is read by the pair, so a room type that exists but
+    belongs to a different hotel is as missing as one that does not."""
+    hotel_id, room_type_id = seed_hotel_and_room_type(db_conn)
+    other_hotel_id, _ = seed_hotel_and_room_type(db_conn)
+
+    assert load_quote_listing(db_conn, hotel_id, room_type_id).room_type_name == (
+        "Standard"
+    )
+    with pytest.raises(StayListingNotFoundError):
+        load_quote_listing(db_conn, other_hotel_id, room_type_id)
 
 
 def test_get_quote_dispatch_gives_the_lowest_and_highest_night_when_they_differ(
