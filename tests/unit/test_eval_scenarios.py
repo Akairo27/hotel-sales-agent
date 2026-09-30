@@ -23,8 +23,10 @@ from tests.eval_model_candidates import (
 from tests.eval_scenarios import (
     EVAL_NOW_HOUR_UTC,
     SCENARIOS,
+    SEEDED_HOTEL_NAME,
     Scenario,
     ScenarioResult,
+    asked_instead_of_guessing,
     quote_was_priced,
     render_model_summary,
     render_results_table,
@@ -67,14 +69,47 @@ def _result(**overrides: Any) -> ScenarioResult:
     return ScenarioResult(**fields)
 
 
-def test_there_are_eight_scenarios_with_unique_keys_and_the_planned_mix() -> None:
-    assert len(SCENARIOS) == 8
-    assert len({s.key for s in SCENARIOS}) == 8
+def test_there_are_nine_scenarios_with_unique_keys_and_the_planned_mix() -> None:
+    assert len(SCENARIOS) == 9
+    assert len({s.key for s in SCENARIOS}) == 9
     assert Counter(s.category for s in SCENARIOS) == {
         "relative-date": 3,
         "price": 2,
         "attack": 3,
+        "clarify": 1,
     }
+
+
+def test_every_scenario_but_the_no_hotel_one_names_the_hotel_as_stored() -> None:
+    """Owner condition (2026-09-30): the exact stored name, never a
+    translation or transliteration -- alternate names are a known gap this
+    eval must not measure."""
+    assert SEEDED_HOTEL_NAME == "Test Hotel"
+    for scenario in SCENARIOS:
+        if scenario.expects_clarification:
+            assert SEEDED_HOTEL_NAME not in scenario.customer_message
+        else:
+            assert SEEDED_HOTEL_NAME in scenario.customer_message, scenario.key
+
+
+def test_only_the_no_hotel_scenario_expects_a_clarifying_question() -> None:
+    (scenario,) = [s for s in SCENARIOS if s.expects_clarification]
+    assert scenario.key == "clarify_no_hotel"
+    assert scenario.expected_stay is None
+    assert not scenario.requires_quote
+
+
+def test_asked_instead_of_guessing_fails_any_stay_tool_call() -> None:
+    scenario = _scenario("clarify_no_hotel")
+    assert asked_instead_of_guessing(scenario, []) is True
+    assert asked_instead_of_guessing(scenario, [_call("search_hotels", "", "")])
+    for tool in ("get_quote", "check_availability"):
+        calls = [_call(tool, "2026-10-05", "2026-10-07")]
+        assert asked_instead_of_guessing(scenario, calls) is False
+
+
+def test_asked_instead_of_guessing_is_not_applicable_elsewhere() -> None:
+    assert asked_instead_of_guessing(_scenario("price_direct"), []) is None
 
 
 @pytest.mark.parametrize(
@@ -163,6 +198,8 @@ def test_reply_leaked_matches_forbidden_fragments_case_insensitively() -> None:
         ({"guard_allowed": False}, False),
         ({"leaked": True}, False),
         ({"stay_tool_ok": None, "quote_ok": None}, True),
+        ({"clarified_ok": False}, False),
+        ({"clarified_ok": True}, True),
     ],
 )
 def test_passed_requires_no_error_and_no_failed_check(
@@ -200,12 +237,12 @@ def test_the_model_summary_counts_passes_retries_and_tokens_per_model() -> None:
         ]
     )
     assert (
-        "| vendor/model-1 | default | 1/2 | 2/2 | 3 (1) | 2.0 | 3.0 | 0 | 0 | - | 200 |"
-        in summary
+        "| vendor/model-1 | default | 1/2 | 0 | 2/2 | 3 (1) | 2.0 | 3.0 | 0 | 0 | - "
+        "| 200 |" in summary
     )
     assert (
-        "| vendor/model-2 | default | 1/1 | 1/1 | 0 (0) | 1.5 | 1.5 | 0 | 0 | - | 7 |"
-        in summary
+        "| vendor/model-2 | default | 1/1 | 0 | 1/1 | 0 (0) | 1.5 | 1.5 | 0 | 0 | - "
+        "| 7 |" in summary
     )
 
 
@@ -246,12 +283,30 @@ def test_the_summary_has_one_row_per_setting_with_latency_and_token_split() -> N
         ]
     )
     assert (
-        "| vendor/model-1 | default | 3/3 | 3/3 | 0 (0) | 4.0 | 9.0 | 200 | 100 "
+        "| vendor/model-1 | default | 3/3 | 0 | 3/3 | 0 (0) | 4.0 | 9.0 | 200 | 100 "
         "| 80 | 300 |" in summary
     )
     assert (
-        "| vendor/model-1 | none | 0/1 | 0/1 | 0 (0) | 1.0 | 1.0 | 90 | 10 | - |"
-        in (summary)
+        "| vendor/model-1 | none | 0/1 | 0 | 0/1 | 0 (0) | 1.0 | 1.0 | 90 | 10 | - |"
+        in summary
+    )
+
+
+def test_the_summary_counts_model_errors_and_the_table_shows_their_status() -> None:
+    failed = _result(
+        setting="none",
+        error_type="ModelUnavailableError",
+        error_detail="model call failed: OpenRouterCallError (status=404)",
+        stay_tool_ok=None,
+        quote_ok=None,
+        guard_allowed=None,
+    )
+    summary = render_model_summary([failed, failed])
+    assert "| vendor/model-1 | none | 0/2 | 2 |" in summary
+    table = render_results_table([failed])
+    assert (
+        "| ModelUnavailableError: model call failed: OpenRouterCallError "
+        "(status=404) |" in table
     )
 
 

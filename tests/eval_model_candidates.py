@@ -72,14 +72,20 @@ from services.agent.llm.config import (
     LlmSettings,
 )
 from services.agent.llm.conversation import generate_reply
-from services.agent.llm.errors import LlmConfigurationError, LlmError
+from services.agent.llm.errors import (
+    LlmConfigurationError,
+    LlmError,
+    ModelUnavailableError,
+)
 from services.agent.llm.model_types import ModelResponse, Turn
 from services.agent.output_guard.enforcement import enforce_outbound_text
 from tests.conftest import _TABLES_TO_TRUNCATE
 from tests.eval_scenarios import (
     SCENARIOS,
+    SEEDED_HOTEL_NAME,
     Scenario,
     ScenarioResult,
+    asked_instead_of_guessing,
     quote_was_priced,
     render_model_summary,
     render_results_table,
@@ -109,7 +115,6 @@ EVAL_TOTAL_ROOMS = 5
 EVAL_COST_PER_NIGHT_HALALAS = 10_000
 EVAL_TARGET_MARGIN_BPS = 2_000
 EVAL_MIN_PROFIT_HALALAS = 1_000
-SEEDED_HOTEL_NAME = "Test Hotel"
 
 # A fixed, generous cap set: this harness measures model behavior, not the
 # caps (which have their own tests), so none of them may trip mid-run.
@@ -352,6 +357,7 @@ async def run_scenario(
             input_tokens=counting.input_tokens,
             output_tokens=counting.output_tokens,
             reasoning_tokens=counting.reasoning_tokens,
+            error_detail=(str(exc) if isinstance(exc, ModelUnavailableError) else None),
         )
     finally:
         client_logger.removeHandler(retry_counter)
@@ -365,6 +371,7 @@ async def run_scenario(
         error_type=None,
         stay_tool_ok=stay_tool_call_matches(scenario, reply.tool_calls),
         quote_ok=quote_was_priced(scenario, reply.tool_calls),
+        clarified_ok=asked_instead_of_guessing(scenario, reply.tool_calls),
         guard_allowed=verdict.allowed,
         leaked=reply_leaked(scenario, reply.text),
         retries=retry_counter.retries,
