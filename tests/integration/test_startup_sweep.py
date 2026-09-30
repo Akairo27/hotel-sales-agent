@@ -29,8 +29,8 @@ import psycopg
 import pytest
 
 from services.agent import webhook as webhook_module
+from services.agent.fixed_texts import FALLBACK
 from services.agent.llm.config import LlmSettings
-from services.agent.output_guard.enforcement import OUTPUT_GUARD_FALLBACK_MESSAGE
 from services.agent.startup_sweep import (
     MAX_CONVERSATIONS_PER_SWEEP,
     STARTUP_SWEEP_LOOKBACK_HOURS_ENV,
@@ -174,7 +174,7 @@ def test_sweep_answers_a_message_lost_before_the_start(
 
     _sweep()
 
-    assert sender.calls == [(_WA_ID, OUTPUT_GUARD_FALLBACK_MESSAGE)]
+    assert sender.calls == [(_WA_ID, FALLBACK.english)]
     assert _escalations(db_conn) == [
         ("unanswered_at_startup", {"source": "startup_sweep"})
     ]
@@ -261,7 +261,7 @@ def test_sweep_skips_a_message_silent_by_the_daily_rate_cap(
         db_conn,
         conversation_id,
         direction="outbound",
-        body=OUTPUT_GUARD_FALLBACK_MESSAGE,
+        body=FALLBACK.english,
         customer_phone=_PHONE,
         created_at=_STARTED_AT - timedelta(minutes=8),
     )
@@ -292,7 +292,7 @@ def test_sweep_answers_a_lost_first_message_past_the_rate_cap(
 
     _sweep()
 
-    assert sender.calls == [(_WA_ID, OUTPUT_GUARD_FALLBACK_MESSAGE)]
+    assert sender.calls == [(_WA_ID, FALLBACK.english)]
 
 
 def test_sweep_sends_one_notice_for_several_lost_messages_in_a_conversation(

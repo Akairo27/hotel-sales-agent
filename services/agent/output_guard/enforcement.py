@@ -74,36 +74,6 @@ _RETENTION_NOTE = (
     "predates it — opened_at already exists and needs no schema change."
 )
 
-# What the customer sees instead of a blocked reply — the webhook's job,
-# not this module's, but defined here because this is the module whose
-# job it is to keep this text safe to send. Fixed and non-LLM-generated
-# by design: the model is never asked to rephrase a blocked reply (an
-# unmanipulated second attempt is not guaranteed, and it would spend more
-# tokens on a turn that already failed), and the "colleague will follow
-# up" framing matches prompt.py's existing no_booking_actions rule rather
-# than inventing new customer-facing language for this one case.
-#
-# Bilingual, not language-detected: detecting the customer's language
-# outside the model is one more thing that can be wrong at exactly the
-# moment something already went wrong; sending both costs a slightly
-# longer message, nothing more.
-#
-# Deliberately contains no digit of any kind — not ASCII 0-9, not
-# Arabic-Indic (U+0660-U+0669) — so it can never itself become a candidate amount
-# (extraction.py finds nothing to extract from text with no digits at
-# all) and is therefore provably, not just presumably, always allowed by
-# this module's own check. test_output_guard_fallback_message_is_always_
-# allowed (tests/integration/test_output_guard.py) asserts this directly
-# against evaluate_amounts, and test_output_guard_fallback_message_has_
-# no_digits (tests/unit/test_output_guard_enforcement.py) asserts it
-# character-by-character in both digit sets — so an edit that
-# accidentally introduces a number is caught in CI, not at runtime.
-OUTPUT_GUARD_FALLBACK_MESSAGE = (
-    "One moment — I need to double-check this with a colleague, and "
-    "they'll follow up with you shortly.\n"
-    "لحظة من فضلك — أحتاج أتأكد من هذا مع أحد الزملاء، وسيتواصل معك قريباً."
-)
-
 
 @dataclass(frozen=True)
 class GuardVerdict:

@@ -75,8 +75,9 @@ response can take without this split). Order matters and is deliberate:
    the candidate reply. Allowed: send it. Blocked: never send it, never
    ask the model to rephrase it (a second, unmanipulated attempt is not
    guaranteed, and it would spend more tokens on a turn that already
-   failed) — send OUTPUT_GUARD_FALLBACK_MESSAGE instead, a fixed,
-   non-LLM-generated string, through the exact same enforce_outbound_text
+   failed) — send the fallback (services/agent/fixed_texts.py) instead, a
+   fixed, non-LLM-generated text in the customer's language, through the
+   exact same enforce_outbound_text
    call (its own module docstring already names this as a canned
    template's intended path, not a bypass). enforce_outbound_text already
    opens the escalation for the blocked reply on its own, so the funnel
@@ -147,6 +148,14 @@ import psycopg
 from fastapi import APIRouter, BackgroundTasks, HTTPException, Query, Request
 from fastapi.responses import JSONResponse, PlainTextResponse
 
+from services.agent.fixed_texts import (
+    FALLBACK,
+    PLEASE_TYPE,
+    FixedText,
+    Language,
+    customer_language,
+    media_placeholder,
+)
 from services.agent.llm.caps import (
     MessageRateCapExceededError,
     check_message_rate_cap,
@@ -176,7 +185,6 @@ from services.agent.llm.session import (
     touch_last_message_at,
 )
 from services.agent.output_guard.enforcement import (
-    OUTPUT_GUARD_FALLBACK_MESSAGE,
     GuardVerdict,
     enforce_outbound_text,
     open_escalation,
@@ -310,7 +318,7 @@ def _signature_problem(
 
 # How the fast path handles each inbound message type (owner decision A,
 # revised 2026-09-29). Only text reaches the model. A voice note or an
-# image gets PLEASE_TYPE_MESSAGE; the other media listed get the generic
+# image gets fixed_texts.PLEASE_TYPE; the other media listed get the
 # fallback; both open an escalation for staff. Every other type --
 # reaction, sticker, and any type not listed here -- is deliberately
 # ignored: not stored, not answered (ARCHITECTURE.md §7, "لا صمت").
@@ -323,17 +331,6 @@ _HANDLED_MESSAGE_TYPES = (
     frozenset({_TEXT_MESSAGE_TYPE})
     | _PLEASE_TYPE_MESSAGE_TYPES
     | _FALLBACK_MESSAGE_TYPES
-)
-
-# The fixed reply to a voice note or an image: the agent reads text only.
-# Sent through the output guard like every outbound text (CLAUDE.md rule
-# 8); it states no amount, so the guard always allows it
-# (test_please_type_message_is_always_allowed).
-PLEASE_TYPE_MESSAGE = (
-    "Sorry, I can't read voice notes or images yet. Please type your "
-    "request and I'll help you right away.\n"
-    "عذراً، لا أستطيع قراءة الرسائل الصوتية أو الصور حالياً. من فضلك اكتب "
-    "طلبك وسأساعدك فوراً."
 )
 
 _REASON_UNSUPPORTED_MESSAGE_TYPE = "unsupported_message_type"
@@ -375,7 +372,7 @@ def _message_body(message: dict[str, Any], message_type: str) -> str:
         if not isinstance(text, str):
             raise KeyError("text message without text.body")
         return text
-    placeholder = f"[{message_type} message]"
+    placeholder = media_placeholder(message_type)
     caption = _as_dict(message.get(message_type)).get("caption")
     return f"{placeholder} {caption}" if isinstance(caption, str) else placeholder
 
@@ -822,6 +819,27 @@ def _open_escalation_or_log_failure(
     return escalation_id
 
 
+def _notice_language(
+    conn: psycopg.Connection[Any], conversation_id: int
+) -> Language | None:
+    """The customer's language for a fixed text, or None -- the bilingual
+    rendering -- when it is unknown or cannot be read. A failed read is
+    logged as a warning and never blocks the notice itself."""
+    try:
+        return customer_language(conn, conversation_id)
+    except Exception as exc:
+        logger.warning(
+            json.dumps(
+                {
+                    "event": "notice_language_lookup_failed",
+                    "conversation_id": conversation_id,
+                    "exception_type": type(exc).__name__,
+                }
+            )
+        )
+        return None
+
+
 async def _send_fallback_or_log_failure(
     conn: psycopg.Connection[Any],
     *,
@@ -829,20 +847,21 @@ async def _send_fallback_or_log_failure(
     customer_phone: str,
     reason: str,
     escalation_id: int | None,
-    notice_text: str = OUTPUT_GUARD_FALLBACK_MESSAGE,
+    notice: FixedText = FALLBACK,
 ) -> bool:
-    """Sends notice_text -- OUTPUT_GUARD_FALLBACK_MESSAGE unless a caller
-    passes another fixed message such as PLEASE_TYPE_MESSAGE -- through the
-    output guard like any other outbound text (CLAUDE.md rule 8 -- the
-    guard is never bypassed, even for a fixed string). Returns whether it
-    was delivered; never raises.
+    """Sends `notice` -- fixed_texts.FALLBACK unless a caller passes
+    another fixed text such as fixed_texts.PLEASE_TYPE -- in the customer's
+    language (_notice_language), through the output guard like any other
+    outbound text (CLAUDE.md rule 8 -- the guard is never bypassed, even
+    for a fixed string). Returns whether it was delivered; never raises.
 
-    A blocked notice is structurally impossible -- test_output_guard_
-    fallback_message_is_always_allowed and its please-type twin
-    (tests/integration/test_output_guard.py) exist to prove it -- and is
-    not routed around with a second attempt, the infinite-regress trap
-    this design avoids. It is logged loudly if it ever happens.
+    A blocked notice is structurally impossible -- no rendering of a fixed
+    text contains a digit, and tests/integration/test_output_guard.py runs
+    every rendering through the guard to prove it -- and is not routed
+    around with a second attempt, the infinite-regress trap this design
+    avoids. It is logged loudly if it ever happens.
     """
+    notice_text = notice.render(_notice_language(conn, conversation_id))
     try:
         verdict = enforce_outbound_text(
             conn, conversation_id=conversation_id, text=notice_text
@@ -894,14 +913,14 @@ async def _escalate_and_notify(
     reason: str,
     exc: Exception | None,
     existing_escalation_id: int | None = None,
-    notice_text: str = OUTPUT_GUARD_FALLBACK_MESSAGE,
+    notice: FixedText = FALLBACK,
     extra_notes: dict[str, str] | None = None,
 ) -> str:
     """The one funnel every failed turn goes through (CLAUDE.md rule 12,
     "never leave a customer in silence", and §9's "beyond the cap,
     escalate to a human"): opens an escalation for a human and sends the
-    customer the bilingual fallback message -- or, for a voice note or
-    image, notice_text=PLEASE_TYPE_MESSAGE, with the message type in
+    customer the fallback message, in their language -- or, for a voice
+    note or image, notice=fixed_texts.PLEASE_TYPE, with the message type in
     extra_notes.
 
     The two are attempted independently -- a failure to open the
@@ -938,7 +957,7 @@ async def _escalate_and_notify(
         customer_phone=customer_phone,
         reason=reason,
         escalation_id=escalation_id,
-        notice_text=notice_text,
+        notice=notice,
     )
     if (escalation_id is None or not delivered) and conn.closed:
         escalation_id, delivered = await _retry_funnel_on_a_fresh_connection(
@@ -948,7 +967,7 @@ async def _escalate_and_notify(
             exc=exc,
             escalation_id=escalation_id,
             delivered=delivered,
-            notice_text=notice_text,
+            notice=notice,
             extra_notes=extra_notes,
         )
     return _funnel_status(escalated=escalation_id is not None, delivered=delivered)
@@ -962,7 +981,7 @@ async def _retry_funnel_on_a_fresh_connection(
     exc: Exception | None,
     escalation_id: int | None,
     delivered: bool,
-    notice_text: str,
+    notice: FixedText,
     extra_notes: dict[str, str] | None,
 ) -> tuple[int | None, bool]:
     """Re-attempts whichever of the escalation and the fallback send has
@@ -986,7 +1005,7 @@ async def _retry_funnel_on_a_fresh_connection(
                     customer_phone=customer_phone,
                     reason=reason,
                     escalation_id=escalation_id,
-                    notice_text=notice_text,
+                    notice=notice,
                 )
     except Exception as connect_exc:
         logger.error(
@@ -1334,7 +1353,7 @@ async def escalate_and_notify_on_own_connection(
     customer_phone: str,
     reason: str,
     exc: Exception | None,
-    notice_text: str = OUTPUT_GUARD_FALLBACK_MESSAGE,
+    notice: FixedText = FALLBACK,
     extra_notes: dict[str, str] | None = None,
 ) -> str:
     """_escalate_and_notify on a connection of its own, for a background
@@ -1352,7 +1371,7 @@ async def escalate_and_notify_on_own_connection(
                 customer_phone=customer_phone,
                 reason=reason,
                 exc=exc,
-                notice_text=notice_text,
+                notice=notice,
                 extra_notes=extra_notes,
             )
     except Exception as unexpected_exc:
@@ -1464,7 +1483,7 @@ async def _send_notice_without_a_model_turn(
     conversation_id: int,
     customer_phone: str,
     reason: str,
-    notice_text: str,
+    notice: FixedText,
     extra_notes: dict[str, str] | None,
 ) -> None:
     """Background job for a stored message the model never sees -- a
@@ -1477,7 +1496,7 @@ async def _send_notice_without_a_model_turn(
         customer_phone=customer_phone,
         reason=reason,
         exc=None,
-        notice_text=notice_text,
+        notice=notice,
         extra_notes=extra_notes,
     )
     logger.info(
@@ -1568,7 +1587,7 @@ def _schedule_after_storing(
 ) -> str:
     """Schedules the background job for a stored, uncapped message: a
     model turn for text, a notice for any other handled type (decision A:
-    PLEASE_TYPE_MESSAGE for a voice note or an image, the generic fallback
+    fixed_texts.PLEASE_TYPE for a voice note or an image, the fallback
     for other media, an escalation either way). Returns its status."""
     if inbound.message_type == _TEXT_MESSAGE_TYPE:
         background_tasks.add_task(
@@ -1580,17 +1599,15 @@ def _schedule_after_storing(
             now=now,
         )
         return _STATUS_ACCEPTED
-    notice_text = (
-        PLEASE_TYPE_MESSAGE
-        if inbound.message_type in _PLEASE_TYPE_MESSAGE_TYPES
-        else OUTPUT_GUARD_FALLBACK_MESSAGE
+    notice = (
+        PLEASE_TYPE if inbound.message_type in _PLEASE_TYPE_MESSAGE_TYPES else FALLBACK
     )
     background_tasks.add_task(
         _send_notice_without_a_model_turn,
         conversation_id=conversation_id,
         customer_phone=inbound.customer_phone,
         reason=_REASON_UNSUPPORTED_MESSAGE_TYPE,
-        notice_text=notice_text,
+        notice=notice,
         extra_notes={"message_type": inbound.message_type},
     )
     return _STATUS_UNSUPPORTED_TYPE
@@ -1655,7 +1672,7 @@ def _accept_inbound_message(
                 conversation_id=conversation_id,
                 customer_phone=inbound.customer_phone,
                 reason=_REASON_MESSAGE_RATE_CAP_EXCEEDED,
-                notice_text=OUTPUT_GUARD_FALLBACK_MESSAGE,
+                notice=FALLBACK,
                 extra_notes=None,
             )
         return _STATUS_RATE_LIMITED

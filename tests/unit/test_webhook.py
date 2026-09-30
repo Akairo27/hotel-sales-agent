@@ -21,12 +21,12 @@ import psycopg
 import pytest
 
 from services.agent import webhook as webhook_module
+from services.agent.fixed_texts import FALLBACK
 from services.agent.llm.client import GeminiTransport, OpenRouterTransport
 from services.agent.llm.config import LlmSettings, OpenRouterRoute, load_llm_settings
 from services.agent.llm.errors import LlmConfigurationError
 from services.agent.llm.pricing import TokenRates
 from services.agent.output_guard.enforcement import (
-    OUTPUT_GUARD_FALLBACK_MESSAGE,
     GuardVerdict,
 )
 from services.agent.webhook import (
@@ -432,6 +432,7 @@ class _FunnelFakes:
     escalations_on: list[_FakeConnection] = field(default_factory=list)
     guard_checks_on: list[_FakeConnection] = field(default_factory=list)
     sends: list[tuple[str, str]] = field(default_factory=list)
+    language_lookups_on: list[_FakeConnection] = field(default_factory=list)
 
     def install(self, monkeypatch: pytest.MonkeyPatch) -> None:
         def _open_escalation(conn: _FakeConnection, **_kwargs: Any) -> int:
@@ -441,6 +442,12 @@ class _FunnelFakes:
             if self.close_after_insert:
                 conn.closed = True
             return 42
+
+        def _customer_language(conn: _FakeConnection, _conversation_id: int) -> str:
+            self.language_lookups_on.append(conn)
+            if conn.closed:
+                raise psycopg.OperationalError("the connection is closed")
+            return "en"
 
         def _enforce(conn: _FakeConnection, **_kwargs: Any) -> GuardVerdict:
             self.guard_checks_on.append(conn)
@@ -463,6 +470,7 @@ class _FunnelFakes:
 
         monkeypatch.setattr(webhook_module, "open_escalation", _open_escalation)
         monkeypatch.setattr(webhook_module, "enforce_outbound_text", _enforce)
+        monkeypatch.setattr(webhook_module, "customer_language", _customer_language)
         monkeypatch.setattr(webhook_module, "get_whatsapp_send_settings", lambda: None)
         monkeypatch.setattr(webhook_module, "get_whatsapp_sender", lambda _s: _Sender())
         monkeypatch.setattr(
@@ -499,7 +507,10 @@ def test_funnel_retries_both_halves_on_a_fresh_connection_when_its_own_died(
     assert status == "escalated"
     assert fakes.escalations_on == [dead, fakes.fresh]
     assert fakes.guard_checks_on == [dead, fakes.fresh]
-    assert fakes.sends == [("966500000001", OUTPUT_GUARD_FALLBACK_MESSAGE)]
+    # The language is read again on the fresh connection: the retried
+    # fallback goes out in the customer's language, not bilingual.
+    assert fakes.language_lookups_on == [dead, fakes.fresh]
+    assert fakes.sends == [("966500000001", FALLBACK.english)]
 
 
 def test_funnel_retries_only_the_failed_half_so_nothing_is_opened_or_sent_twice(

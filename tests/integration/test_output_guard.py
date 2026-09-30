@@ -17,10 +17,10 @@ import psycopg
 import pytest
 
 from lib.money import format_halalas_as_arabic_riyal, format_halalas_as_sar
+from services.agent.fixed_texts import FALLBACK, PLEASE_TYPE
 from services.agent.llm.dispatch import dispatch_get_quote
 from services.agent.llm.errors import ConversationNotFoundError
 from services.agent.output_guard.enforcement import (
-    OUTPUT_GUARD_FALLBACK_MESSAGE,
     REASON_FOREIGN_CURRENCY,
     REASON_MISMATCH,
     REASON_MISSING_CURRENCY,
@@ -29,7 +29,6 @@ from services.agent.output_guard.enforcement import (
     enforce_outbound_text,
 )
 from services.agent.output_guard.quotes import load_allowed_amounts
-from services.agent.webhook import PLEASE_TYPE_MESSAGE
 from services.agent.whatsapp_send import to_whatsapp_formatting
 from tests.integration._seed import (
     flat_demand_curve,
@@ -643,22 +642,28 @@ def test_an_arabic_reply_quoting_the_arabic_riyal_display_is_allowed(
     assert blocked_verdict.allowed is False
 
 
-def test_output_guard_fallback_message_is_always_allowed(
-    db_conn: psycopg.Connection[Any],
+_FIXED_TEXT_RENDERINGS = [
+    pytest.param(text.render(language), id=f"{name}-{language or 'bilingual'}")
+    for name, text in (("fallback", FALLBACK), ("please_type", PLEASE_TYPE))
+    for language in ("ar", "en", "id", None)
+]
+
+
+@pytest.mark.parametrize("rendering", _FIXED_TEXT_RENDERINGS)
+def test_every_fixed_text_rendering_is_always_allowed(
+    db_conn: psycopg.Connection[Any], rendering: str
 ) -> None:
-    """The customer-facing fallback (webhook.py's job to send, not this
-    module's) must be provably safe to send through this exact function
-    — see enforcement.py's own comment on OUTPUT_GUARD_FALLBACK_MESSAGE.
-    Checked against both a conversation with no quotes at all and one
-    with a real quote and floor, since either shape could in principle
-    interact differently with a digit-bearing message — this one has no
-    digits, so neither should ever block it.
+    """The fixed customer texts (webhook.py's job to send, not this
+    module's) must be provably safe to send through this exact function,
+    in every language they go out in -- see services/agent/fixed_texts.py.
+    Checked against both a conversation with no quotes at all and one with
+    a real quote and floor, since either shape could in principle interact
+    differently with a digit-bearing message -- none has a digit, so
+    neither should ever block one.
     """
     no_quotes_conversation = seed_conversation(db_conn, customer_phone="+966544444441")
     no_quotes_verdict = enforce_outbound_text(
-        db_conn,
-        conversation_id=no_quotes_conversation,
-        text=OUTPUT_GUARD_FALLBACK_MESSAGE,
+        db_conn, conversation_id=no_quotes_conversation, text=rendering
     )
     assert no_quotes_verdict.allowed is True
     assert no_quotes_verdict.escalation_id is None
@@ -674,39 +679,7 @@ def test_output_guard_fallback_message_is_always_allowed(
         min_allowed_total=90_000,
     )
     with_quote_verdict = enforce_outbound_text(
-        db_conn,
-        conversation_id=with_quote_conversation,
-        text=OUTPUT_GUARD_FALLBACK_MESSAGE,
-    )
-    assert with_quote_verdict.allowed is True
-    assert with_quote_verdict.escalation_id is None
-
-
-def test_please_type_message_is_always_allowed(
-    db_conn: psycopg.Connection[Any],
-) -> None:
-    """webhook.py's fixed reply to a voice note or an image goes through
-    this exact function too (CLAUDE.md rule 8) and must never be blocked --
-    the same two conversation shapes as the fallback test above."""
-    no_quotes_conversation = seed_conversation(db_conn, customer_phone="+966544444443")
-    no_quotes_verdict = enforce_outbound_text(
-        db_conn, conversation_id=no_quotes_conversation, text=PLEASE_TYPE_MESSAGE
-    )
-    assert no_quotes_verdict.allowed is True
-    assert no_quotes_verdict.escalation_id is None
-
-    hotel_id, room_type_id = seed_hotel_and_room_type(db_conn)
-    with_quote_conversation = seed_conversation(db_conn, customer_phone="+966544444444")
-    seed_quote(
-        db_conn,
-        hotel_id,
-        room_type_id,
-        conversation_id=with_quote_conversation,
-        ask_price_total=135_000,
-        min_allowed_total=90_000,
-    )
-    with_quote_verdict = enforce_outbound_text(
-        db_conn, conversation_id=with_quote_conversation, text=PLEASE_TYPE_MESSAGE
+        db_conn, conversation_id=with_quote_conversation, text=rendering
     )
     assert with_quote_verdict.allowed is True
     assert with_quote_verdict.escalation_id is None

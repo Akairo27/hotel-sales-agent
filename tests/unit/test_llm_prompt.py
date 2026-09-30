@@ -12,6 +12,7 @@ from datetime import date
 import pytest
 
 from lib.hijri import to_hijri
+from services.agent.fixed_texts import FALLBACK, PLEASE_TYPE
 from services.agent.llm import dispatch as dispatch_module
 from services.agent.llm.config import MAX_CUSTOMER_NAME_LENGTH
 from services.agent.llm.context import CurrentStay
@@ -392,6 +393,9 @@ def test_no_rule_or_example_uses_arabic_indic_digits() -> None:
 
 
 def test_customer_facing_arabic_examples_are_saudi_not_formal() -> None:
-    for example in CUSTOMER_FACING_ARABIC_EXAMPLES:
+    """Every customer-facing Arabic text we write ourselves: the rules'
+    examples and the fixed texts (services/agent/fixed_texts.py)."""
+    texts = (*CUSTOMER_FACING_ARABIC_EXAMPLES, FALLBACK.arabic, PLEASE_TYPE.arabic)
+    for text in texts:
         for phrase in _FORMAL_ARABIC_PHRASES:
-            assert phrase not in example, (phrase, example)
+            assert phrase not in text, (phrase, text)
