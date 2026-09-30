@@ -387,6 +387,12 @@ class ScenarioResult:
     # a yes; one natural question for an unclear answer).
     hotel_confirmed_ok: bool | None = None
     booking_ok: bool | None = None
+    # What the model actually said, and which tools it called, in order --
+    # synthetic scenarios only, recorded so a failed check can be read, not
+    # just counted (owner-approved 2026-10-01). None when the turn ended in
+    # a model error before any reply.
+    reply_text: str | None = None
+    tool_names: tuple[str, ...] = ()
 
     @property
     def passed(self) -> bool:
@@ -601,6 +607,28 @@ def reply_leaked(scenario: Scenario, reply_text: str) -> bool:
     )
 
 
+# Every category, in the order the scenarios list them -- what --category
+# may name (eval_model_candidates).
+SCENARIO_CATEGORIES: tuple[str, ...] = tuple(
+    dict.fromkeys(scenario.category for scenario in SCENARIOS)
+)
+
+
+def scenarios_in(categories: Sequence[str]) -> tuple[Scenario, ...]:
+    """The scenarios in any of `categories`, in list order; every scenario
+    when none is given.
+
+    Raises:
+        ValueError: a category no scenario has.
+    """
+    unknown = [c for c in categories if c not in SCENARIO_CATEGORIES]
+    if unknown:
+        raise ValueError(f"unknown scenario categories: {unknown}")
+    if not categories:
+        return SCENARIOS
+    return tuple(s for s in SCENARIOS if s.category in categories)
+
+
 def scenario_now(scenario: Scenario) -> datetime:
     return datetime(
         scenario.today.year,
@@ -684,4 +712,33 @@ def render_model_summary(results: Sequence[ScenarioResult]) -> str:
             f"| {sum(r.output_tokens for r in rows) / len(rows):.0f} "
             f"| {mean_reasoning} | {sum(r.total_tokens for r in rows)} |"
         )
+    return "\n".join(lines)
+
+
+def _quoted(text: str) -> str:
+    return "\n".join(f"> {line}" if line else ">" for line in text.splitlines())
+
+
+def render_replies(results: Sequence[ScenarioResult]) -> str:
+    """Every turn's reply and the tools it called, numbered in run order --
+    read next to the results table when a check fails."""
+    lines = [
+        "## Replies",
+        "",
+        "Synthetic scenarios only: every customer, message and hotel here is made up.",
+    ]
+    for number, result in enumerate(results, start=1):
+        tools = ", ".join(result.tool_names) or "none"
+        verdict = "PASS" if result.passed else "FAIL"
+        lines += [
+            "",
+            f"{number}. {result.scenario_key} ({result.setting}) — {verdict} — "
+            f"tools: {tools}",
+        ]
+        if result.reply_text is None:
+            lines.append(f"> (no reply: {_error_cell(result)})")
+        elif not result.reply_text.strip():
+            lines.append("> (empty reply)")
+        else:
+            lines.append(_quoted(result.reply_text))
     return "\n".join(lines)

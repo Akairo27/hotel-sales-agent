@@ -23,6 +23,10 @@ on:
         description: "Reasoning settings, space-separated (default low minimal none ...)"
         required: true
         default: "low"
+      categories:
+        description: "Scenario categories to run, space-separated (e.g. booking); empty runs all"
+        required: false
+        default: ""
 
 permissions:
   contents: read
@@ -76,6 +80,7 @@ jobs:
           EVAL_DATABASE_URL: postgresql://postgres@localhost:5432/hotel_sales_eval
           REPEAT: ${{ inputs.repeat }}
           SETTINGS: ${{ inputs.settings }}
+          CATEGORIES: ${{ inputs.categories }}
         # The settings reach the harness as separate arguments, each one
         # checked there against the known values; globbing is off so a
         # setting can never expand into file names.
@@ -85,10 +90,15 @@ jobs:
           for setting in $SETTINGS; do
             effort_args+=(--reasoning-effort "$setting")
           done
+          category_args=()
+          for category in $CATEGORIES; do
+            category_args+=(--category "$category")
+          done
           uv run python -m tests.eval_model_candidates --confirm-scratch-db \
             --model "$EVAL_MODEL" \
             --provider crusoe --provider inference-net \
             "${effort_args[@]}" \
+            "${category_args[@]}" \
             --repeat "$REPEAT" \
             --output model-eval-results.md
 

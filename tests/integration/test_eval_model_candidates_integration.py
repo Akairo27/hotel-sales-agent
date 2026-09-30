@@ -192,6 +192,9 @@ def test_a_correct_price_answer_passes_every_check(
 
     assert result.passed
     assert result.quote_reply_ok is True
+    assert result.tool_names == ("search_hotels", "get_quote")
+    assert result.reply_text is not None
+    assert result.reply_text.startswith("Test Hotel, Standard room, 2 nights")
     assert result.stay_tool_ok is True
     assert result.quote_ok is True
     assert result.guard_allowed is True

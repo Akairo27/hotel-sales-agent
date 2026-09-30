@@ -82,7 +82,7 @@ from services.agent.llm.model_types import ModelResponse, Turn
 from services.agent.output_guard.enforcement import enforce_outbound_text
 from tests.conftest import _TABLES_TO_TRUNCATE
 from tests.eval_scenarios import (
-    SCENARIOS,
+    SCENARIO_CATEGORIES,
     SEEDED_ARABIC_HOTEL_NAME,
     SEEDED_HOTEL_NAME,
     Scenario,
@@ -94,9 +94,11 @@ from tests.eval_scenarios import (
     quote_reply_complete,
     quote_was_priced,
     render_model_summary,
+    render_replies,
     render_results_table,
     reply_leaked,
     scenario_now,
+    scenarios_in,
     stay_tool_call_matches,
 )
 from tests.integration._seed import (
@@ -497,6 +499,8 @@ async def run_scenario(
         booking_ok=booking_answer_handled(scenario, reply.tool_calls, reply.text),
         guard_allowed=verdict.allowed,
         leaked=reply_leaked(scenario, reply.text),
+        reply_text=reply.text,
+        tool_names=tuple(call.name for call in reply.tool_calls),
         retries=retry_counter.retries,
         malformed_retries=retry_counter.malformed_retries,
         model_calls=counting.calls,
@@ -612,6 +616,13 @@ def _parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
         default=1,
         help="run every (setting, scenario) pair this many times",
     )
+    parser.add_argument(
+        "--category",
+        action="append",
+        default=[],
+        choices=SCENARIO_CATEGORIES,
+        help="run only the scenarios in this category (repeatable); all by default",
+    )
     parser.add_argument("--output", help="also write the report to this file")
     args = parser.parse_args(argv)
     args.reasoning_effort = args.reasoning_effort or [DEFAULT_SETTING]
@@ -619,15 +630,19 @@ def _parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
 
 
 async def _run_all(
-    conn: psycopg.Connection[Any], targets: Sequence[EvalTarget], *, repeat: int
+    conn: psycopg.Connection[Any],
+    targets: Sequence[EvalTarget],
+    *,
+    scenarios: Sequence[Scenario],
+    repeat: int,
 ) -> list[ScenarioResult]:
-    """Every target runs every scenario, `repeat` times. The targets are
-    interleaved within each repeat, so a provider's slow spell falls on
+    """Every target runs every given scenario, `repeat` times. The targets
+    are interleaved within each repeat, so a provider's slow spell falls on
     every setting alike rather than on whichever ran then."""
     results: list[ScenarioResult] = []
     for _ in range(repeat):
         for target in targets:
-            for scenario in SCENARIOS:
+            for scenario in scenarios:
                 results.append(
                     await run_scenario(
                         conn,
@@ -660,8 +675,21 @@ def main(argv: Sequence[str] | None = None) -> int:
     )
     with psycopg.connect(url, autocommit=True) as conn:
         require_only_seeded_hotels(conn)
-        results = asyncio.run(_run_all(conn, targets, repeat=args.repeat))
-    report = render_model_summary(results) + "\n\n" + render_results_table(results)
+        results = asyncio.run(
+            _run_all(
+                conn,
+                targets,
+                scenarios=scenarios_in(args.category),
+                repeat=args.repeat,
+            )
+        )
+    report = "\n\n".join(
+        (
+            render_model_summary(results),
+            render_results_table(results),
+            render_replies(results),
+        )
+    )
     sys.stdout.write(report + "\n")
     if args.output:
         Path(args.output).write_text(report + "\n", encoding="utf-8")
