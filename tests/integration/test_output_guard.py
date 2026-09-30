@@ -714,7 +714,7 @@ _APPROVED_QUOTE_REPLIES: tuple[tuple[str, int, list[int]], ...] = (
     (
         "Test Hotel, Standard room, 2 nights, 5 to 7 October:\n"
         "Total *900.00 SAR* (450.00 SAR per night).\n"
-        "350 m from the Haram.\n"
+        "Only 350 m from the Haram.\n"
         "Shall I pass this to a colleague to confirm your booking?",
         1,
         [45_000, 45_000],
@@ -722,7 +722,7 @@ _APPROVED_QUOTE_REPLIES: tuple[tuple[str, int, list[int]], ...] = (
     (
         "Test Hotel, kamar Standard, 2 malam, 5 sampai 7 Oktober:\n"
         "Total *900.00 SAR* (450.00 SAR per malam).\n"
-        "350 m dari Masjidil Haram.\n"
+        "Hanya 350 m dari Masjidil Haram.\n"
         "Mau saya teruskan ke rekan saya untuk konfirmasi pemesanan?",
         1,
         [45_000, 45_000],
@@ -738,10 +738,27 @@ _APPROVED_QUOTE_REPLIES: tuple[tuple[str, int, list[int]], ...] = (
     (
         "Test Hotel, Standard room, 2 nights, 5 to 7 October:\n"
         "Total *900.00 SAR* (from 400.00 SAR to 500.00 SAR per night).\n"
-        "1.3 km from the Haram.\n"
+        "Only 1.3 km from the Haram.\n"
         "Shall I pass this to a colleague to confirm your booking?",
         1,
         [40_000, 50_000],
+    ),
+    # A Madinah hotel: the distance is to the Prophet's Mosque.
+    (
+        "Test Hotel، غرفة Standard، ليلتين من 5 إلى 7 أكتوبر:\n"
+        "الإجمالي *900.00 ريال* (450.00 ريال لليلة).\n"
+        "يبعد 350 متر عن المسجد النبوي.\n"
+        "تبغاني أبلّغ زميلي يأكّد لك الحجز؟",
+        1,
+        [45_000, 45_000],
+    ),
+    (
+        "Test Hotel, kamar Standard, 2 malam, 5 sampai 7 Oktober:\n"
+        "Total *900.00 SAR* (450.00 SAR per malam).\n"
+        "Hanya 350 m dari Masjid Nabawi.\n"
+        "Mau saya teruskan ke rekan saya untuk konfirmasi pemesanan?",
+        1,
+        [45_000, 45_000],
     ),
 )
 

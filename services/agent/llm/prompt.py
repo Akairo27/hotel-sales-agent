@@ -112,7 +112,11 @@ _SAUDI_EXAMPLE_CONFIRM_YEAR = "تقصد من 1 إلى 3 سبتمبر 2027؟"
 # Owner-approved wording (2026-09-30): confirming a hotel found only by the
 # Arabic retry of search_hotels, and the shape of a quote reply in each
 # language. Bracketed placeholders are filled from the tool results; the
-# model is never shown an example price.
+# model is never shown an example price. The English and Indonesian
+# distance lines open with a word ("Only" / "Hanya"), never the number:
+# the output guard reads a number that follows a currency word across
+# nothing but punctuation or a line break as money (owner decision the
+# same day).
 _SAUDI_EXAMPLE_CONFIRM_HOTEL = "تقصد فندق [اسم الفندق]؟"
 
 _SAUDI_EXAMPLE_QUOTE_REPLY = (
@@ -126,14 +130,14 @@ _SAUDI_EXAMPLE_QUOTE_REPLY = (
 _ENGLISH_EXAMPLE_QUOTE_REPLY = (
     "[Hotel], [room type] room, [N] nights, [check-in] to [check-out]:\n"
     "Total *[total]* ([price per night] per night).\n"
-    "[distance] from the Haram.\n"
+    "Only [distance] from the Haram.\n"
     "Shall I pass this to a colleague to confirm your booking?"
 )
 
 _INDONESIAN_EXAMPLE_QUOTE_REPLY = (
     "[Hotel], kamar [tipe kamar], [N] malam, [check-in] sampai [check-out]:\n"
     "Total *[total]* ([harga per malam] per malam).\n"
-    "[jarak] dari Masjidil Haram.\n"
+    "Hanya [jarak] dari Masjidil Haram.\n"
     "Mau saya teruskan ke rekan saya untuk konfirmasi pemesanan?"
 )
 
@@ -442,8 +446,10 @@ PROMPT_RULES: tuple[PromptRule, ...] = (
             "distance_to_haram_display is not null, add the distance: from "
             "the Haram when city is makkah (الحرم, Masjidil Haram), from the "
             "Prophet's Mosque when city is madinah (المسجد النبوي, Masjid "
-            "Nabawi); never add a walking time or any location detail the "
-            "result does not give. In an Arabic reply use the fields ending "
+            "Nabawi); in English start that line with Only and in "
+            "Indonesian with Hanya, never with the number; never add a "
+            "walking time or any location detail the result does not give. "
+            "In an Arabic reply use the fields ending "
             "in _ar. End with one question that moves toward booking — "
             "never a general question such as whether they need anything "
             "else. For an Arabic-speaking customer, in natural Saudi "
@@ -467,7 +473,9 @@ PROMPT_RULES: tuple[PromptRule, ...] = (
             "وإذا لم يكن distance_to_haram_display فارغاً، فأضف المسافة: عن "
             "الحرم إذا كانت city هي makkah (الحرم، Masjidil Haram)، وعن "
             "المسجد النبوي إذا كانت madinah (المسجد النبوي، Masjid Nabawi)؛ "
-            "ولا تضف أبداً مدة مشي أو أي تفصيل عن الموقع لا تعطيه النتيجة. "
+            "وابدأ ذلك السطر بالإنجليزية بكلمة Only وبالإندونيسية بكلمة "
+            "Hanya، لا بالرقم أبداً؛ ولا تضف أبداً مدة مشي أو أي تفصيل عن "
+            "الموقع لا تعطيه النتيجة. "
             "وفي الرد العربي استخدم الحقول المنتهية بـ_ar. واختم بسؤال واحد "
             "يقرّب العميل من الحجز — لا بسؤال عام مثل هل يحتاج شيئاً آخر. "
             "للعميل الذي يكتب بالعربية، باللهجة السعودية الطبيعية، على غرار "
@@ -479,7 +487,7 @@ PROMPT_RULES: tuple[PromptRule, ...] = (
             + _INDONESIAN_EXAMPLE_QUOTE_REPLY
             + '"'
         ),
-        english_digest="5bed37a4f9ace4f431955a8f3220cea39638ba06d77a9d357293467f5bc91e49",
+        english_digest="1a591dc7fe02a201817976b791fc3b3fc22ce0c51970e08fccec06b0a7d1be74",
     ),
     PromptRule(
         key="injection_resistance",

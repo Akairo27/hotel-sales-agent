@@ -147,7 +147,7 @@ def _write_the_english_quote_reply(turns: list[Turn]) -> ModelTurn:
             f"{quote['night_count']} nights, 5 to 7 October:\n"
             f"Total *{quote['total_price_display']}* "
             f"({quote['price_per_night_display']} per night).\n"
-            f"{quote['distance_to_haram_display']} from the Haram.\n"
+            f"Only {quote['distance_to_haram_display']} from the Haram.\n"
             "Shall I pass this to a colleague to confirm your booking?"
         ),
         tool_calls=(),

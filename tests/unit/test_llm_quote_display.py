@@ -77,24 +77,33 @@ def test_no_distance_rendering_is_ever_a_candidate_amount() -> None:
         for text in (english, arabic):
             assert extract_candidate_amounts(text) == (), text
         for text in (
-            f"Total *900.00 SAR* (450.00 SAR per night).\n{english} from the Haram.",
+            f"Total *900.00 SAR* (450.00 SAR per night).\n"
+            f"Only {english} from the Haram.",
             f"Total *900.00 SAR* (450.00 SAR per malam).\n"
-            f"{english} dari Masjidil Haram.",
+            f"Hanya {english} dari Masjidil Haram.",
             f"الإجمالي *900.00 ريال* (450.00 ريال لليلة).\nيبعد {arabic} عن الحرم.",
         ):
             amounts = [c.halalas for c in extract_candidate_amounts(text)]
             assert amounts == [90_000, 45_000], text
 
 
-def test_a_distance_line_straight_after_a_currency_word_would_be_misread() -> None:
-    """Why the templates keep the per-night text between the total and the
-    distance: the guard reads a digit run as money when only punctuation
-    or a line break separates it from a currency word. Pinned so a
-    template change that drops that text fails here, not in production."""
+def test_the_lead_in_word_keeps_a_distance_from_being_read_as_money() -> None:
+    """Why the English and Indonesian distance lines open with "Only" /
+    "Hanya" (owner decision 2026-09-30): the guard reads a digit run as
+    money when only punctuation or a line break separates it from a
+    currency word, so a bare "350 m" line straight after the total would
+    be read as 350.00 SAR. The word in between prevents that even if the
+    model drops the per-night text."""
     (_, misread) = extract_candidate_amounts(
         "Total *900.00 SAR*.\n350 m from the Haram."
     )
     assert misread.halalas == 35_000
+    for text in (
+        "Total *900.00 SAR*.\nOnly 350 m from the Haram.",
+        "Total *900.00 SAR*.\nHanya 350 m dari Masjidil Haram.",
+    ):
+        amounts = [c.halalas for c in extract_candidate_amounts(text)]
+        assert amounts == [90_000], text
 
 
 def test_night_price_fields_gives_one_price_when_every_night_is_the_same() -> None:

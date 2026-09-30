@@ -368,7 +368,7 @@ def _priced_quote(**overrides: Any) -> ToolCallRecord:
 _COMPLETE_ENGLISH_REPLY = (
     "Test Hotel, Standard room, 2 nights, 5 to 7 October:\n"
     "Total *900.00 SAR* (450.00 SAR per night).\n"
-    "350 m from the Haram.\n"
+    "Only 350 m from the Haram.\n"
     "Shall I pass this to a colleague to confirm your booking?"
 )
 _COMPLETE_ARABIC_REPLY = (
@@ -392,7 +392,7 @@ def test_a_complete_quote_reply_passes_in_english_and_arabic() -> None:
     "reply",
     [
         "The total is 900.00 SAR.",
-        _COMPLETE_ENGLISH_REPLY.replace("350 m from the Haram.\n", ""),
+        _COMPLETE_ENGLISH_REPLY.replace("Only 350 m from the Haram.\n", ""),
         _COMPLETE_ENGLISH_REPLY.replace(
             "Shall I pass this to a colleague to confirm your booking?",
             "Is there anything else I can help with?",
