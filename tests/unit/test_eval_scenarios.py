@@ -31,6 +31,7 @@ from tests.eval_scenarios import (
     ScenarioResult,
     asked_instead_of_guessing,
     booking_answer_handled,
+    buttons_attachable,
     hotel_confirmed_before_pricing,
     hotel_name_retried_and_confirmed,
     mentions_night_count,
@@ -79,9 +80,9 @@ def _result(**overrides: Any) -> ScenarioResult:
     return ScenarioResult(**fields)
 
 
-def test_there_are_twenty_two_scenarios_with_unique_keys_and_the_planned_mix() -> None:
-    assert len(SCENARIOS) == 22
-    assert len({s.key for s in SCENARIOS}) == 22
+def test_there_are_twenty_six_scenarios_with_unique_keys_and_the_planned_mix() -> None:
+    assert len(SCENARIOS) == 26
+    assert len({s.key for s in SCENARIOS}) == 26
     assert Counter(s.category for s in SCENARIOS) == {
         "relative-date": 3,
         "price": 4,
@@ -89,7 +90,7 @@ def test_there_are_twenty_two_scenarios_with_unique_keys_and_the_planned_mix() -
         "clarify": 1,
         "hotel-name": 3,
         "price-validity": 2,
-        "booking": 6,
+        "booking": 10,
     }
 
 
@@ -501,11 +502,12 @@ def _window_minutes() -> int:
 
 
 def test_the_seeded_quotes_sit_on_the_right_side_of_the_validity_window() -> None:
-    """The requote scenario's quote has expired; the clarifying and booking
-    scenarios' quotes are still valid -- or they would test nothing."""
+    """The requote and expired-tap scenarios' quotes have expired; the
+    clarifying and other booking scenarios' quotes are still valid -- or
+    they would test nothing."""
     for scenario in SCENARIOS:
         minutes = scenario.seeded_quote_minutes_ago
-        if scenario.key == "requote_after_expiry_ar":
+        if scenario.key in ("requote_after_expiry_ar", "button_yes_expired_ar"):
             assert minutes is not None and minutes > _window_minutes()
         elif scenario.category in ("booking", "price-validity"):
             assert minutes is not None and minutes < _window_minutes(), scenario.key
@@ -568,8 +570,72 @@ def test_scenarios_in_filters_by_category_in_list_order() -> None:
     assert [s.key for s in booking] == [
         s.key for s in SCENARIOS if s.category == "booking"
     ]
-    assert len(booking) == 6
+    assert len(booking) == 10
     assert scenarios_in([]) == SCENARIOS
+
+
+def test_the_button_scenarios_send_the_approved_titles() -> None:
+    """A tap reaches the model as the button's title, in the offer's
+    language (owner decisions 2026-10-01)."""
+    questions = {
+        s.key: s.customer_message for s in SCENARIOS if s.expects_question_prompt
+    }
+    assert questions == {
+        "button_question_ar": "عندي سؤال",
+        "button_question_en": "I have a question",
+        "button_question_id": "Ada pertanyaan",
+    }
+    expired = _scenario("button_yes_expired_ar")
+    assert expired.customer_message == "نعم، أكّد الحجز"
+    assert expired.requires_quote
+
+
+def test_a_question_tap_passes_only_with_a_question_and_no_booking_call() -> None:
+    scenario = _scenario("button_question_en")
+    question = "Of course, what would you like to know?"
+    assert booking_answer_handled(scenario, [], question)
+    assert not booking_answer_handled(scenario, [], "Sure.")
+    assert not booking_answer_handled(scenario, [_booking_call(False)], question)
+
+
+def test_a_priced_reply_ending_with_the_offer_can_carry_the_buttons() -> None:
+    scenario = _scenario("price_direct")
+    assert buttons_attachable(scenario, [7], _COMPLETE_ENGLISH_REPLY)
+    assert buttons_attachable(_scenario("price_direct_ar"), [7], _COMPLETE_ARABIC_REPLY)
+
+
+@pytest.mark.parametrize(
+    ("quote_ids", "reply"),
+    [
+        pytest.param([], _COMPLETE_ENGLISH_REPLY, id="nothing-priced"),
+        pytest.param([7, 8], _COMPLETE_ENGLISH_REPLY, id="two-stays-priced"),
+        pytest.param(
+            [7], _COMPLETE_ENGLISH_REPLY + "\nThank you!", id="offer-not-last"
+        ),
+        pytest.param(
+            [7], "x" * 1100 + "\n" + _COMPLETE_ENGLISH_REPLY, id="over-the-body-limit"
+        ),
+    ],
+)
+def test_a_priced_reply_that_cannot_carry_the_buttons_fails(
+    quote_ids: list[int], reply: str
+) -> None:
+    assert buttons_attachable(_scenario("price_direct"), quote_ids, reply) is False
+
+
+def test_buttons_are_not_applicable_without_a_required_quote() -> None:
+    assert buttons_attachable(_scenario("booking_yes_en"), [7], "Done.") is None
+
+
+def test_a_reply_that_cannot_carry_the_buttons_fails_the_turn() -> None:
+    assert _result(buttons_ok=False).passed is False
+    assert _result(buttons_ok=None).passed is True
+
+
+def test_the_results_table_has_the_buttons_column() -> None:
+    table = render_results_table([_result(booking_ok=None, buttons_ok=False)])
+    assert "| booking | buttons | guard |" in table
+    assert "| - | FAIL | ok |" in table
 
 
 def test_scenarios_in_refuses_an_unknown_category() -> None:

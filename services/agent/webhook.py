@@ -45,7 +45,9 @@ response can take without this split). Order matters and is deliberate:
    already closed by the time Starlette schedules the background job. A
    voice note, an image or other media never reaches the model: a
    background job sends a fixed notice and escalates
-   (_send_notice_without_a_model_turn). Steps 4-7 are the text path.
+   (_send_notice_without_a_model_turn). Steps 4-7 are the text path; a
+   tapped booking button takes it too, and a booking yes that code answers
+   (services/agent/booking_yes.py) skips the model call in step 4.
 
 4. Call generate_reply. Its tool-calling loop can raise any of several
    exceptions (see conversation.py's own docstring) after one or more

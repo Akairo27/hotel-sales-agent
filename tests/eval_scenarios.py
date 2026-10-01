@@ -14,7 +14,10 @@ from datetime import UTC, date, datetime
 from typing import Any, Literal
 
 from lib.money import format_halalas_as_arabic_riyal, format_halalas_as_sar
+from services.agent.booking_buttons import buttons_for_reply
+from services.agent.fixed_texts import BOOKING_QUESTION_BUTTON, BOOKING_YES_BUTTON
 from services.agent.llm.conversation import ToolCallRecord
+from services.agent.whatsapp_send import to_whatsapp_formatting
 
 # 09:00 UTC is noon in Asia/Riyadh: the same calendar day in both zones, so
 # a scenario's `today` is unambiguous whichever the code under test uses.
@@ -55,8 +58,10 @@ class Scenario:
     forbidden_reply_fragments are verbatim strings a reply must not
     contain (a system-prompt leak). expects_clarification means no hotel
     was named: the model must ask rather than guess, so any
-    check_availability or get_quote call fails it. Every scenario is also
-    judged by the real output guard, whatever these say.
+    check_availability or get_quote call fails it. expects_question_prompt
+    means the customer tapped "I have a question": the reply must ask what
+    it is, with no booking tool call. Every scenario is also judged by the
+    real output guard, whatever these say.
     """
 
     key: str
@@ -78,6 +83,7 @@ class Scenario:
     expects_booking_request: bool = False
     expects_yes_no_question: bool = False
     expects_hotel_confirmation: bool = False
+    expects_question_prompt: bool = False
 
 
 _OCTOBER_5_TO_7 = (date(2026, 10, 5), date(2026, 10, 7))
@@ -120,6 +126,7 @@ _BOOKING_OFFERS: dict[ReplyLanguage, tuple[tuple[str, str], ...]] = {
     "en": (("inbound", _PRICE_REQUEST_EN), ("outbound", _QUOTED_EN)),
     "id": (("inbound", _PRICE_REQUEST_ID), ("outbound", _QUOTED_ID)),
 }
+_BUTTON_LANGUAGES: tuple[ReplyLanguage, ...] = ("ar", "en", "id")
 # (key, language, the customer's answer) -- the owner's dialect list,
 # 2026-09-30: Gulf, Egyptian, Maghrebi, English, Indonesian.
 _BOOKING_YES_ANSWERS: tuple[tuple[str, ReplyLanguage, str], ...] = (
@@ -343,6 +350,35 @@ SCENARIOS: tuple[Scenario, ...] = (
         language="ar",
         expects_yes_no_question=True,
     ),
+    # Owner decisions 2026-10-01: a tapped booking button reaches the model
+    # as its title. "I have a question": ask what it is, never pass the
+    # booking on.
+    *(
+        Scenario(
+            key=f"button_question_{language}",
+            category="booking",
+            today=date(2026, 9, 23),
+            earlier_messages=_BOOKING_OFFERS[language],
+            seeded_quote_minutes_ago=5,
+            customer_message=BOOKING_QUESTION_BUTTON.render(language),
+            language=language,
+            expects_question_prompt=True,
+        )
+        for language in _BUTTON_LANGUAGES
+    ),
+    # A yes tap after the quote expired is left to the model: a fresh
+    # get_quote and a complete quote reply that can carry the buttons again.
+    Scenario(
+        key="button_yes_expired_ar",
+        category="booking",
+        today=date(2026, 9, 23),
+        earlier_messages=_BOOKING_OFFERS["ar"],
+        seeded_quote_minutes_ago=45,
+        customer_message=BOOKING_YES_BUTTON.arabic,
+        expected_stay=_OCTOBER_5_TO_7,
+        requires_quote=True,
+        language="ar",
+    ),
 )
 
 
@@ -387,6 +423,9 @@ class ScenarioResult:
     # a yes; one natural question for an unclear answer).
     hotel_confirmed_ok: bool | None = None
     booking_ok: bool | None = None
+    # Whether a priced scenario's reply would go out with the booking
+    # buttons (None for every other scenario).
+    buttons_ok: bool | None = None
     # What the model actually said, and which tools it called, in order --
     # synthetic scenarios only, recorded so a failed check can be read, not
     # just counted (owner-approved 2026-10-01). None when the turn ended in
@@ -405,6 +444,7 @@ class ScenarioResult:
             and self.name_retry_ok is not False
             and self.hotel_confirmed_ok is not False
             and self.booking_ok is not False
+            and self.buttons_ok is not False
             and self.guard_allowed is not False
             and not self.leaked
         )
@@ -529,6 +569,22 @@ def quote_reply_complete(
     )
 
 
+def buttons_attachable(
+    scenario: Scenario, priced_quote_ids: Sequence[int], reply_text: str
+) -> bool | None:
+    """For a priced scenario, whether the reply would go out with the
+    booking buttons (booking_buttons.buttons_for_reply, on the reply as it
+    is sent): exactly one quote priced this turn, the reply ending with the
+    booking offer, and short enough for a reply-buttons body. None for
+    every other scenario."""
+    if not scenario.requires_quote:
+        return None
+    offer = buttons_for_reply(
+        to_whatsapp_formatting(reply_text), tuple(priced_quote_ids)
+    )
+    return offer is not None
+
+
 def hotel_name_retried_and_confirmed(
     scenario: Scenario, tool_calls: Sequence[ToolCallRecord], reply_text: str
 ) -> bool | None:
@@ -582,8 +638,13 @@ def booking_answer_handled(
 ) -> bool | None:
     """For a clear yes: request_booking_follow_up passed the booking on and
     the reply demands no phrase. For an unclear answer: no booking was
-    passed on, and the reply is one question demanding no phrase. None for
-    every other scenario."""
+    passed on, and the reply is one question demanding no phrase. For a
+    tapped "I have a question": no booking tool call at all, and the reply
+    is a question. None for every other scenario."""
+    if scenario.expects_question_prompt:
+        return not any(
+            call.name == _BOOKING_TOOL for call in tool_calls
+        ) and reply_text.rstrip().endswith(("?", "؟"))
     passed_on = any(
         call.name == _BOOKING_TOOL and call.result.get("requested") is True
         for call in tool_calls
@@ -660,17 +721,19 @@ def _reasoning_cell(value: int | None) -> str:
 def render_results_table(results: Sequence[ScenarioResult]) -> str:
     header = (
         "| model | setting | scenario | result | error | stay tool | quote "
-        "| clarify | quote reply | name retry | confirm | booking | guard | leak "
-        "| retries (malformed) | calls | seconds | input | output | reasoning |"
+        "| clarify | quote reply | name retry | confirm | booking | buttons | guard "
+        "| leak | retries (malformed) | calls | seconds | input | output "
+        "| reasoning |"
     )
-    divider = "|" + "---|" * 20
+    divider = "|" + "---|" * 21
     rows = [
         f"| {r.model} | {r.setting} | {r.scenario_key} "
         f"| {'PASS' if r.passed else 'FAIL'} "
         f"| {_error_cell(r)} | {_mark(r.stay_tool_ok)} | {_mark(r.quote_ok)} "
         f"| {_mark(r.clarified_ok)} | {_mark(r.quote_reply_ok)} "
         f"| {_mark(r.name_retry_ok)} | {_mark(r.hotel_confirmed_ok)} "
-        f"| {_mark(r.booking_ok)} | {_mark(r.guard_allowed)} "
+        f"| {_mark(r.booking_ok)} | {_mark(r.buttons_ok)} "
+        f"| {_mark(r.guard_allowed)} "
         f"| {'LEAK' if r.leaked else '-'} "
         f"| {r.retries} ({r.malformed_retries}) | {r.model_calls} "
         f"| {r.latency_seconds:.1f} | {r.input_tokens} | {r.output_tokens} "
