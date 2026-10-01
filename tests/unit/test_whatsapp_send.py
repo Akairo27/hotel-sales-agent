@@ -16,11 +16,17 @@ import httpx
 import pytest
 
 from services.agent.whatsapp_send import (
+    REPLY_BUTTON_ID_MAX_CHARS,
+    REPLY_BUTTON_TITLE_MAX_CHARS,
+    REPLY_BUTTONS_BODY_MAX_CHARS,
+    InvalidReplyButtonsError,
+    ReplyButton,
     WhatsAppCloudApiSender,
     WhatsAppSendConfigurationError,
     WhatsAppSendError,
     WhatsAppSendSettings,
     _graph_api_error_detail,
+    check_reply_buttons,
     load_whatsapp_send_settings,
     to_whatsapp_formatting,
 )
@@ -283,3 +289,150 @@ def test_to_whatsapp_formatting_leaves_plain_text_unchanged() -> None:
 
 def test_to_whatsapp_formatting_leaves_an_empty_string_unchanged() -> None:
     assert to_whatsapp_formatting("") == ""
+
+
+_BUTTONS = (
+    ReplyButton(button_id="booking:yes:7", title="Yes, confirm"),
+    ReplyButton(button_id="booking:question:7", title="I have a question"),
+)
+
+
+def _record_post(monkeypatch: pytest.MonkeyPatch, posted: list[dict[str, Any]]) -> None:
+    async def _post(
+        _self: httpx.AsyncClient, _url: str, **kwargs: Any
+    ) -> httpx.Response:
+        posted.append(kwargs["json"])
+        return httpx.Response(
+            200, request=_REQUEST, json={"messages": [{"id": "wamid.BUTTONS1"}]}
+        )
+
+    monkeypatch.setattr(httpx.AsyncClient, "post", _post)
+
+
+def test_send_reply_buttons_posts_meta_s_interactive_shape(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Meta's "Interactive reply buttons messages" reference: no header or
+    footer, the body, one "reply" entry per button."""
+    posted: list[dict[str, Any]] = []
+    _record_post(monkeypatch, posted)
+    sender = WhatsAppCloudApiSender(_SETTINGS)
+
+    message_id = asyncio.run(
+        sender.send_reply_buttons(
+            to_phone="966500000001", body="Shall I book?", buttons=_BUTTONS
+        )
+    )
+
+    assert message_id == "wamid.BUTTONS1"
+    assert posted == [
+        {
+            "messaging_product": "whatsapp",
+            "recipient_type": "individual",
+            "to": "966500000001",
+            "type": "interactive",
+            "interactive": {
+                "type": "button",
+                "body": {"text": "Shall I book?"},
+                "action": {
+                    "buttons": [
+                        {
+                            "type": "reply",
+                            "reply": {"id": "booking:yes:7", "title": "Yes, confirm"},
+                        },
+                        {
+                            "type": "reply",
+                            "reply": {
+                                "id": "booking:question:7",
+                                "title": "I have a question",
+                            },
+                        },
+                    ]
+                },
+            },
+        }
+    ]
+
+
+def test_send_reply_buttons_wraps_an_error_status_as_whatsapp_send_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    response = httpx.Response(
+        400, request=_REQUEST, json={"error": {"message": "bad interactive"}}
+    )
+    _patch_post(monkeypatch, response)
+    sender = WhatsAppCloudApiSender(_SETTINGS)
+
+    with pytest.raises(WhatsAppSendError):
+        asyncio.run(
+            sender.send_reply_buttons(
+                to_phone="966500000001", body="Shall I book?", buttons=_BUTTONS
+            )
+        )
+
+
+def test_send_reply_buttons_sends_nothing_when_the_buttons_break_a_limit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    posted: list[dict[str, Any]] = []
+    _record_post(monkeypatch, posted)
+    sender = WhatsAppCloudApiSender(_SETTINGS)
+    too_long_body = "x" * (REPLY_BUTTONS_BODY_MAX_CHARS + 1)
+
+    with pytest.raises(InvalidReplyButtonsError):
+        asyncio.run(
+            sender.send_reply_buttons(
+                to_phone="966500000001", body=too_long_body, buttons=_BUTTONS
+            )
+        )
+
+    assert posted == []
+
+
+def test_an_invalid_reply_buttons_message_is_a_whatsapp_send_error() -> None:
+    """The webhook treats it like any failed send."""
+    assert issubclass(InvalidReplyButtonsError, WhatsAppSendError)
+
+
+def test_check_reply_buttons_accepts_every_limit_exactly() -> None:
+    buttons = tuple(
+        ReplyButton(
+            button_id=str(index) * REPLY_BUTTON_ID_MAX_CHARS,
+            title=str(index) * REPLY_BUTTON_TITLE_MAX_CHARS,
+        )
+        for index in range(3)
+    )
+
+    check_reply_buttons("x" * REPLY_BUTTONS_BODY_MAX_CHARS, buttons)
+
+
+@pytest.mark.parametrize(
+    ("body", "buttons"),
+    [
+        pytest.param("ok?", (), id="no-buttons"),
+        pytest.param("ok?", _BUTTONS * 2, id="four-buttons"),
+        pytest.param("   ", _BUTTONS, id="blank-body"),
+        pytest.param("x" * (REPLY_BUTTONS_BODY_MAX_CHARS + 1), _BUTTONS, id="body"),
+        pytest.param(
+            "ok?",
+            (
+                ReplyButton(
+                    button_id="a", title="t" * (REPLY_BUTTON_TITLE_MAX_CHARS + 1)
+                ),
+            ),
+            id="title-too-long",
+        ),
+        pytest.param("ok?", (ReplyButton(button_id="a", title=""),), id="no-title"),
+        pytest.param(
+            "ok?",
+            (ReplyButton(button_id="a" * (REPLY_BUTTON_ID_MAX_CHARS + 1), title="t"),),
+            id="id-too-long",
+        ),
+        pytest.param("ok?", (ReplyButton(button_id="", title="t"),), id="no-id"),
+    ],
+)
+def test_check_reply_buttons_refuses_what_meta_refuses(
+    body: str, buttons: tuple[ReplyButton, ...]
+) -> None:
+    with pytest.raises(InvalidReplyButtonsError):
+        check_reply_buttons(body, buttons)

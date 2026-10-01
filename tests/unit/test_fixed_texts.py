@@ -14,18 +14,29 @@ from __future__ import annotations
 import pytest
 
 from services.agent.fixed_texts import (
+    BOOKING_QUESTION_BUTTON,
+    BOOKING_YES_BUTTON,
     FALLBACK,
+    NEWER_PRICE,
     PLEASE_TYPE,
     FixedText,
     Language,
     detect_language,
     media_placeholder,
 )
+from services.agent.whatsapp_send import REPLY_BUTTON_TITLE_MAX_CHARS
 
 _LANGUAGES: tuple[Language | None, ...] = ("ar", "en", "id", None)
+_FIXED_TEXTS = (
+    ("fallback", FALLBACK),
+    ("please_type", PLEASE_TYPE),
+    ("booking_yes_button", BOOKING_YES_BUTTON),
+    ("booking_question_button", BOOKING_QUESTION_BUTTON),
+    ("newer_price", NEWER_PRICE),
+)
 _RENDERINGS = [
     pytest.param(text.render(language), id=f"{name}-{language or 'bilingual'}")
-    for name, text in (("fallback", FALLBACK), ("please_type", PLEASE_TYPE))
+    for name, text in _FIXED_TEXTS
     for language in _LANGUAGES
 ]
 # U+0660-U+0669, the Arabic-Indic digits: checked on their own because an
@@ -60,6 +71,37 @@ def test_the_owner_approved_wording_is_pinned() -> None:
     )
 
 
+def test_the_booking_button_and_newer_price_wording_is_pinned() -> None:
+    """Owner-approved 2026-10-01."""
+    assert (
+        BOOKING_YES_BUTTON.arabic,
+        BOOKING_YES_BUTTON.english,
+        BOOKING_YES_BUTTON.indonesian,
+    ) == ("نعم، أكّد الحجز", "Yes, confirm", "Ya, konfirmasi")
+    assert (
+        BOOKING_QUESTION_BUTTON.arabic,
+        BOOKING_QUESTION_BUTTON.english,
+        BOOKING_QUESTION_BUTTON.indonesian,
+    ) == ("عندي سؤال", "I have a question", "Ada pertanyaan")
+    assert NEWER_PRICE.arabic == (
+        "في سعر أحدث من هذا بالأعلى. تحب أبلّغ زميلي يؤكّد لك الحجز على السعر الأحدث؟"
+    )
+    assert NEWER_PRICE.english == (
+        "There's a newer price above this one. Shall I pass the newer one to "
+        "a colleague to confirm your booking?"
+    )
+    assert NEWER_PRICE.indonesian == (
+        "Ada harga yang lebih baru di atas. Mau saya teruskan yang terbaru ke "
+        "rekan saya untuk konfirmasi pemesanan?"
+    )
+
+
+@pytest.mark.parametrize("language", ["ar", "en", "id"])
+@pytest.mark.parametrize("text", [BOOKING_YES_BUTTON, BOOKING_QUESTION_BUTTON])
+def test_every_button_title_fits_whatsapp(text: FixedText, language: Language) -> None:
+    assert 1 <= len(text.render(language)) <= REPLY_BUTTON_TITLE_MAX_CHARS
+
+
 @pytest.mark.parametrize("rendering", _RENDERINGS)
 def test_no_rendering_has_an_ascii_digit(rendering: str) -> None:
     assert not any(ch.isascii() and ch.isdigit() for ch in rendering)
@@ -77,7 +119,7 @@ def test_no_rendering_has_a_digit_in_any_script(rendering: str) -> None:
     assert not any(ch.isdigit() for ch in rendering)
 
 
-@pytest.mark.parametrize("text", [FALLBACK, PLEASE_TYPE])
+@pytest.mark.parametrize("text", [text for _, text in _FIXED_TEXTS])
 def test_each_known_language_gets_that_language_alone(text: FixedText) -> None:
     assert text.render("ar") == text.arabic
     assert text.render("en") == text.english

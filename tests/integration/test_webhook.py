@@ -67,6 +67,7 @@ from services.agent.output_guard.enforcement import (
 )
 from services.agent.whatsapp_send import (
     WHATSAPP_TEXT_BODY_MAX_CHARS,
+    ReplyButton,
     WhatsAppSendConfigurationError,
     WhatsAppSender,
     WhatsAppSendError,
@@ -442,9 +443,18 @@ class _FakeWhatsAppSender:
 
     message_id: str = "wamid.OUTBOUND-DEFAULT"
     calls: list[tuple[str, str]] = field(default_factory=list)
+    button_calls: list[tuple[str, str, tuple[ReplyButton, ...]]] = field(
+        default_factory=list
+    )
 
     async def send_text(self, *, to_phone: str, body: str) -> str:
         self.calls.append((to_phone, body))
+        return self.message_id
+
+    async def send_reply_buttons(
+        self, *, to_phone: str, body: str, buttons: tuple[ReplyButton, ...]
+    ) -> str:
+        self.button_calls.append((to_phone, body, buttons))
         return self.message_id
 
 
@@ -461,6 +471,12 @@ class _FailingWhatsAppSender:
 
     async def send_text(self, *, to_phone: str, body: str) -> str:
         del to_phone, body
+        raise self.exc
+
+    async def send_reply_buttons(
+        self, *, to_phone: str, body: str, buttons: tuple[ReplyButton, ...]
+    ) -> str:
+        del to_phone, body, buttons
         raise self.exc
 
 
@@ -480,6 +496,12 @@ class _FlakyWhatsAppSender:
         if len(self.calls) <= self.failures:
             raise WhatsAppSendError("simulated API error")
         return f"wamid.OUTBOUND-FLAKY-{len(self.calls)}"
+
+    async def send_reply_buttons(
+        self, *, to_phone: str, body: str, buttons: tuple[ReplyButton, ...]
+    ) -> str:
+        del buttons
+        return await self.send_text(to_phone=to_phone, body=body)
 
 
 def _escalations(db_conn: psycopg.Connection[Any]) -> list[tuple[str, dict[str, Any]]]:

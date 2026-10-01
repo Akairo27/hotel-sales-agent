@@ -428,18 +428,29 @@ def seed_message(
     body: str,
     customer_phone: str = "+966500000001",
     created_at: datetime | None = None,
+    whatsapp_message_id: str | None = None,
 ) -> int:
     """Inserts one messages row. created_at defaults to now() — callers
     that need a specific ordering insert in the order they want created_at
     to sort in and rely on the column's monotonically increasing default,
     same as every other append-only timestamp in this schema. Pass one to
     place the message at an exact time (session-boundary tests).
+    whatsapp_message_id is NULL unless given (a booking button's
+    context.id names one).
     """
     return returning_id(
         conn,
         "INSERT INTO messages (conversation_id, customer_phone, direction, body, "
-        "created_at) VALUES (%s, %s, %s, %s, COALESCE(%s, now())) RETURNING id",
-        (conversation_id, customer_phone, direction, body, created_at),
+        "created_at, whatsapp_message_id) "
+        "VALUES (%s, %s, %s, %s, COALESCE(%s, now()), %s) RETURNING id",
+        (
+            conversation_id,
+            customer_phone,
+            direction,
+            body,
+            created_at,
+            whatsapp_message_id,
+        ),
     )
 
 

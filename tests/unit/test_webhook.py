@@ -12,6 +12,8 @@ import asyncio
 import contextlib
 import hashlib
 import hmac
+import json
+import logging
 from collections.abc import Iterator
 from dataclasses import dataclass, field
 from decimal import Decimal
@@ -21,6 +23,7 @@ import psycopg
 import pytest
 
 from services.agent import webhook as webhook_module
+from services.agent.booking_buttons import ButtonTap, booking_offer_buttons
 from services.agent.fixed_texts import FALLBACK
 from services.agent.llm.client import GeminiTransport, OpenRouterTransport
 from services.agent.llm.config import LlmSettings, OpenRouterRoute, load_llm_settings
@@ -40,6 +43,7 @@ from services.agent.webhook import (
     get_webhook_settings,
     load_webhook_settings,
 )
+from services.agent.whatsapp_send import ReplyButton, WhatsAppSendError
 
 _SECRET = "shared-secret"
 
@@ -260,6 +264,167 @@ def test_parse_inbound_messages_returns_nothing_for_a_malformed_payload() -> Non
     assert _parse_inbound_messages({"entry": []}) == []
     assert _parse_inbound_messages({}) == []
     assert _parse_inbound_messages({"entry": "not-a-list"}) == []
+
+
+def _interactive_message(
+    interactive: dict[str, object], *, context: dict[str, object] | None = None
+) -> dict[str, object]:
+    message: dict[str, object] = {
+        "from": "966500000001",
+        "id": "wamid.tap",
+        "type": "interactive",
+        "interactive": interactive,
+    }
+    if context is not None:
+        message["context"] = context
+    return message
+
+
+def test_a_tapped_reply_button_becomes_a_button_reply_titled_body() -> None:
+    """Meta's shape for a reply-button tap: interactive.button_reply's id
+    and title, and context.id -- the message that carried the button."""
+    payload = _payload(
+        messages=[
+            _interactive_message(
+                {
+                    "type": "button_reply",
+                    "button_reply": {"id": "booking:yes:7", "title": "Yes, confirm"},
+                },
+                context={"from": "15550000000", "id": "wamid.OFFER"},
+            )
+        ]
+    )
+
+    (inbound,) = _parse_inbound_messages(payload)
+
+    assert inbound.message_type == "button_reply"
+    assert inbound.body == "Yes, confirm"
+    assert inbound.button == ButtonTap(
+        button_id="booking:yes:7",
+        title="Yes, confirm",
+        context_message_id="wamid.OFFER",
+    )
+
+
+def test_a_button_reply_without_context_keeps_the_tap_with_no_context() -> None:
+    payload = _payload(
+        messages=[
+            _interactive_message(
+                {
+                    "type": "button_reply",
+                    "button_reply": {"id": "booking:yes:7", "title": "Yes, confirm"},
+                }
+            )
+        ]
+    )
+
+    (inbound,) = _parse_inbound_messages(payload)
+
+    assert inbound.button is not None
+    assert inbound.button.context_message_id is None
+
+
+@pytest.mark.parametrize(
+    "interactive",
+    [
+        pytest.param(
+            {"type": "list_reply", "list_reply": {"id": "x", "title": "Row"}},
+            id="list-reply",
+        ),
+        pytest.param(
+            {"type": "button_reply", "button_reply": {"title": "Yes, confirm"}},
+            id="no-id",
+        ),
+        pytest.param(
+            {"type": "button_reply", "button_reply": {"id": "x", "title": "  "}},
+            id="blank-title",
+        ),
+        pytest.param({"type": "button_reply"}, id="no-button-reply"),
+    ],
+)
+def test_any_other_interactive_message_stays_interactive(
+    interactive: dict[str, object],
+) -> None:
+    """It keeps the fallback and an escalation, never silence."""
+    (inbound,) = _parse_inbound_messages(
+        _payload(messages=[_interactive_message(interactive)])
+    )
+
+    assert (inbound.message_type, inbound.body, inbound.button) == (
+        "interactive",
+        "[interactive message]",
+        None,
+    )
+
+
+@dataclass
+class _ButtonSender:
+    """Records every send; the button send fails when told to."""
+
+    buttons_fail: bool
+    sends: list[tuple[str, str]] = field(default_factory=list)
+
+    async def send_text(self, *, to_phone: str, body: str) -> str:
+        del to_phone
+        self.sends.append(("text", body))
+        return "wamid.TEXT"
+
+    async def send_reply_buttons(
+        self, *, to_phone: str, body: str, buttons: tuple[ReplyButton, ...]
+    ) -> str:
+        del to_phone, buttons
+        self.sends.append(("buttons", body))
+        if self.buttons_fail:
+            raise WhatsAppSendError("simulated interactive refusal")
+        return "wamid.BUTTONS"
+
+
+def _send_offer(sender: _ButtonSender) -> str:
+    return asyncio.run(
+        webhook_module._send_text_or_offer(
+            sender,
+            conversation_id=1,
+            to_phone="966500000001",
+            text="Shall I pass this to a colleague to confirm your booking?",
+            offer=booking_offer_buttons(7, "en"),
+        )
+    )
+
+
+def test_an_offer_goes_out_with_its_buttons() -> None:
+    sender = _ButtonSender(buttons_fail=False)
+
+    assert _send_offer(sender) == "wamid.BUTTONS"
+    assert [kind for kind, _ in sender.sends] == ["buttons"]
+
+
+def test_a_refused_button_send_is_sent_again_as_plain_text_with_the_same_body(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Owner decision 2026-10-01: the offer question is in the body, so a
+    typed yes still works without the buttons."""
+    sender = _ButtonSender(buttons_fail=True)
+    caplog.set_level(logging.ERROR, logger="services.agent.webhook")
+
+    assert _send_offer(sender) == "wamid.TEXT"
+    assert [kind for kind, _ in sender.sends] == ["buttons", "text"]
+    assert sender.sends[0][1] == sender.sends[1][1]
+    (failure,) = [json.loads(record.getMessage()) for record in caplog.records]
+    assert failure["event"] == "booking_offer_buttons_failed"
+    assert failure["quote_id"] == 7
+
+
+def test_text_without_an_offer_is_sent_as_plain_text() -> None:
+    sender = _ButtonSender(buttons_fail=False)
+
+    message_id = asyncio.run(
+        webhook_module._send_text_or_offer(
+            sender, conversation_id=1, to_phone="966500000001", text="hi", offer=None
+        )
+    )
+
+    assert message_id == "wamid.TEXT"
+    assert sender.sends == [("text", "hi")]
 
 
 def test_load_webhook_settings_with_a_valid_env(

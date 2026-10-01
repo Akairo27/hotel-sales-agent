@@ -232,11 +232,13 @@ _TASHKEEL = (
 )  # deleted, not mapped
 
 _ALEF_VARIANTS = _ALEF_HAMZA_ABOVE + _ALEF_HAMZA_BELOW + _ALEF_MADDA_ABOVE + _ALEF_WASLA
-_NORMALIZE_FROM = _ALEF_VARIANTS + _TAA_MARBUTA + _ALEF_MAKSURA + _TASHKEEL
-# Shorter than _NORMALIZE_FROM on purpose: translate() deletes any
+ARABIC_NORMALIZE_FROM = _ALEF_VARIANTS + _TAA_MARBUTA + _ALEF_MAKSURA + _TASHKEEL
+# Shorter than ARABIC_NORMALIZE_FROM on purpose: translate() deletes any
 # trailing `from` characters with no corresponding `to` character, which
-# is exactly what _TASHKEEL above needs (removed, not replaced).
-_NORMALIZE_TO = (_BARE_ALEF * len(_ALEF_VARIANTS)) + _HAA + _YAA
+# is exactly what _TASHKEEL above needs (removed, not replaced). Public
+# because services/agent/booking_buttons.py applies the same mapping in
+# Python to a customer's typed yes.
+ARABIC_NORMALIZE_TO = (_BARE_ALEF * len(_ALEF_VARIANTS)) + _HAA + _YAA
 
 
 # The exact key set quote_to_tool_result may ever produce — the
@@ -532,8 +534,8 @@ def dispatch_search_hotels(
             "zone": search.zone,
             "min_star_rating": search.min_star_rating,
             "max_star_rating": search.max_star_rating,
-            "norm_from": _NORMALIZE_FROM,
-            "norm_to": _NORMALIZE_TO,
+            "norm_from": ARABIC_NORMALIZE_FROM,
+            "norm_to": ARABIC_NORMALIZE_TO,
         },
     ).fetchall()
 

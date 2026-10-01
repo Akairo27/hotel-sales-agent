@@ -2,8 +2,9 @@
 called — mirrors services/agent/llm/client.py's pattern (CLAUDE.md §9: a
 single interface module, no direct SDK/API calls scattered across the
 code) for the same reason: services/agent/webhook.py needs to send a
-text message without knowing anything about the Graph API's request
-shape, and tests need a fake transport with no network access.
+text message, or a message with reply buttons, without knowing anything
+about the Graph API's request shape, and tests need a fake transport with
+no network access.
 
 See WHATSAPP_GRAPH_API_VERSION's own comment below for why its pin is
 not verified the way client.py's Gemini model pin is.
@@ -41,6 +42,15 @@ _DEFAULT_TIMEOUT_MS = 10_000
 # failed send.
 WHATSAPP_TEXT_BODY_MAX_CHARS = 4096
 
+# Limits of an interactive reply-buttons message, from Meta's "Interactive
+# reply buttons messages" reference (checked 2026-10-01): at most 3
+# buttons, body text 1024 characters, button title 20, button id 256.
+# Counted with len(), as above.
+MAX_REPLY_BUTTONS = 3
+REPLY_BUTTONS_BODY_MAX_CHARS = 1024
+REPLY_BUTTON_TITLE_MAX_CHARS = 20
+REPLY_BUTTON_ID_MAX_CHARS = 256
+
 
 class WhatsAppSendConfigurationError(Exception):
     """Raised when WHATSAPP_PHONE_NUMBER_ID or WHATSAPP_ACCESS_TOKEN is
@@ -60,6 +70,37 @@ class WhatsAppSendError(Exception):
     call is not the same question as whether Meta retries the webhook
     delivery that triggered it).
     """
+
+
+class InvalidReplyButtonsError(WhatsAppSendError):
+    """Raised before any request when a reply-buttons message breaks one of
+    Meta's limits (the constants above). The caller treats it like any
+    failed send."""
+
+
+@dataclass(frozen=True)
+class ReplyButton:
+    """One reply button: the id WhatsApp echoes back when it is tapped,
+    and the title the customer sees."""
+
+    button_id: str
+    title: str
+
+
+def check_reply_buttons(body: str, buttons: tuple[ReplyButton, ...]) -> None:
+    """Raises InvalidReplyButtonsError unless body and buttons fit Meta's
+    limits for a reply-buttons message."""
+    if not 1 <= len(buttons) <= MAX_REPLY_BUTTONS:
+        raise InvalidReplyButtonsError(f"{len(buttons)} buttons, not 1 to 3")
+    if not body.strip() or len(body) > REPLY_BUTTONS_BODY_MAX_CHARS:
+        raise InvalidReplyButtonsError(f"body of {len(body)} characters")
+    for button in buttons:
+        if not 1 <= len(button.title) <= REPLY_BUTTON_TITLE_MAX_CHARS:
+            raise InvalidReplyButtonsError(f"title of {len(button.title)} characters")
+        if not 1 <= len(button.button_id) <= REPLY_BUTTON_ID_MAX_CHARS:
+            raise InvalidReplyButtonsError(
+                f"button id of {len(button.button_id)} characters"
+            )
 
 
 @dataclass(frozen=True)
@@ -146,6 +187,11 @@ class WhatsAppSender(Protocol):
     ) -> str:  # returns the WhatsApp message id
         ...
 
+    async def send_reply_buttons(
+        self, *, to_phone: str, body: str, buttons: tuple[ReplyButton, ...]
+    ) -> str:  # returns the WhatsApp message id
+        ...
+
 
 class WhatsAppCloudApiSender:
     """The real transport, over the WhatsApp Cloud API's messages
@@ -173,12 +219,60 @@ class WhatsAppCloudApiSender:
             WhatsAppSendError: the request timed out, failed at the
                 transport level, or the API reported a non-2xx response.
         """
-        payload: dict[str, Any] = {
-            "messaging_product": "whatsapp",
-            "to": to_phone,
-            "type": "text",
-            "text": {"body": body},
-        }
+        return await self._post(
+            {
+                "messaging_product": "whatsapp",
+                "to": to_phone,
+                "type": "text",
+                "text": {"body": body},
+            }
+        )
+
+    async def send_reply_buttons(
+        self, *, to_phone: str, body: str, buttons: tuple[ReplyButton, ...]
+    ) -> str:
+        """Sends one interactive message with reply buttons, in the shape
+        of Meta's "Interactive reply buttons messages" reference: no
+        header or footer, the body text, and one "reply" button per entry.
+        Returns the WhatsApp-assigned message id, as send_text does.
+
+        Raises:
+            InvalidReplyButtonsError: body or buttons break Meta's limits;
+                nothing was sent.
+            WhatsAppSendError: as for send_text.
+        """
+        check_reply_buttons(body, buttons)
+        return await self._post(
+            {
+                "messaging_product": "whatsapp",
+                "recipient_type": "individual",
+                "to": to_phone,
+                "type": "interactive",
+                "interactive": {
+                    "type": "button",
+                    "body": {"text": body},
+                    "action": {
+                        "buttons": [
+                            {
+                                "type": "reply",
+                                "reply": {
+                                    "id": button.button_id,
+                                    "title": button.title,
+                                },
+                            }
+                            for button in buttons
+                        ]
+                    },
+                },
+            }
+        )
+
+    async def _post(self, payload: dict[str, Any]) -> str:
+        """POSTs one message payload; returns its WhatsApp message id.
+
+        Raises:
+            WhatsAppSendError: see send_text.
+        """
         headers = {"Authorization": f"Bearer {self._settings.access_token}"}
         try:
             async with httpx.AsyncClient(

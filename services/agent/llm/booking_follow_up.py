@@ -17,6 +17,11 @@ nothing is written and the model is told to give a fresh price first.
 The result summarises the quote that was passed on (hotel, room type,
 dates, rooms, total) so the reply restates exactly what staff received.
 
+pass_quote_on and load_quote_summary are shared with the code path that
+answers a booking button or a bare typed yes without the model
+(services/agent/booking_buttons.py): one insert, one summary, one
+guarantee of a single escalation per quote.
+
 At most one escalation per quote: migration 0032's partial unique index
 refuses a second booking_requested row for the same quote, and the insert
 uses ON CONFLICT DO NOTHING, so a customer who says yes twice -- even in
@@ -64,6 +69,15 @@ BOOKING_FOLLOW_UP_RESULT_KEYS = frozenset(
 )
 BOOKING_FOLLOW_UP_LOG_SUMMARY_KEYS = frozenset({"quote_id", "already_requested"})
 
+_QUOTE_SUMMARY_BY_ID_SQL = """
+    SELECT q.id, h.hotel_name, rt.room_type_name, q.check_in, q.check_out,
+           q.rooms, q.ask_price_total
+    FROM quotes AS q
+    JOIN hotels AS h ON h.id = q.hotel_id
+    JOIN room_types AS rt ON rt.id = q.room_type_id
+    WHERE q.id = %(quote_id)s AND q.conversation_id = %(conversation_id)s
+"""
+
 _ANSWERED_QUOTE_SQL = """
     SELECT q.id, h.hotel_name, rt.room_type_name, q.check_in, q.check_out,
            q.rooms, q.ask_price_total
@@ -96,7 +110,9 @@ _INSERT_BOOKING_REQUEST_SQL = """
 
 
 @dataclass(frozen=True)
-class _AnsweredQuote:
+class QuoteSummary:
+    """What is passed on to staff and restated to the customer."""
+
     quote_id: int
     hotel_name: str
     room_type_name: str
@@ -106,20 +122,10 @@ class _AnsweredQuote:
     total_halalas: int
 
 
-def _load_answered_quote(
-    conn: psycopg.Connection[Any], *, conversation_id: int, quote_validity: timedelta
-) -> _AnsweredQuote | None:
-    row = conn.execute(
-        _ANSWERED_QUOTE_SQL,
-        {
-            "conversation_id": conversation_id,
-            "session_start": load_session_start(conn, conversation_id),
-            "validity": quote_validity,
-        },
-    ).fetchone()
+def _summary_from_row(row: tuple[Any, ...] | None) -> QuoteSummary | None:
     if row is None:
         return None
-    return _AnsweredQuote(
+    return QuoteSummary(
         quote_id=int(row[0]),
         hotel_name=row[1],
         room_type_name=row[2],
@@ -127,6 +133,34 @@ def _load_answered_quote(
         check_out=row[4],
         rooms=int(row[5]),
         total_halalas=int(row[6]),
+    )
+
+
+def _load_answered_quote(
+    conn: psycopg.Connection[Any], *, conversation_id: int, quote_validity: timedelta
+) -> QuoteSummary | None:
+    return _summary_from_row(
+        conn.execute(
+            _ANSWERED_QUOTE_SQL,
+            {
+                "conversation_id": conversation_id,
+                "session_start": load_session_start(conn, conversation_id),
+                "validity": quote_validity,
+            },
+        ).fetchone()
+    )
+
+
+def load_quote_summary(
+    conn: psycopg.Connection[Any], *, conversation_id: int, quote_id: int
+) -> QuoteSummary | None:
+    """quote_id's summary, or None when it is not a quote of
+    conversation_id. No validity check: the caller has made its own."""
+    return _summary_from_row(
+        conn.execute(
+            _QUOTE_SUMMARY_BY_ID_SQL,
+            {"conversation_id": conversation_id, "quote_id": quote_id},
+        ).fetchone()
     )
 
 
@@ -174,6 +208,16 @@ def request_booking_follow_up(
             "has answered",
             code="quote_not_confirmable",
         )
+    return pass_quote_on(conn, conversation_id=conversation_id, quote=quote)
+
+
+def pass_quote_on(
+    conn: psycopg.Connection[Any], *, conversation_id: int, quote: QuoteSummary
+) -> dict[str, Any]:
+    """Opens the booking_requested escalation for quote, or finds it
+    already open (one per quote -- migration 0032), and returns the
+    summary result (BOOKING_FOLLOW_UP_RESULT_KEYS). The caller has
+    already decided the quote may be passed on."""
     opened = _open_request(
         conn, quote_id=quote.quote_id, conversation_id=conversation_id
     )
