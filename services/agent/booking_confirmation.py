@@ -20,6 +20,7 @@ from datetime import date
 from lib.money import format_halalas_as_arabic_riyal, format_halalas_as_sar
 from services.agent.fixed_texts import Language
 from services.agent.llm.booking_follow_up import QuoteSummary
+from services.agent.llm.quote_display import room_display
 
 _MONTHS: dict[Language, tuple[str, ...]] = {
     "ar": (
@@ -66,11 +67,6 @@ _MONTHS: dict[Language, tuple[str, ...]] = {
     ),
 }
 
-# Arabic counts rooms in three forms: a dual for two, a plural for three
-# to ten, and the singular again from eleven.
-_ARABIC_DUAL_COUNT = 2
-_ARABIC_PLURAL_MAX_COUNT = 10
-
 
 def format_day_month(day: date, language: Language, *, with_year: bool) -> str:
     """ "5 أكتوبر" / "5 October" / "5 Oktober", plus " 2026" when
@@ -79,35 +75,13 @@ def format_day_month(day: date, language: Language, *, with_year: bool) -> str:
     return f"{text} {day.year}" if with_year else text
 
 
-def _arabic_rooms(rooms: int, room_type: str) -> str:
-    if rooms == 1:
-        return f"غرفة {room_type}"
-    if rooms == _ARABIC_DUAL_COUNT:
-        return f"غرفتين {room_type}"
-    if rooms <= _ARABIC_PLURAL_MAX_COUNT:
-        return f"{rooms} غرف {room_type}"
-    return f"{rooms} غرفة {room_type}"
-
-
-def _english_rooms(rooms: int, room_type: str) -> str:
-    if rooms == 1:
-        return f"{room_type} room"
-    return f"{rooms} {room_type} rooms"
-
-
-def _indonesian_rooms(rooms: int, room_type: str) -> str:
-    if rooms == 1:
-        return f"kamar {room_type}"
-    return f"{rooms} kamar {room_type}"
-
-
 def render_booking_passed_on(quote: QuoteSummary, language: Language) -> str:
     """The approved confirmation for quote, in `language`."""
     with_year = quote.check_in.year != quote.check_out.year
     check_in = format_day_month(quote.check_in, language, with_year=with_year)
     check_out = format_day_month(quote.check_out, language, with_year=with_year)
+    rooms = room_display(quote.room_type_name, quote.rooms, language)
     if language == "ar":
-        rooms = _arabic_rooms(quote.rooms, quote.room_type_name)
         total = format_halalas_as_arabic_riyal(quote.total_halalas)
         return (
             f"أبشر، بلّغت زميلي بطلبك: {quote.hotel_name}، {rooms}، "
@@ -116,13 +90,11 @@ def render_booking_passed_on(quote: QuoteSummary, language: Language) -> str:
         )
     total = format_halalas_as_sar(quote.total_halalas)
     if language == "en":
-        rooms = _english_rooms(quote.rooms, quote.room_type_name)
         return (
             f"Done — I've passed your request to a colleague: {quote.hotel_name}, "
             f"{rooms}, {check_in} to {check_out}, total {total}. They'll "
             "contact you shortly to confirm the booking."
         )
-    rooms = _indonesian_rooms(quote.rooms, quote.room_type_name)
     return (
         f"Baik, permintaan Anda sudah saya teruskan ke rekan saya: "
         f"{quote.hotel_name}, {rooms}, {check_in} sampai {check_out}, total "

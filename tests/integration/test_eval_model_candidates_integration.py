@@ -143,8 +143,8 @@ def _write_the_english_quote_reply(turns: list[Turn]) -> ModelTurn:
     quote = _last_quote(turns)
     return ModelTurn(
         text=(
-            f"{quote['hotel_name']}, {quote['room_type_name']} room, "
-            f"{quote['night_count']} nights, 5 to 7 October:\n"
+            f"{quote['hotel_name']}, {quote['room_display']}, "
+            f"{quote['night_count_display']}, 5 to 7 October:\n"
             f"Total *{quote['total_price_display']}* "
             f"({quote['price_per_night_display']} per night).\n"
             f"Only {quote['distance_to_haram_display']} from the Haram.\n"
@@ -158,8 +158,8 @@ def _write_the_arabic_quote_reply(turns: list[Turn]) -> ModelTurn:
     quote = _last_quote(turns)
     return ModelTurn(
         text=(
-            f"{quote['hotel_name']}، غرفة {quote['room_type_name']}، ليلتين "
-            "من 5 إلى 7 أكتوبر:\n"
+            f"{quote['hotel_name']}، {quote['room_display_ar']}، "
+            f"{quote['night_count_display_ar']} من 5 إلى 7 أكتوبر:\n"
             f"الإجمالي *{quote['total_price_display_ar']}* "
             f"({quote['price_per_night_display_ar']} لليلة).\n"
             f"يبعد {quote['distance_to_haram_display_ar']} عن الحرم.\n"

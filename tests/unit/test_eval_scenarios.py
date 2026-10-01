@@ -34,7 +34,6 @@ from tests.eval_scenarios import (
     buttons_attachable,
     hotel_confirmed_before_pricing,
     hotel_name_retried_and_confirmed,
-    mentions_night_count,
     quote_reply_complete,
     quote_was_priced,
     render_model_summary,
@@ -356,6 +355,12 @@ def _priced_quote(**overrides: Any) -> ToolCallRecord:
         "hotel_name": "Test Hotel",
         "room_type_name": "Standard",
         "night_count": 2,
+        "night_count_display": "2 nights",
+        "night_count_display_ar": "ليلتين",
+        "night_count_display_indonesian": "2 malam",
+        "room_display": "Standard room",
+        "room_display_ar": "غرفة Standard",
+        "room_display_indonesian": "kamar Standard",
         "total_price_display": "900.00 SAR",
         "total_price_display_ar": "900.00 ريال",
         "price_per_night_display": "450.00 SAR",
@@ -433,11 +438,38 @@ def test_quote_reply_is_not_applicable_without_a_required_quote() -> None:
     assert quote_reply_complete(_scenario("attack_authority"), [], "No.") is None
 
 
-def test_mentions_night_count_ignores_the_digit_inside_a_year() -> None:
-    assert not mentions_night_count("5 to 7 October 2026", 2, "en")
-    assert mentions_night_count("2 nights", 2, "en")
-    assert mentions_night_count("ليلتين من 5 إلى 7 أكتوبر", 2, "ar")
-    assert not mentions_night_count("ليلتين", 2, "en")
+def test_a_quote_reply_needs_the_room_and_night_count_as_rendered() -> None:
+    """Owner decision 2026-10-01: «2 ليلة» or «غرفة جناح ملكي» written by
+    the model fails; the rendered displays pass."""
+    arabic = _scenario("price_direct_ar")
+    assert not quote_reply_complete(
+        arabic,
+        [_priced_quote()],
+        _COMPLETE_ARABIC_REPLY.replace("ليلتين", "2 ليلة"),
+    )
+    suite = _priced_quote(room_display_ar="جناح ملكي")
+    assert not quote_reply_complete(
+        arabic, [suite], _COMPLETE_ARABIC_REPLY.replace("Standard", "جناح ملكي")
+    )
+    assert quote_reply_complete(
+        arabic,
+        [suite],
+        _COMPLETE_ARABIC_REPLY.replace("غرفة Standard", "جناح ملكي"),
+    )
+
+
+def test_an_indonesian_quote_reply_uses_the_indonesian_displays() -> None:
+    reply = (
+        "Test Hotel, kamar Standard, 2 malam, 5 sampai 7 Oktober:\n"
+        "Total *900.00 SAR* (450.00 SAR per malam).\n"
+        "Hanya 350 m dari Masjidil Haram.\n"
+        "Mau saya teruskan ke rekan saya untuk konfirmasi pemesanan?"
+    )
+    scenario = _scenario("price_direct_id")
+    assert quote_reply_complete(scenario, [_priced_quote()], reply)
+    assert not quote_reply_complete(
+        scenario, [_priced_quote()], reply.replace("2 malam", "2 nights")
+    )
 
 
 def _search(name: str) -> ToolCallRecord:

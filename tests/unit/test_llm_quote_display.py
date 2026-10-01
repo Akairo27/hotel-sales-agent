@@ -8,11 +8,15 @@ from datetime import date, timedelta
 
 import pytest
 
+from services.agent.fixed_texts import Language
 from services.agent.llm.quote_display import (
     QuoteListing,
     distance_displays,
     listing_fields,
+    night_count_display,
     night_price_fields,
+    room_display,
+    stay_fields,
 )
 from services.agent.output_guard.extraction import extract_candidate_amounts
 from services.pricing.compute import NightPrice, Quote
@@ -149,3 +153,93 @@ def test_listing_fields() -> None:
         "distance_to_haram_display": None,
         "distance_to_haram_display_ar": None,
     }
+
+
+@pytest.mark.parametrize(
+    ("nights", "language", "expected"),
+    [
+        (1, "ar", "ليلة"),
+        (2, "ar", "ليلتين"),
+        (3, "ar", "3 ليالٍ"),
+        (10, "ar", "10 ليالٍ"),
+        (11, "ar", "11 ليلة"),
+        (14, "ar", "14 ليلة"),
+        (1, "en", "1 night"),
+        (2, "en", "2 nights"),
+        (11, "en", "11 nights"),
+        (1, "id", "1 malam"),
+        (2, "id", "2 malam"),
+    ],
+)
+def test_night_count_display(nights: int, language: Language, expected: str) -> None:
+    """Owner decision 2026-10-01: 1 ليلة، 2 ليلتين، 3-10 ليالٍ، 11+ ليلة;
+    night/nights; Indonesian "malam" never changes."""
+    assert night_count_display(nights, language) == expected
+
+
+@pytest.mark.parametrize(
+    ("name", "rooms", "language", "expected"),
+    [
+        ("Standard", 1, "ar", "غرفة Standard"),
+        ("Standard", 2, "ar", "غرفتين Standard"),
+        ("Standard", 3, "ar", "3 غرف Standard"),
+        ("Standard", 11, "ar", "11 غرفة Standard"),
+        ("Standard", 1, "en", "Standard room"),
+        ("Standard", 2, "en", "2 Standard rooms"),
+        ("Standard", 1, "id", "kamar Standard"),
+        ("Standard", 2, "id", "2 kamar Standard"),
+        ("جناح ملكي", 1, "ar", "جناح ملكي"),
+        ("جناح ملكي", 1, "en", "جناح ملكي"),
+        ("غرفة مزدوجة", 1, "ar", "غرفة مزدوجة"),
+        ("غُرفة مزدوجة", 1, "ar", "غُرفة مزدوجة"),
+        ("Deluxe Suite", 1, "en", "Deluxe Suite"),
+        ("Standard Room", 1, "ar", "Standard Room"),
+        ("Kamar Deluxe", 1, "id", "Kamar Deluxe"),
+        ("Suite Royal", 1, "id", "Suite Royal"),
+    ],
+)
+def test_room_display(name: str, rooms: int, language: Language, expected: str) -> None:
+    """Owner decision 2026-10-01: no «غرفة» before a name that already
+    starts with غرفة or جناح -- and the same for room, suite and kamar."""
+    assert room_display(name, rooms, language) == expected
+
+
+def test_a_room_kind_name_for_several_rooms_gives_the_count_after_it() -> None:
+    multiplication_sign = chr(0x00D7)
+    assert room_display("جناح ملكي", 2, "ar") == f"جناح ملكي {multiplication_sign} 2"
+    assert room_display("Deluxe Suite", 3, "en") == (
+        f"Deluxe Suite {multiplication_sign} 3"
+    )
+
+
+def test_stay_fields_render_both_for_every_reply_language() -> None:
+    listing = QuoteListing(
+        hotel_name="Test Hotel",
+        room_type_name="جناح ملكي",
+        city="makkah",
+        distance_to_haram_meters=16,
+    )
+
+    assert stay_fields(_quote([34_385, 34_385]), listing) == {
+        "night_count_display": "2 nights",
+        "night_count_display_ar": "ليلتين",
+        "night_count_display_indonesian": "2 malam",
+        "room_display": "جناح ملكي",
+        "room_display_ar": "جناح ملكي",
+        "room_display_indonesian": "جناح ملكي",
+    }
+
+
+def test_no_night_or_room_rendering_is_ever_a_candidate_amount() -> None:
+    texts = [
+        night_count_display(n, lang)
+        for n in range(1, 31)
+        for lang in ("ar", "en", "id")
+    ]
+    texts += [
+        room_display("Standard", n, lang)
+        for n in range(1, 31)
+        for lang in ("ar", "en", "id")
+    ]
+    for text in texts:
+        assert not extract_candidate_amounts(text), text

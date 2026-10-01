@@ -124,8 +124,10 @@ from services.agent.llm.quote_display import (
     listing_fields,
     load_quote_listing,
     night_price_fields,
+    stay_fields,
 )
 from services.agent.llm.tools import TOOL_ERROR_MESSAGES
+from services.agent.text_matching import ARABIC_NORMALIZE_FROM, ARABIC_NORMALIZE_TO
 from services.inventory.operations import StayAvailability, stay_availability
 from services.pricing.compute import Quote, compute_quote
 from services.pricing.errors import AllotmentNotFoundError
@@ -191,54 +193,13 @@ ROOM_TYPE_RESULT_KEYS = frozenset(
     {"room_type_id", "room_type_name", "capacity_adults", "bed_configuration"}
 )
 
-# Arabic name-matching normalization: collapses spelling variants a
-# customer's own typing is likely to produce (alef with/without hamza,
-# taa marbuta vs. haa, alef maksura vs. yaa) and strips tashkeel
-# diacritics, applied to both hotel_name and the customer's search term,
-# at query time, in the database — see _SEARCH_HOTELS_QUERY's own
-# translate() calls. Plain translate(), not a new Postgres extension
-# (neither unaccent nor pg_trgm is installed on this project): every
-# mapping here is exactly one character to at most one character, passed
-# in as the bound %(norm_from)s/%(norm_to)s parameters, never
-# interpolated into the query text.
-#
-# Built via chr(), not string literals: a literal Arabic character here
-# is exactly what RUF001 (ambiguous-unicode-character) exists to flag on
-# an isolated single-letter string (this file's ordinary Arabic prose
-# elsewhere is long enough that ruff never flags it), and, unlike an
-# escape sequence, ruff's own formatter cannot silently rewrite a chr()
-# call back into a raw glyph. Named by their Unicode character name, not
-# transliterated, so each mapping is checkable against the Unicode
-# standard directly.
-_ALEF_HAMZA_ABOVE = chr(0x0623)  # ARABIC LETTER ALEF WITH HAMZA ABOVE
-_ALEF_HAMZA_BELOW = chr(0x0625)  # ARABIC LETTER ALEF WITH HAMZA BELOW
-_ALEF_MADDA_ABOVE = chr(0x0622)  # ARABIC LETTER ALEF WITH MADDA ABOVE
-_ALEF_WASLA = chr(0x0671)  # ARABIC LETTER ALEF WASLA
-_BARE_ALEF = chr(0x0627)  # ARABIC LETTER ALEF
-_TAA_MARBUTA = chr(0x0629)  # ARABIC LETTER TEH MARBUTA
-_HAA = chr(0x0647)  # ARABIC LETTER HEH
-_ALEF_MAKSURA = chr(0x0649)  # ARABIC LETTER ALEF MAKSURA
-_YAA = chr(0x064A)  # ARABIC LETTER YEH
-_TASHKEEL = (
-    chr(0x064B)  # ARABIC FATHATAN
-    + chr(0x064C)  # ARABIC DAMMATAN
-    + chr(0x064D)  # ARABIC KASRATAN
-    + chr(0x064E)  # ARABIC FATHA
-    + chr(0x064F)  # ARABIC DAMMA
-    + chr(0x0650)  # ARABIC KASRA
-    + chr(0x0651)  # ARABIC SHADDA
-    + chr(0x0652)  # ARABIC SUKUN
-    + chr(0x0670)  # ARABIC LETTER SUPERSCRIPT ALEF
-)  # deleted, not mapped
-
-_ALEF_VARIANTS = _ALEF_HAMZA_ABOVE + _ALEF_HAMZA_BELOW + _ALEF_MADDA_ABOVE + _ALEF_WASLA
-ARABIC_NORMALIZE_FROM = _ALEF_VARIANTS + _TAA_MARBUTA + _ALEF_MAKSURA + _TASHKEEL
-# Shorter than ARABIC_NORMALIZE_FROM on purpose: translate() deletes any
-# trailing `from` characters with no corresponding `to` character, which
-# is exactly what _TASHKEEL above needs (removed, not replaced). Public
-# because services/agent/text_matching.py applies the same mapping in
-# Python (a customer's typed yes, the output guard's booking claims).
-ARABIC_NORMALIZE_TO = (_BARE_ALEF * len(_ALEF_VARIANTS)) + _HAA + _YAA
+# Arabic name-matching normalization (services/agent/text_matching.py):
+# applied to both hotel_name and the customer's search term, at query time,
+# in the database -- see _SEARCH_HOTELS_QUERY's own translate() calls. Plain
+# translate(), not a new Postgres extension (neither unaccent nor pg_trgm
+# is installed on this project): every mapping is exactly one character to
+# at most one character, passed in as the bound %(norm_from)s/%(norm_to)s
+# parameters, never interpolated into the query text.
 
 
 # The exact key set quote_to_tool_result may ever produce — the
@@ -270,6 +231,12 @@ QUOTE_RESULT_KEYS = frozenset(
         "highest_night_price_display_ar",
         "distance_to_haram_display",
         "distance_to_haram_display_ar",
+        "night_count_display",
+        "night_count_display_ar",
+        "night_count_display_indonesian",
+        "room_display",
+        "room_display_ar",
+        "room_display_indonesian",
     }
 )
 UNPRICED_RESULT_KEYS = frozenset(
@@ -592,6 +559,7 @@ def quote_to_tool_result(quote: Quote, listing: QuoteListing) -> dict[str, Any]:
         "night_count": len(quote.nights),
         **night_price_fields(quote),
         **listing_fields(listing),
+        **stay_fields(quote, listing),
     }
 
 

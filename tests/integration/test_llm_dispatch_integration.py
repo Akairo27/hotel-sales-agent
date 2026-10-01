@@ -202,6 +202,18 @@ def test_get_quote_dispatch_creates_a_real_quote_and_returns_no_cost_fields(
 
     assert result.keys() == QUOTE_RESULT_KEYS
     assert result["priced"] is True
+    # Two nights of the seeded "Standard" room type (seed_hotel_and_room_type),
+    # rendered for each reply language (quote_display.stay_fields).
+    assert (
+        result["night_count_display"],
+        result["night_count_display_ar"],
+        result["night_count_display_indonesian"],
+    ) == ("2 nights", "ليلتين", "2 malam")
+    assert (
+        result["room_display"],
+        result["room_display_ar"],
+        result["room_display_indonesian"],
+    ) == ("Standard room", "غرفة Standard", "kamar Standard")
 
     row = db_conn.execute(
         "SELECT hotel_id, room_type_id, customer_phone FROM quotes WHERE id = %s",

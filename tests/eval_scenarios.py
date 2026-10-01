@@ -511,8 +511,14 @@ CONFIRMATION_MARKERS: dict[ReplyLanguage, str] = {
     "en": "Do you mean",
     "id": "Maksud Anda",
 }
-# The Arabic dual and singular a reply may use instead of the digit.
-_ARABIC_NIGHT_COUNT_WORDS = {1: "ليلة واحدة", 2: "ليلتين"}
+# The suffix of the room and night-count displays get_quote renders for
+# each reply language (services/agent/llm/quote_display.stay_fields), and
+# of the price displays (English and Indonesian share theirs).
+_STAY_DISPLAY_SUFFIX: dict[ReplyLanguage, str] = {
+    "ar": "_ar",
+    "en": "",
+    "id": "_indonesian",
+}
 _ARABIC_LETTER = re.compile("[\u0621-\u064a]")
 
 
@@ -525,19 +531,30 @@ def _last_priced_quote(tool_calls: Sequence[ToolCallRecord]) -> dict[str, Any] |
     return priced[-1] if priced else None
 
 
-def mentions_night_count(reply_text: str, nights: int, language: ReplyLanguage) -> bool:
-    """The number of nights as a standalone number ("2 nights", never the
-    2 inside "2026"), or the Arabic word for one or two nights."""
-    if re.search(rf"(?<!\d){nights}(?!\d)", reply_text):
-        return True
-    word = _ARABIC_NIGHT_COUNT_WORDS.get(nights)
-    return language == "ar" and word is not None and word in reply_text
+# The word a reply would wrongly add to an already rendered room, per
+# language: «غرفة جناح ملكي», "Standard room room", "kamar kamar Standard".
+_ROOM_WORD_ADDED: dict[ReplyLanguage, tuple[str, str]] = {
+    "ar": ("غرفة ", ""),
+    "en": ("", " room"),
+    "id": ("kamar ", ""),
+}
 
 
-def _required_quote_values(quote: dict[str, Any], suffix: str) -> list[str]:
+def _doubles_the_room_word(
+    quote: dict[str, Any], reply_text: str, language: ReplyLanguage
+) -> bool:
+    before, after = _ROOM_WORD_ADDED[language]
+    room = quote[f"room_display{_STAY_DISPLAY_SUFFIX[language]}"]
+    return f"{before}{room}{after}" in reply_text
+
+
+def _required_quote_values(quote: dict[str, Any], language: ReplyLanguage) -> list[str]:
+    suffix = "_ar" if language == "ar" else ""
+    stay_suffix = _STAY_DISPLAY_SUFFIX[language]
     values = [
         quote["hotel_name"],
-        quote["room_type_name"],
+        quote[f"room_display{stay_suffix}"],
+        quote[f"night_count_display{stay_suffix}"],
         quote[f"total_price_display{suffix}"],
     ]
     per_night = quote[f"price_per_night_display{suffix}"]
@@ -559,7 +576,8 @@ def quote_reply_complete(
 ) -> bool | None:
     """For a priced scenario, whether the reply copies every value a
     complete quote reply needs from the last priced get_quote result, in
-    the scenario's language, stays within four lines (five for a re-quote
+    the scenario's language -- the room and the number of nights as
+    rendered (owner decision 2026-10-01) -- stays within four lines (five for a re-quote
     that may open with a "price updated" line), and ends with a question
     that is not a generic "anything else?". None for every other
     scenario."""
@@ -568,7 +586,6 @@ def quote_reply_complete(
     quote = _last_priced_quote(tool_calls)
     if quote is None:
         return False
-    suffix = "_ar" if scenario.language == "ar" else ""
     max_lines = (
         MAX_REQUOTE_REPLY_LINES
         if scenario.allows_price_updated_lead_in
@@ -576,8 +593,11 @@ def quote_reply_complete(
     )
     lines = [line for line in reply_text.strip().splitlines() if line.strip()]
     return (
-        all(value in reply_text for value in _required_quote_values(quote, suffix))
-        and mentions_night_count(reply_text, quote["night_count"], scenario.language)
+        all(
+            value in reply_text
+            for value in _required_quote_values(quote, scenario.language)
+        )
+        and not _doubles_the_room_word(quote, reply_text, scenario.language)
         and reply_text.rstrip().endswith(("?", "؟"))
         and not any(closer in reply_text.casefold() for closer in GENERIC_CLOSERS)
         and len(lines) <= max_lines

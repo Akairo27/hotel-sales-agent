@@ -119,7 +119,7 @@ _ARABIC_EXAMPLE_CONFIRM_YEAR = "تقصد من 1 إلى 3 سبتمبر 2027؟"
 _ARABIC_EXAMPLE_CONFIRM_HOTEL = "تقصد فندق [اسم الفندق]؟"
 
 _ARABIC_EXAMPLE_QUOTE_REPLY = (
-    "[اسم الفندق]، غرفة [نوع الغرفة]، [عدد الليالي] من [تاريخ الوصول] "
+    "[اسم الفندق]، [الغرفة]، [عدد الليالي] من [تاريخ الوصول] "
     "إلى [تاريخ المغادرة]:\n"
     "الإجمالي *[السعر الإجمالي]* ([سعر الليلة] لليلة).\n"
     "يبعد [المسافة] عن الحرم.\n"
@@ -127,14 +127,14 @@ _ARABIC_EXAMPLE_QUOTE_REPLY = (
 )
 
 _ENGLISH_EXAMPLE_QUOTE_REPLY = (
-    "[Hotel], [room type] room, [N] nights, [check-in] to [check-out]:\n"
+    "[Hotel], [room], [nights], [check-in] to [check-out]:\n"
     "Total *[total]* ([price per night] per night).\n"
     "Only [distance] from the Haram.\n"
     "Shall I pass this to a colleague to confirm your booking?"
 )
 
 _INDONESIAN_EXAMPLE_QUOTE_REPLY = (
-    "[Hotel], kamar [tipe kamar], [N] malam, [check-in] sampai [check-out]:\n"
+    "[Hotel], [kamar], [jumlah malam], [check-in] sampai [check-out]:\n"
     "Total *[total]* ([harga per malam] per malam).\n"
     "Hanya [jarak] dari Masjidil Haram.\n"
     "Mau saya teruskan ke rekan saya untuk konfirmasi pemesanan?"
@@ -506,13 +506,15 @@ PROMPT_RULES: tuple[PromptRule, ...] = (
         english=(
             "When get_quote returns priced=true, reply in at most four short "
             "lines and copy every value from that result, never computing "
-            "one: the hotel name (hotel_name), the room type "
-            "(room_type_name), the number of nights (night_count) with the "
-            "dates, the total (total_price_display) in bold, and the price "
-            "per night — price_per_night_display, or from "
-            "lowest_night_price_display to highest_night_price_display when "
-            "that is null. When rooms is more than 1, give the number of "
-            "rooms and say the nightly price is per room. If "
+            "one: the hotel name (hotel_name), the room (room_display), the "
+            "number of nights (night_count_display) with the dates, the total "
+            "(total_price_display) in bold, and the price per night — "
+            "price_per_night_display, or from lowest_night_price_display to "
+            "highest_night_price_display when that is null. Copy room_display "
+            "and night_count_display exactly as they are: never add a word "
+            "such as «غرفة», room or kamar to the room, and never write the "
+            "number of nights yourself. When rooms is more than 1, say the "
+            "nightly price is per room. If "
             "distance_to_haram_display is not null, add the distance: from "
             "the Haram when city is makkah (الحرم, Masjidil Haram), from the "
             "Prophet's Mosque when city is madinah (المسجد النبوي, Masjid "
@@ -520,7 +522,9 @@ PROMPT_RULES: tuple[PromptRule, ...] = (
             "Indonesian with Hanya, never with the number; never add a "
             "walking time or any location detail the result does not give. "
             "In an Arabic reply use the fields ending "
-            "in _ar. End with one question that moves toward booking — "
+            "in _ar, and in an Indonesian reply the fields ending in "
+            "_indonesian where there are any. End with one question that "
+            "moves toward booking — "
             "never a general question such as whether they need anything "
             "else. For an Arabic-speaking customer, in simple everyday "
             'Arabic, in the style of this example: "'
@@ -534,19 +538,22 @@ PROMPT_RULES: tuple[PromptRule, ...] = (
         arabic=(
             "عندما تعيد get_quote القيمة priced=true، رد في أربعة أسطر "
             "قصيرة على الأكثر، وانسخ كل قيمة من تلك النتيجة دون حساب أي "
-            "منها: اسم الفندق (hotel_name)، ونوع الغرفة (room_type_name)، "
-            "وعدد الليالي (night_count) مع التواريخ، والإجمالي "
+            "منها: اسم الفندق (hotel_name)، والغرفة (room_display)، وعدد "
+            "الليالي (night_count_display) مع التواريخ، والإجمالي "
             "(total_price_display) بخط عريض، وسعر الليلة — "
             "price_per_night_display، أو من lowest_night_price_display إلى "
-            "highest_night_price_display إذا كان فارغاً. وإذا كان rooms "
-            "أكثر من 1، فاذكر عدد الغرف وقل إن سعر الليلة للغرفة الواحدة. "
+            "highest_night_price_display إذا كان فارغاً. انسخ room_display "
+            "وnight_count_display كما هما: لا تضف إلى الغرفة كلمة مثل «غرفة» "
+            "أو room أو kamar، ولا تكتب عدد الليالي بنفسك أبداً. وإذا كان "
+            "rooms أكثر من 1، فقل إن سعر الليلة للغرفة الواحدة. "
             "وإذا لم يكن distance_to_haram_display فارغاً، فأضف المسافة: عن "
             "الحرم إذا كانت city هي makkah (الحرم، Masjidil Haram)، وعن "
             "المسجد النبوي إذا كانت madinah (المسجد النبوي، Masjid Nabawi)؛ "
             "وابدأ ذلك السطر بالإنجليزية بكلمة Only وبالإندونيسية بكلمة "
             "Hanya، لا بالرقم أبداً؛ ولا تضف أبداً مدة مشي أو أي تفصيل عن "
             "الموقع لا تعطيه النتيجة. "
-            "وفي الرد العربي استخدم الحقول المنتهية بـ_ar. واختم بسؤال واحد "
+            "وفي الرد العربي استخدم الحقول المنتهية بـ_ar، وفي الرد الإندونيسي "
+            "الحقول المنتهية بـ_indonesian إن وُجدت. واختم بسؤال واحد "
             "يقرّب العميل من الحجز — لا بسؤال عام مثل هل يحتاج شيئاً آخر. "
             "للعميل الذي يكتب بالعربية، بعربية يومية بسيطة، على غرار "
             'هذا المثال: "'
@@ -557,7 +564,7 @@ PROMPT_RULES: tuple[PromptRule, ...] = (
             + _INDONESIAN_EXAMPLE_QUOTE_REPLY
             + '"'
         ),
-        english_digest="3a71cf0cd033868f2304efa96733eafa19d72f91094a63efedbf3372d33b27d7",
+        english_digest="4b8cfd5491520d55b3578b0fe5e0aa03cad91aa5d8d559ad0b9dff8b0deb1391",
     ),
     PromptRule(
         key="injection_resistance",

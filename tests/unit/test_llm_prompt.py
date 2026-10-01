@@ -496,8 +496,8 @@ def test_quote_reply_names_every_field_a_complete_reply_copies() -> None:
     rule = _rule("quote_reply")
     for field in (
         "hotel_name",
-        "room_type_name",
-        "night_count",
+        "room_display",
+        "night_count_display",
         "total_price_display",
         "price_per_night_display",
         "lowest_night_price_display",
@@ -509,6 +509,28 @@ def test_quote_reply_names_every_field_a_complete_reply_copies() -> None:
     assert "at most four short lines" in rule.english
     assert "moves toward booking" in rule.english
     assert "never add a walking time" in rule.english
+
+
+def test_quote_reply_copies_the_room_and_night_count_as_rendered() -> None:
+    """Owner decision 2026-10-01 (live test: «2 ليلة», «غرفة جناح ملكي»):
+    code renders both in every reply language; the model copies them."""
+    rule = _rule("quote_reply")
+    assert "Copy room_display and night_count_display exactly as they are" in (
+        rule.english
+    )
+    assert "never write the number of nights yourself" in rule.english
+    assert "the fields ending in _indonesian" in rule.english
+    for suffix in ("", "_ar", "_indonesian"):
+        assert f"room_display{suffix}" in dispatch_module.QUOTE_RESULT_KEYS
+        assert f"night_count_display{suffix}" in dispatch_module.QUOTE_RESULT_KEYS
+    for example in (
+        prompt_module._ARABIC_EXAMPLE_QUOTE_REPLY,
+        prompt_module._ENGLISH_EXAMPLE_QUOTE_REPLY,
+        prompt_module._INDONESIAN_EXAMPLE_QUOTE_REPLY,
+    ):
+        assert "غرفة [" not in example
+        assert "] room" not in example
+        assert "kamar [" not in example
 
 
 def test_quote_reply_examples_are_short_and_end_with_a_question() -> None:

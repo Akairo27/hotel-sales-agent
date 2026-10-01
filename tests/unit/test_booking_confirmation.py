@@ -123,3 +123,22 @@ def test_the_year_is_shown_only_when_the_stay_crosses_into_a_new_year() -> None:
         new_year, "en"
     )
     assert "2026" not in render_booking_passed_on(_QUOTE, "en")
+
+
+def test_a_suite_is_named_without_a_second_room_word() -> None:
+    """Owner decision 2026-10-01: «جناح ملكي», never «غرفة جناح ملكي» --
+    the same room_display the quote reply copies."""
+    suite = QuoteSummary(
+        quote_id=1,
+        hotel_name="فندق النخبة",
+        room_type_name="جناح ملكي",
+        check_in=date(2026, 10, 20),
+        check_out=date(2026, 10, 22),
+        rooms=1,
+        total_halalas=68_770,
+    )
+
+    rendered = render_booking_passed_on(suite, "ar")
+
+    assert "فندق النخبة، جناح ملكي، من 20 أكتوبر" in rendered
+    assert "غرفة جناح" not in rendered
