@@ -3,24 +3,27 @@ import { redirect } from "next/navigation";
 import { AppShell } from "@/app/_components/AppShell";
 import { PageHeader } from "@/app/_components/PageHeader";
 import {
+  type CustomerEscalations,
+  customerPage,
+  groupByCustomer,
+} from "@/lib/escalationCustomers";
+import {
   ESCALATION_GROUP_LABELS,
   ESCALATION_GROUPS,
   type EscalationGroup,
-  escalationGroup,
-  escalationLabel,
   formatAge,
-  formatRiyadhDateTime,
   maskPhone,
 } from "@/lib/escalations";
 import { getCurrentAppUser } from "@/lib/session";
 import type { EscalationRow } from "@/lib/types";
-import { BADGE, BADGE_ACCENT, HINT, TABLE, TABLE_ROW, TABLE_WRAPPER, TD, TH } from "@/lib/ui";
+import { BADGE, BADGE_ACCENT, HINT } from "@/lib/ui";
 import { createClient } from "@/utils/supabase/server";
 import { LiveRefresh } from "./LiveRefresh";
 
-// The newest escalations a list shows. Older ones stay readable from
-// their own page and from their conversation's other escalations.
-const LIST_LIMIT = 200;
+// The escalations one list reads, newest first. Open escalations stay few
+// while staff handle them; if this many are ever open at once the page says
+// so, and a grouping view in the database becomes worth its migration.
+const LIST_LIMIT = 1000;
 
 type StatusFilter = "open" | "all";
 
@@ -36,16 +39,54 @@ function filterHref(status: StatusFilter, group: EscalationGroup | undefined): s
   return `/escalations?${query.toString()}`;
 }
 
-function StatusBadge({ escalation }: { escalation: EscalationRow }) {
-  if (escalation.resolved_at) {
-    return <span className={BADGE}>مغلق</span>;
+function statusLabel(customer: CustomerEscalations): string {
+  if (customer.openCount === 0) {
+    return "مغلق";
   }
-  return <span className={BADGE_ACCENT}>لم يُستلم</span>;
+  return customer.oldestUnhandledAt === null ? "مستلم" : "لم يُستلم";
 }
 
-// Staff notification, step 1 (ARCHITECTURE.md §7): read-only. Admin and
-// sales both see every escalation (owner decision 2026-10-01); migration
-// 0033's policies are what limit the rows, through the user's own session.
+function CustomerCard({ customer, now }: { customer: CustomerEscalations; now: Date }) {
+  const [topGroup, ...otherGroups] =
+    customer.openCount > 0 ? customer.openGroups : customer.allGroups;
+  return (
+    <li className="min-w-0 rounded-2xl border border-border bg-surface transition hover:border-accent/50">
+      <Link
+        href={customerPage(customer.conversationId)}
+        className="flex min-w-0 flex-wrap items-center gap-x-4 gap-y-2 p-4"
+      >
+        <span dir="ltr" className="font-medium">
+          {maskPhone(customer.customerPhone)}
+        </span>
+        {topGroup && (
+          <span className={customer.openCount > 0 ? BADGE_ACCENT : BADGE}>
+            {ESCALATION_GROUP_LABELS[topGroup]}
+          </span>
+        )}
+        {otherGroups.map((group) => (
+          <span key={group} className={BADGE}>
+            {ESCALATION_GROUP_LABELS[group]}
+          </span>
+        ))}
+        <span className={HINT}>المفتوحة: {customer.openCount}</span>
+        {customer.oldestUnhandledAt && (
+          <span className={HINT}>
+            أقدم ما لم يُستلم: {formatAge(customer.oldestUnhandledAt, now)}
+          </span>
+        )}
+        <span className={`${customer.openCount > 0 ? BADGE_ACCENT : BADGE} ms-auto`}>
+          {statusLabel(customer)}
+        </span>
+      </Link>
+    </li>
+  );
+}
+
+// Staff notification, step 1 (ARCHITECTURE.md §7), grouped by customer
+// (owner decision 2026-10-01): one card per conversation, customers with an
+// open booking request first, then the oldest unhandled first. Read-only.
+// Admin and sales both see every escalation; migration 0033's policies limit
+// the rows, through the user's own session.
 export default async function EscalationsPage({
   searchParams,
 }: {
@@ -72,8 +113,10 @@ export default async function EscalationsPage({
     query = query.is("resolved_at", null);
   }
   const { data, error } = await query.overrideTypes<EscalationRow[], { merge: false }>();
-  const escalations = (data ?? []).filter(
-    (escalation) => !group || escalationGroup(escalation.reason) === group,
+  const rows = data ?? [];
+  const customers = groupByCustomer(rows).filter(
+    (customer) =>
+      !group || (status === "open" ? customer.openGroups : customer.allGroups).includes(group),
   );
   const now = new Date();
 
@@ -81,11 +124,11 @@ export default async function EscalationsPage({
     <AppShell appUser={appUser}>
       <PageHeader
         title="التصعيدات"
-        description="طلبات العملاء التي وُعد فيها العميل بأن زميلاً سيتواصل معه."
+        description="العملاء الذين وُعدوا بأن زميلاً سيتواصل معهم، كل عميل في سطر واحد."
       />
       <LiveRefresh channelName="escalations-list" />
 
-      <nav className="mb-4 flex flex-wrap gap-2" aria-label="تصفية التصعيدات">
+      <div className="mb-4 flex min-w-0 flex-wrap items-center gap-2" role="group" aria-label="تصفية التصعيدات">
         {(["open", "all"] as const).map((option) => (
           <Link
             key={option}
@@ -95,7 +138,6 @@ export default async function EscalationsPage({
             {option === "open" ? "المفتوحة" : "الكل"}
           </Link>
         ))}
-        <span className="mx-2 border-s border-border" aria-hidden />
         <Link href={filterHref(status, undefined)} className={group ? BADGE : BADGE_ACCENT}>
           كل الأسباب
         </Link>
@@ -108,50 +150,21 @@ export default async function EscalationsPage({
             {ESCALATION_GROUP_LABELS[option]}
           </Link>
         ))}
-      </nav>
+      </div>
 
+      {rows.length === LIST_LIMIT && (
+        <p className={`${HINT} mb-3`}>تظهر أحدث {LIST_LIMIT} تصعيد فقط.</p>
+      )}
       {error ? (
         <p className={HINT}>تعذّر تحميل التصعيدات. أعد تحميل الصفحة.</p>
-      ) : escalations.length === 0 ? (
-        <p className={HINT}>لا توجد تصعيدات هنا.</p>
+      ) : customers.length === 0 ? (
+        <p className={HINT}>لا يوجد عملاء هنا.</p>
       ) : (
-        <div className={TABLE_WRAPPER}>
-          <table className={TABLE}>
-            <thead>
-              <tr>
-                <th className={TH}>الرقم</th>
-                <th className={TH}>السبب</th>
-                <th className={TH}>وقت الفتح (الرياض)</th>
-                <th className={TH}>العميل</th>
-                <th className={TH}>الحالة</th>
-              </tr>
-            </thead>
-            <tbody>
-              {escalations.map((escalation) => (
-                <tr key={escalation.id} className={TABLE_ROW}>
-                  <td className={TD}>
-                    <Link href={`/escalations/${escalation.id}`} className="font-medium underline">
-                      {escalation.id}
-                    </Link>
-                  </td>
-                  <td className={TD}>{escalationLabel(escalation.reason)}</td>
-                  <td className={TD}>
-                    <span dir="ltr">{formatRiyadhDateTime(escalation.opened_at)}</span>
-                    <span className="ms-2 text-muted-foreground">
-                      {formatAge(escalation.opened_at, now)}
-                    </span>
-                  </td>
-                  <td className={TD}>
-                    <span dir="ltr">{maskPhone(escalation.customer_phone)}</span>
-                  </td>
-                  <td className={TD}>
-                    <StatusBadge escalation={escalation} />
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
+        <ul className="grid min-w-0 gap-3">
+          {customers.map((customer) => (
+            <CustomerCard key={customer.conversationId} customer={customer} now={now} />
+          ))}
+        </ul>
       )}
     </AppShell>
   );
