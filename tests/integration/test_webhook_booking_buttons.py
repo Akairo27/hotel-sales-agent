@@ -46,6 +46,7 @@ from services.agent.llm.model_types import (
 from services.agent.main import app
 from services.agent.whatsapp_send import (
     ReplyButton,
+    WhatsAppMessageRejectedError,
     WhatsAppSendError,
     WhatsAppSendSettings,
 )
@@ -81,18 +82,19 @@ _YES_TITLE = "Yes, confirm"
 @dataclass
 class _RecordingSender:
     """Records every send as (kind, body, buttons), with a distinct
-    message id per success (messages.whatsapp_message_id is unique).
-    Refuses button sends, or every send, when told to."""
+    message id per success (messages.whatsapp_message_id is unique). A
+    button send raises buttons_error, and a text send text_error, when
+    set."""
 
-    refuse_buttons: bool = False
-    refuse_everything: bool = False
+    buttons_error: Exception | None = None
+    text_error: Exception | None = None
     sends: list[tuple[str, str, tuple[ReplyButton, ...]]] = field(default_factory=list)
 
     async def send_text(self, *, to_phone: str, body: str) -> str:
         assert to_phone == _WA_ID
         self.sends.append(("text", body, ()))
-        if self.refuse_everything:
-            raise WhatsAppSendError("simulated refusal")
+        if self.text_error is not None:
+            raise self.text_error
         return f"wamid.OUT-{len(self.sends)}"
 
     async def send_reply_buttons(
@@ -100,9 +102,17 @@ class _RecordingSender:
     ) -> str:
         assert to_phone == _WA_ID
         self.sends.append(("buttons", body, buttons))
-        if self.refuse_buttons or self.refuse_everything:
-            raise WhatsAppSendError("simulated interactive refusal")
+        if self.buttons_error is not None:
+            raise self.buttons_error
         return f"wamid.OUT-{len(self.sends)}"
+
+
+# What the send client raises for Meta refusing a message as invalid
+# (nothing sent), and for a timeout (it may have been sent).
+_REJECTED = WhatsAppMessageRejectedError(
+    "WhatsApp send failed: HTTPStatusError (status=400, code=131009)"
+)
+_TIMED_OUT = WhatsAppSendError("WhatsApp send failed: ReadTimeout")
 
 
 @dataclass
@@ -519,14 +529,14 @@ def test_a_tap_on_a_replaced_offer_gets_the_newer_price_with_new_buttons(
     assert _escalations(db_conn) == []
 
 
-def test_a_refused_button_send_is_retried_as_plain_text(
+def test_a_definitely_rejected_button_send_is_retried_as_plain_text(
     harness: _Harness,
     db_conn: psycopg.Connection[Any],
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     conversation_id, quote_id = _offered_stay(db_conn)
     _newer_offer(db_conn, conversation_id)
-    harness.sender.refuse_buttons = True
+    harness.sender.buttons_error = _REJECTED
     caplog.set_level(logging.INFO, logger="services.agent.webhook")
 
     _deliver(harness, _tap("wamid.TAP", button_id("yes", quote_id)))
@@ -536,19 +546,48 @@ def test_a_refused_button_send_is_retried_as_plain_text(
         ("text", NEWER_PRICE.english),
     ]
     assert _bodies(db_conn, "outbound")[-1] == NEWER_PRICE.english
-    assert len(_events(caplog, "booking_offer_buttons_failed")) == 1
+    assert len(_events(caplog, "booking_offer_buttons_rejected")) == 1
+    assert _escalations(db_conn) == []
     (finished,) = _events(caplog, "reply_turn_finished")
     assert finished["status"] == "processed"
 
 
-def test_when_every_send_is_refused_the_turn_ends_in_the_funnel(
+def test_a_timed_out_button_send_is_not_retried_and_ends_in_the_funnel(
+    harness: _Harness,
+    db_conn: psycopg.Connection[Any],
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The offer may already have reached the customer, so it is never sent
+    a second time (owner decision 2026-10-01): the fallback and an
+    escalation follow instead."""
+    conversation_id, quote_id = _offered_stay(db_conn)
+    _newer_offer(db_conn, conversation_id)
+    harness.sender.buttons_error = _TIMED_OUT
+    caplog.set_level(logging.INFO, logger="services.agent.webhook")
+
+    _deliver(harness, _tap("wamid.TAP", button_id("yes", quote_id)))
+
+    assert [(kind, body) for kind, body, _ in harness.sender.sends] == [
+        ("buttons", NEWER_PRICE.english),
+        ("text", FALLBACK.english),
+    ]
+    assert NEWER_PRICE.english not in _bodies(db_conn, "outbound")
+    assert _bodies(db_conn, "outbound")[-1] == FALLBACK.english
+    assert _events(caplog, "booking_offer_buttons_rejected") == []
+    assert _escalations(db_conn) == [("delivery_failed", {}, None)]
+    (finished,) = _events(caplog, "reply_turn_finished")
+    assert finished["status"] == "escalated"
+
+
+def test_when_the_retry_is_refused_too_the_turn_ends_in_the_funnel(
     harness: _Harness,
     db_conn: psycopg.Connection[Any],
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     conversation_id, quote_id = _offered_stay(db_conn)
     _newer_offer(db_conn, conversation_id)
-    harness.sender.refuse_everything = True
+    harness.sender.buttons_error = _REJECTED
+    harness.sender.text_error = _TIMED_OUT
     caplog.set_level(logging.INFO, logger="services.agent.webhook")
 
     _deliver(harness, _tap("wamid.TAP", button_id("yes", quote_id)))

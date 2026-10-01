@@ -43,7 +43,11 @@ from services.agent.webhook import (
     get_webhook_settings,
     load_webhook_settings,
 )
-from services.agent.whatsapp_send import ReplyButton, WhatsAppSendError
+from services.agent.whatsapp_send import (
+    ReplyButton,
+    WhatsAppMessageRejectedError,
+    WhatsAppSendError,
+)
 
 _SECRET = "shared-secret"
 
@@ -359,9 +363,9 @@ def test_any_other_interactive_message_stays_interactive(
 
 @dataclass
 class _ButtonSender:
-    """Records every send; the button send fails when told to."""
+    """Records every send; the button send raises buttons_error when set."""
 
-    buttons_fail: bool
+    buttons_error: Exception | None = None
     sends: list[tuple[str, str]] = field(default_factory=list)
 
     async def send_text(self, *, to_phone: str, body: str) -> str:
@@ -374,8 +378,8 @@ class _ButtonSender:
     ) -> str:
         del to_phone, buttons
         self.sends.append(("buttons", body))
-        if self.buttons_fail:
-            raise WhatsAppSendError("simulated interactive refusal")
+        if self.buttons_error is not None:
+            raise self.buttons_error
         return "wamid.BUTTONS"
 
 
@@ -392,30 +396,61 @@ def _send_offer(sender: _ButtonSender) -> str:
 
 
 def test_an_offer_goes_out_with_its_buttons() -> None:
-    sender = _ButtonSender(buttons_fail=False)
+    sender = _ButtonSender()
 
     assert _send_offer(sender) == "wamid.BUTTONS"
     assert [kind for kind, _ in sender.sends] == ["buttons"]
 
 
-def test_a_refused_button_send_is_sent_again_as_plain_text_with_the_same_body(
+def test_a_definitely_rejected_button_send_is_sent_again_as_plain_text(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    """Owner decision 2026-10-01: the offer question is in the body, so a
-    typed yes still works without the buttons."""
-    sender = _ButtonSender(buttons_fail=True)
+    """Owner decisions 2026-10-01: refused as invalid, nothing was sent, so
+    the same body goes once more as plain text -- the offer question is in
+    it, so a typed yes still works."""
+    sender = _ButtonSender(
+        buttons_error=WhatsAppMessageRejectedError(
+            "WhatsApp send failed: HTTPStatusError (status=400, code=131009)"
+        )
+    )
     caplog.set_level(logging.ERROR, logger="services.agent.webhook")
 
     assert _send_offer(sender) == "wamid.TEXT"
     assert [kind for kind, _ in sender.sends] == ["buttons", "text"]
     assert sender.sends[0][1] == sender.sends[1][1]
     (failure,) = [json.loads(record.getMessage()) for record in caplog.records]
-    assert failure["event"] == "booking_offer_buttons_failed"
+    assert failure["event"] == "booking_offer_buttons_rejected"
     assert failure["quote_id"] == 7
 
 
+@pytest.mark.parametrize(
+    "error",
+    [
+        pytest.param(
+            WhatsAppSendError("WhatsApp send failed: ReadTimeout"), id="timeout"
+        ),
+        pytest.param(
+            WhatsAppSendError(
+                "WhatsApp send failed: HTTPStatusError (status=400, code=130429)"
+            ),
+            id="rate-limit",
+        ),
+        pytest.param(RuntimeError("unexpected"), id="anything-else"),
+    ],
+)
+def test_an_ambiguous_button_failure_is_never_retried(error: Exception) -> None:
+    """The offer may already have reached the customer: never send it a
+    second time. The failure goes up to the funnel."""
+    sender = _ButtonSender(buttons_error=error)
+
+    with pytest.raises(type(error)):
+        _send_offer(sender)
+
+    assert [kind for kind, _ in sender.sends] == ["buttons"]
+
+
 def test_text_without_an_offer_is_sent_as_plain_text() -> None:
-    sender = _ButtonSender(buttons_fail=False)
+    sender = _ButtonSender()
 
     message_id = asyncio.run(
         webhook_module._send_text_or_offer(

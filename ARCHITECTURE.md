@@ -755,10 +755,18 @@ allotment بلا صف مخزون، انظر `0029_allotment_entry.sql`)، فتب
    `booking:yes:<quote_id>` أو `booking:question:<quote_id>`، ولا يُوثَق به
    وحده. **الحارس** يفحص ما يراه العميل كاملاً: النص، ثم سطر فارغ، ثم عنوان
    كل زر في سطر. يُخزَّن النص وحده في `messages` فيقرأ النموذج سجله كما كان،
-   ويُسجَّل `booking_offer_buttons_sent` بمستوى INFO. إن رفض واتساب الرسالة
-   التفاعلية يُسجَّل `booking_offer_buttons_failed` بمستوى ERROR ويُرسَل النص
-   نفسه مرة واحدة نصاً عادياً (سؤال العرض فيه، فالموافقة المكتوبة تعمل)؛
-   وإن فشل هذا أيضاً فمسار «لا صمت».
+   ويُسجَّل `booking_offer_buttons_sent` بمستوى INFO. **إعادة الإرسال نصاً
+   عادياً فقط عند رفض قاطع (قرار المالك):** رد 4xx من Graph API برمز من
+   رموز «رسالة غير صالحة» في مرجع رموز الأخطاء لدى Meta (100 Invalid
+   parameter، 131008 Missing required parameter، 131009 Invalid parameter
+   value، 131051 Unsupported message type —
+   `whatsapp_send.INVALID_MESSAGE_ERROR_CODES`)، أو رفض حدود Meta في الكود قبل
+   أي طلب (`InvalidReplyButtonsError`). في الحالتين لم يُرسَل شيء، فيُسجَّل
+   `booking_offer_buttons_rejected` بمستوى ERROR ويُرسَل النص نفسه مرة واحدة
+   نصاً عادياً (سؤال العرض فيه، فالموافقة المكتوبة تعمل). أي فشل آخر — مهلة،
+   خطأ نقل، 5xx، 4xx برمز آخر أو بلا رمز — ربما أوصل العرض فعلاً، فلا يُعاد
+   أبداً كي لا يصل العرض مرتين، ويذهب لمسار «لا صمت» (الرسالة الاحتياطية
+   وتصعيد `delivery_failed`). وإن فشل النص المعاد أيضاً فالمسار نفسه.
 2. **الضغط على زر** (`services/agent/booking_yes.py`): تصل الضغطة رسالة
    `interactive` نوعها `button_reply`. تُخزَّن بعنوان الزر نصاً لها (ما يقرؤه
    الموظفون والنموذج)، ويُحتفظ بمعرّف الزر و`context.id` (رسالتنا التي حملت

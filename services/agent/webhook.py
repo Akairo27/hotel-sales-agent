@@ -215,6 +215,7 @@ from services.agent.staff_follow_up import open_follow_up_for_dates_not_open
 from services.agent.whatsapp_send import (
     WHATSAPP_TEXT_BODY_MAX_CHARS,
     WhatsAppCloudApiSender,
+    WhatsAppMessageRejectedError,
     WhatsAppSender,
     WhatsAppSendSettings,
     load_whatsapp_send_settings,
@@ -572,24 +573,30 @@ async def _send_text_or_offer(
     offer: BookingOfferButtons | None,
 ) -> str:
     """Sends text with offer's reply buttons, or as plain text when there
-    are none. A failed button send is logged at ERROR and sent once more
-    as plain text with the same body: the offer question is in the body,
-    so a typed yes still works (owner decision 2026-10-01). Returns the
-    WhatsApp message id.
+    are none. Returns the WhatsApp message id.
+
+    Only a definite refusal of the button message as invalid
+    (WhatsAppMessageRejectedError: nothing was sent) is logged at ERROR and
+    sent once more as plain text with the same body -- the offer question is
+    in the body, so a typed yes still works. Any other failure, such as a
+    timeout, may have delivered the offer already, so it is raised, never
+    retried: the customer must never get the offer twice (owner decisions
+    2026-10-01); the caller's failure funnel answers instead.
 
     Raises:
-        Whatever sender.send_text raises.
+        Whatever sender.send_reply_buttons raises other than
+        WhatsAppMessageRejectedError, or whatever sender.send_text raises.
     """
     if offer is not None:
         try:
             whatsapp_message_id = await sender.send_reply_buttons(
                 to_phone=to_phone, body=text, buttons=offer.buttons
             )
-        except Exception as exc:
+        except WhatsAppMessageRejectedError as exc:
             logger.error(
                 json.dumps(
                     {
-                        "event": "booking_offer_buttons_failed",
+                        "event": "booking_offer_buttons_rejected",
                         "conversation_id": conversation_id,
                         "quote_id": offer.quote_id,
                         "exception_type": type(exc).__name__,

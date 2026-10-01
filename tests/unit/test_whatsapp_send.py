@@ -16,12 +16,14 @@ import httpx
 import pytest
 
 from services.agent.whatsapp_send import (
+    INVALID_MESSAGE_ERROR_CODES,
     REPLY_BUTTON_ID_MAX_CHARS,
     REPLY_BUTTON_TITLE_MAX_CHARS,
     REPLY_BUTTONS_BODY_MAX_CHARS,
     InvalidReplyButtonsError,
     ReplyButton,
     WhatsAppCloudApiSender,
+    WhatsAppMessageRejectedError,
     WhatsAppSendConfigurationError,
     WhatsAppSendError,
     WhatsAppSendSettings,
@@ -389,9 +391,92 @@ def test_send_reply_buttons_sends_nothing_when_the_buttons_break_a_limit(
     assert posted == []
 
 
-def test_an_invalid_reply_buttons_message_is_a_whatsapp_send_error() -> None:
-    """The webhook treats it like any failed send."""
-    assert issubclass(InvalidReplyButtonsError, WhatsAppSendError)
+def test_an_invalid_reply_buttons_message_is_a_definite_rejection() -> None:
+    """Refused before any request, so certainly not sent -- the webhook may
+    send the body again as plain text."""
+    assert issubclass(InvalidReplyButtonsError, WhatsAppMessageRejectedError)
+    assert issubclass(WhatsAppMessageRejectedError, WhatsAppSendError)
+
+
+def _send_buttons() -> str:
+    return asyncio.run(
+        WhatsAppCloudApiSender(_SETTINGS).send_reply_buttons(
+            to_phone="966500000001", body="Shall I book?", buttons=_BUTTONS
+        )
+    )
+
+
+@pytest.mark.parametrize("code", sorted(INVALID_MESSAGE_ERROR_CODES))
+def test_a_4xx_with_an_invalid_message_code_is_a_definite_rejection(
+    monkeypatch: pytest.MonkeyPatch, code: int
+) -> None:
+    """Meta's "Error codes" reference: 100, 131008, 131009 and 131051 refuse
+    the message as invalid."""
+    response = httpx.Response(
+        400, request=_REQUEST, json={"error": {"code": code, "message": "invalid"}}
+    )
+    _patch_post(monkeypatch, response)
+
+    with pytest.raises(WhatsAppMessageRejectedError) as exc_info:
+        _send_buttons()
+
+    assert f"code={code}" in str(exc_info.value)
+
+
+@pytest.mark.parametrize(
+    "response",
+    [
+        pytest.param(
+            httpx.Response(400, request=_REQUEST, json={"error": {"code": 130429}}),
+            id="throughput-limit",
+        ),
+        pytest.param(
+            httpx.Response(429, request=_REQUEST, json={"error": {"code": 4}}),
+            id="app-rate-limit",
+        ),
+        pytest.param(
+            httpx.Response(401, request=_REQUEST, json={"error": {"code": 190}}),
+            id="expired-token",
+        ),
+        pytest.param(
+            httpx.Response(400, request=_REQUEST, json={"error": {"message": "x"}}),
+            id="no-code",
+        ),
+        pytest.param(
+            httpx.Response(400, request=_REQUEST, content=b"<html>bad gateway</html>"),
+            id="unparseable-body",
+        ),
+        pytest.param(
+            httpx.Response(500, request=_REQUEST, json={"error": {"code": 131009}}),
+            id="server-error-with-an-invalid-code",
+        ),
+        pytest.param(
+            httpx.Response(400, request=_REQUEST, json={"error": {"code": "131009"}}),
+            id="code-as-a-string",
+        ),
+    ],
+)
+def test_any_other_failed_response_is_not_a_definite_rejection(
+    monkeypatch: pytest.MonkeyPatch, response: httpx.Response
+) -> None:
+    _patch_post(monkeypatch, response)
+
+    with pytest.raises(WhatsAppSendError) as exc_info:
+        _send_buttons()
+
+    assert not isinstance(exc_info.value, WhatsAppMessageRejectedError)
+
+
+def test_a_timeout_is_not_a_definite_rejection(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The message may have reached Meta before the response was lost."""
+    _patch_post_to_raise(monkeypatch, httpx.ReadTimeout("timed out", request=_REQUEST))
+
+    with pytest.raises(WhatsAppSendError) as exc_info:
+        _send_buttons()
+
+    assert not isinstance(exc_info.value, WhatsAppMessageRejectedError)
 
 
 def test_check_reply_buttons_accepts_every_limit_exactly() -> None:
