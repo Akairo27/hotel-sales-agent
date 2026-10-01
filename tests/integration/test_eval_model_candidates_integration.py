@@ -556,6 +556,33 @@ def test_a_clear_yes_passes_the_seeded_quote_on_and_restates_it(
     assert requests == (1,)
 
 
+def test_a_confirmation_written_without_the_tool_fails_and_is_blocked(
+    db_conn: psycopg.Connection[Any],
+) -> None:
+    """Eval run 36819478043's failure mode: the model writes the approved
+    confirmation without calling request_booking_follow_up. Nothing was
+    passed on, and the real guard blocks the claim (owner decision
+    2026-10-01)."""
+    transport = _ScriptedTransport([_restate_what_was_passed_on_from_history])
+
+    result = _run(db_conn, _scenario("booking_yes_gulf"), transport)
+
+    assert result.booking_ok is False
+    assert result.guard_allowed is False
+    assert not result.passed
+
+
+def _restate_what_was_passed_on_from_history(_turns: list[Turn]) -> ModelTurn:
+    return ModelTurn(
+        text=(
+            "أبشر، بلّغت زميلي بطلبك: Test Hotel، غرفة Standard، من 5 إلى 7 "
+            "أكتوبر، الإجمالي 900.00 ريال. يتواصل معك قريباً إن شاء الله "
+            "لتأكيد الحجز."
+        ),
+        tool_calls=(),
+    )
+
+
 def test_the_seeded_quote_is_as_old_as_the_scenario_says(
     db_conn: psycopg.Connection[Any],
 ) -> None:

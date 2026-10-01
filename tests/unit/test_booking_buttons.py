@@ -14,7 +14,6 @@ from services.agent.booking_buttons import (
     BARE_YES_WORDS,
     BookingOfferButtons,
     ParsedButtonId,
-    _normalized,
     booking_offer_buttons,
     button_id,
     buttons_for_reply,
@@ -31,6 +30,7 @@ from services.agent.fixed_texts import (
     Language,
 )
 from services.agent.llm.prompt import render_system_instruction
+from services.agent.text_matching import normalize_for_matching
 from services.agent.whatsapp_send import (
     REPLY_BUTTONS_BODY_MAX_CHARS,
     ReplyButton,
@@ -198,7 +198,7 @@ def test_the_guard_sees_the_body_then_every_title() -> None:
 
 
 def test_every_bare_yes_word_is_listed_in_its_normalized_form() -> None:
-    assert all(_normalized(word) == word for word in BARE_YES_WORDS)
+    assert all(normalize_for_matching(word) == word for word in BARE_YES_WORDS)
 
 
 @pytest.mark.parametrize("word", sorted(BARE_YES_WORDS))

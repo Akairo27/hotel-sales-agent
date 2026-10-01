@@ -140,27 +140,12 @@ _INDONESIAN_EXAMPLE_QUOTE_REPLY = (
     "Mau saya teruskan ke rekan saya untuk konfirmasi pemesanan?"
 )
 
-# After request_booking_follow_up (owner decision 2026-09-30): restate
-# exactly the stay the tool returns, and ask naturally when a yes is
-# unclear -- never ask for a specific phrase.
-_ARABIC_EXAMPLE_BOOKING_PASSED_ON = (
-    "أبشر، بلّغت زميلي بطلبك: [اسم الفندق]، غرفة [نوع الغرفة]، من "
-    "[تاريخ الوصول] إلى [تاريخ المغادرة]، الإجمالي [السعر الإجمالي]. "
-    "يتواصل معك قريباً إن شاء الله لتأكيد الحجز."
-)
-
-_ENGLISH_EXAMPLE_BOOKING_PASSED_ON = (
-    "Done — I've passed your request to a colleague: [hotel], [room type] "
-    "room, [check-in] to [check-out], total [total]. They'll contact you "
-    "shortly to confirm the booking."
-)
-
-_INDONESIAN_EXAMPLE_BOOKING_PASSED_ON = (
-    "Baik, permintaan Anda sudah saya teruskan ke rekan saya: [hotel], kamar "
-    "[tipe kamar], [check-in] sampai [check-out], total [total]. Rekan saya "
-    "akan segera menghubungi Anda untuk konfirmasi pemesanan."
-)
-
+# An unclear yes gets one natural question -- never a demand for a specific
+# phrase (owner decision 2026-09-30). The confirmation after a booking is
+# passed on is never the model's to write (owner decision 2026-10-01): code
+# sends it (services/agent/booking_confirmation.py), and the output guard
+# blocks any other booking claim (services/agent/output_guard/
+# booking_claims.py).
 _ARABIC_EXAMPLE_UNCLEAR_YES = "يعني تحب أبلّغ زميلي يؤكّد لك الحجز؟"
 
 # Short confirmations that count as yes (owner's list, 2026-09-30): most
@@ -202,7 +187,6 @@ CUSTOMER_FACING_ARABIC_EXAMPLES: tuple[str, ...] = (
     _ARABIC_EXAMPLE_CONFIRM_YEAR,
     _ARABIC_EXAMPLE_CONFIRM_HOTEL,
     _ARABIC_EXAMPLE_QUOTE_REPLY,
-    _ARABIC_EXAMPLE_BOOKING_PASSED_ON,
     _ARABIC_EXAMPLE_UNCLEAR_YES,
 )
 
@@ -418,10 +402,13 @@ PROMPT_RULES: tuple[PromptRule, ...] = (
             "payment, or offer any discount. When a customer who has been "
             "given a price clearly says yes to your offer to pass it to a "
             "colleague, call request_booking_follow_up (it takes no "
-            "arguments), then restate exactly the stay it returns — hotel, "
-            "room type, dates, rooms and total — and say a colleague will "
-            "contact them to confirm the booking; never say the booking is "
-            "confirmed. A short confirmation counts as yes in any dialect "
+            "arguments). When it succeeds, the system itself sends the "
+            "customer a fixed confirmation of the stay, and nothing you "
+            "write in that turn is sent. Never write a booking confirmation "
+            "yourself, whether or not you called the tool: never say that "
+            "you have passed a request or a booking on to a colleague, or "
+            "that a booking is done or confirmed. A short confirmation "
+            "counts as yes in any dialect "
             "or language, for example: "
             + ", ".join(BOOKING_YES_WORDS)
             + ". Never ask the customer to type a specific phrase. If the "
@@ -433,22 +420,16 @@ PROMPT_RULES: tuple[PromptRule, ...] = (
             + '" If the tool says there is no valid price, give a fresh '
             "price with get_quote first. If a customer asks to pay or to "
             "negotiate the price, tell them a colleague will follow up with "
-            "them for that. After passing a booking on, reply in the style "
-            'of these examples. Arabic: "'
-            + _ARABIC_EXAMPLE_BOOKING_PASSED_ON
-            + '" English: "'
-            + _ENGLISH_EXAMPLE_BOOKING_PASSED_ON
-            + '" Indonesian: "'
-            + _INDONESIAN_EXAMPLE_BOOKING_PASSED_ON
-            + '"'
+            "them for that."
         ),
         arabic=(
             "لا تقدر تنشئ حجزاً مؤقتاً ولا تؤكد حجزاً ولا تستلم دفعة ولا "
             "تمنح أي تنزيل. إذا وافق العميل الذي أعطيته سعراً بوضوح على "
             "عرضك بتحويله لزميل، فاستدعِ request_booking_follow_up (لا تأخذ "
-            "أي مدخلات)، ثم أعد ذكر الإقامة التي تعيدها كما هي — الفندق "
-            "ونوع الغرفة والتواريخ وعدد الغرف والإجمالي — وقل إن أحد "
-            "الزملاء سيتواصل معه لتأكيد الحجز؛ ولا تقل أبداً إن الحجز تأكد. "
+            "أي مدخلات). وإذا نجحت، يرسل النظام نفسه للعميل تأكيداً ثابتاً "
+            "للإقامة، ولا يُرسَل شيء مما تكتبه في تلك الدورة. لا تكتب تأكيد "
+            "الحجز بنفسك أبداً، سواء استدعيت الأداة أم لا: لا تقل أبداً إنك "
+            "حوّلت طلباً أو حجزاً لزميل، ولا إن الحجز تأكد أو تم. "
             "والموافقة القصيرة تُعدّ «نعم» بأي لهجة أو لغة، مثل: "
             + "، ".join(BOOKING_YES_WORDS)
             + ". لا تطلب أبداً من العميل كتابة عبارة معينة. وإذا كان الرد "
@@ -458,16 +439,9 @@ PROMPT_RULES: tuple[PromptRule, ...] = (
             + _ARABIC_EXAMPLE_UNCLEAR_YES
             + '" وإذا قالت الأداة إنه لا يوجد سعر صالح، فأعطِ سعراً جديداً '
             "عبر get_quote أولاً. وإذا طلب العميل الدفع أو التفاوض على "
-            "السعر، أخبره أن أحد الزملاء سيتابع معه بخصوص ذلك. وبعد تحويل "
-            'الحجز، رد على غرار هذه الأمثلة. بالعربية: "'
-            + _ARABIC_EXAMPLE_BOOKING_PASSED_ON
-            + '" بالإنجليزية: "'
-            + _ENGLISH_EXAMPLE_BOOKING_PASSED_ON
-            + '" بالإندونيسية: "'
-            + _INDONESIAN_EXAMPLE_BOOKING_PASSED_ON
-            + '"'
+            "السعر، أخبره أن أحد الزملاء سيتابع معه بخصوص ذلك."
         ),
-        english_digest="8d9b2a5fa68207d62a0aca20aeaeb76ec3314b5d2df864d9bcbc28d856479a50",
+        english_digest="0a1a449bcda44f85197a1de49b09fe0d5ea41f149d1fe2837f7ad25da54e3d42",
     ),
     PromptRule(
         key="unavailable_dates",

@@ -590,12 +590,51 @@ def test_the_button_scenarios_send_the_approved_titles() -> None:
     assert expired.requires_quote
 
 
-def test_a_question_tap_passes_only_with_a_question_and_no_booking_call() -> None:
+def test_a_question_tap_passes_when_the_reply_invites_the_question() -> None:
+    """Owner decision 2026-10-01: a question mark is not required."""
     scenario = _scenario("button_question_en")
-    question = "Of course, what would you like to know?"
-    assert booking_answer_handled(scenario, [], question)
-    assert not booking_answer_handled(scenario, [], "Sure.")
-    assert not booking_answer_handled(scenario, [_booking_call(False)], question)
+    assert booking_answer_handled(
+        scenario, [], "Of course, what would you like to know?"
+    )
+    assert booking_answer_handled(scenario, [], "Sure, go ahead and ask 😊")
+
+
+@pytest.mark.parametrize(
+    ("calls", "reply"),
+    [
+        pytest.param([_booking_call(False)], "Sure, go ahead.", id="booking-call"),
+        pytest.param(
+            [],
+            "أبشر، بلّغت زميلي بطلبك: Test Hotel. تفضل، إيش سؤالك؟",
+            id="booking-claim",
+        ),
+        pytest.param([], "  ", id="blank"),
+    ],
+)
+def test_a_question_tap_fails_on_a_booking_call_a_claim_or_silence(
+    calls: list[ToolCallRecord], reply: str
+) -> None:
+    assert not booking_answer_handled(_scenario("button_question_ar"), calls, reply)
+
+
+def test_a_requote_may_open_with_one_price_updated_line() -> None:
+    lead_in = "للعلم، السعر تحدّث قبل التأكيد:\n" + _COMPLETE_ARABIC_REPLY
+    assert quote_reply_complete(
+        _scenario("button_yes_expired_ar"), [_priced_quote()], lead_in
+    )
+    assert quote_reply_complete(
+        _scenario("requote_after_expiry_ar"), [_priced_quote()], lead_in
+    )
+    assert not quote_reply_complete(
+        _scenario("price_direct_ar"), [_priced_quote()], lead_in
+    )
+
+
+def test_only_the_requote_scenarios_allow_the_lead_in_line() -> None:
+    assert {s.key for s in SCENARIOS if s.allows_price_updated_lead_in} == {
+        "requote_after_expiry_ar",
+        "button_yes_expired_ar",
+    }
 
 
 def test_a_priced_reply_ending_with_the_offer_can_carry_the_buttons() -> None:

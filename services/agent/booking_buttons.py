@@ -16,7 +16,6 @@ services/agent/booking_yes.py checks it against the database.
 from __future__ import annotations
 
 import re
-import unicodedata
 from dataclasses import dataclass
 from typing import Literal
 
@@ -26,7 +25,7 @@ from services.agent.fixed_texts import (
     Language,
     detect_language,
 )
-from services.agent.llm.dispatch import ARABIC_NORMALIZE_FROM, ARABIC_NORMALIZE_TO
+from services.agent.text_matching import normalize_for_matching
 from services.agent.whatsapp_send import REPLY_BUTTONS_BODY_MAX_CHARS, ReplyButton
 
 ButtonChoice = Literal["yes", "question"]
@@ -50,7 +49,7 @@ _OFFER_MARKERS: tuple[tuple[str, tuple[str, ...]], ...] = (
 )
 
 # The owner's list (2026-10-01), precision over recall: exactly one of
-# these, after _normalized, with nothing else. Every other reply -- a
+# these, after normalize_for_matching, with nothing else. Every other reply -- a
 # second word, a courtesy, a question mark, a digit, another emoji -- goes
 # to the model. Each entry is already in its normalized form.
 BARE_YES_WORDS = frozenset(
@@ -75,14 +74,6 @@ BARE_YES_WORDS = frozenset(
 # Thumbs up alone, in any skin tone, or with the emoji variation selector.
 _THUMBS_UP = re.compile("\U0001f44d(?:[\U0001f3fb-\U0001f3ff]|️)?")
 _TRAILING_PUNCTUATION = ".!"
-
-_TATWEEL = chr(0x0640)  # ARABIC TATWEEL
-_KEPT_LETTER_COUNT = len(ARABIC_NORMALIZE_TO)
-_ARABIC_LETTER_MAPPING = str.maketrans(
-    ARABIC_NORMALIZE_FROM[:_KEPT_LETTER_COUNT],
-    ARABIC_NORMALIZE_TO,
-    ARABIC_NORMALIZE_FROM[_KEPT_LETTER_COUNT:] + _TATWEEL,
-)
 
 
 @dataclass(frozen=True)
@@ -155,7 +146,7 @@ def ends_with_booking_offer(text: str) -> bool:
     lines = [line.strip() for line in text.splitlines() if line.strip()]
     if not lines:
         return False
-    last_line = _normalized(lines[-1])
+    last_line = normalize_for_matching(lines[-1])
     if not last_line.endswith(_OFFER_QUESTION_MARKS):
         return False
     return any(
@@ -189,14 +180,6 @@ def text_with_button_titles(body: str, offer: BookingOfferButtons | None) -> str
 
 def is_bare_decisive_yes(text: str) -> bool:
     """Whether a typed reply is nothing but a decisive yes: one of
-    BARE_YES_WORDS, or a thumbs up, after _normalized."""
-    normalized = _normalized(text).rstrip(_TRAILING_PUNCTUATION)
+    BARE_YES_WORDS, or a thumbs up, after normalize_for_matching."""
+    normalized = normalize_for_matching(text).rstrip(_TRAILING_PUNCTUATION)
     return normalized in BARE_YES_WORDS or _THUMBS_UP.fullmatch(normalized) is not None
-
-
-def _normalized(text: str) -> str:
-    """NFKC, lower case, and Arabic spelling variants collapsed: tatweel
-    and diacritics removed, alef forms unified, taa marbuta and alef
-    maksura mapped as search_hotels maps them. Trimmed."""
-    folded = unicodedata.normalize("NFKC", text).lower()
-    return folded.translate(_ARABIC_LETTER_MAPPING).strip()

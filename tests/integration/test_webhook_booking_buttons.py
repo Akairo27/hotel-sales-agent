@@ -702,3 +702,48 @@ def test_a_typed_yes_with_more_words_goes_to_the_model(
     assert len(harness.transport.turns_seen) == 1
     assert harness.sender.sends == [("text", "Happy to help.", ())]
     assert _escalations(db_conn) == []
+
+
+def test_a_booking_the_model_passes_on_is_confirmed_with_the_fixed_text(
+    harness: _Harness,
+    db_conn: psycopg.Connection[Any],
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Owner decision 2026-10-01: after request_booking_follow_up the
+    customer gets the code-rendered confirmation, never the model's words,
+    in the language of the offer they answered."""
+    _, quote_id = _offered_stay(db_conn)
+    harness.transport.script = [
+        _tool_response("request_booking_follow_up", {}),
+        _text_response("All done, my friend!"),
+    ]
+    caplog.set_level(logging.INFO, logger="services.agent.webhook")
+
+    _deliver(harness, _typed("wamid.YES", "ok thanks"))
+
+    assert len(harness.transport.turns_seen) == 2
+    assert harness.sender.sends == [("text", _confirmation(quote_id), ())]
+    assert "All done, my friend!" not in _bodies(db_conn, "outbound")
+    assert _escalations(db_conn) == [("booking_requested", {}, quote_id)]
+    (confirmed,) = _events(caplog, "booking_request_confirmed_in_code")
+    assert confirmed["quote_id"] == quote_id
+    (finished,) = _events(caplog, "reply_turn_finished")
+    assert finished["status"] == "processed"
+
+
+def test_a_confirmation_the_model_writes_without_the_tool_is_blocked(
+    harness: _Harness, db_conn: psycopg.Connection[Any]
+) -> None:
+    """Eval run 36819478043's failure: the price is right, but nothing was
+    passed on. The customer gets the fallback and staff a real
+    escalation; no booking request is opened."""
+    _, quote_id = _offered_stay(db_conn)
+    harness.transport.script = [_text_response(_confirmation(quote_id))]
+
+    _deliver(harness, _typed("wamid.YES", "ok thanks"))
+
+    assert harness.sender.sends == [("text", FALLBACK.english, ())]
+    ((reason, notes, escalation_quote_id),) = _escalations(db_conn)
+    assert reason == "output_guard_violation_booking_claim"
+    assert notes["booking_claims"] == ["passed your request"]
+    assert escalation_quote_id is None

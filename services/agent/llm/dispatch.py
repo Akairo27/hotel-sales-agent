@@ -236,8 +236,8 @@ ARABIC_NORMALIZE_FROM = _ALEF_VARIANTS + _TAA_MARBUTA + _ALEF_MAKSURA + _TASHKEE
 # Shorter than ARABIC_NORMALIZE_FROM on purpose: translate() deletes any
 # trailing `from` characters with no corresponding `to` character, which
 # is exactly what _TASHKEEL above needs (removed, not replaced). Public
-# because services/agent/booking_buttons.py applies the same mapping in
-# Python to a customer's typed yes.
+# because services/agent/text_matching.py applies the same mapping in
+# Python (a customer's typed yes, the output guard's booking claims).
 ARABIC_NORMALIZE_TO = (_BARE_ALEF * len(_ALEF_VARIANTS)) + _HAA + _YAA
 
 

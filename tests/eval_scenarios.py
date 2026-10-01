@@ -17,6 +17,7 @@ from lib.money import format_halalas_as_arabic_riyal, format_halalas_as_sar
 from services.agent.booking_buttons import buttons_for_reply
 from services.agent.fixed_texts import BOOKING_QUESTION_BUTTON, BOOKING_YES_BUTTON
 from services.agent.llm.conversation import ToolCallRecord
+from services.agent.output_guard.booking_claims import find_booking_claims
 from services.agent.whatsapp_send import to_whatsapp_formatting
 
 # 09:00 UTC is noon in Asia/Riyadh: the same calendar day in both zones, so
@@ -59,9 +60,12 @@ class Scenario:
     contain (a system-prompt leak). expects_clarification means no hotel
     was named: the model must ask rather than guess, so any
     check_availability or get_quote call fails it. expects_question_prompt
-    means the customer tapped "I have a question": the reply must ask what
-    it is, with no booking tool call. Every scenario is also judged by the
-    real output guard, whatever these say.
+    means the customer tapped "I have a question": the reply must invite
+    the question, with no booking tool call and no booking claim.
+    allows_price_updated_lead_in lets a re-quote after an expired price
+    open with one "the price has been updated" line, so its quote reply may
+    be one line longer (owner decision 2026-10-01). Every scenario is also
+    judged by the real output guard, whatever these say.
     """
 
     key: str
@@ -84,6 +88,7 @@ class Scenario:
     expects_yes_no_question: bool = False
     expects_hotel_confirmation: bool = False
     expects_question_prompt: bool = False
+    allows_price_updated_lead_in: bool = False
 
 
 _OCTOBER_5_TO_7 = (date(2026, 10, 5), date(2026, 10, 7))
@@ -315,6 +320,7 @@ SCENARIOS: tuple[Scenario, ...] = (
         expected_stay=_OCTOBER_5_TO_7,
         requires_quote=True,
         language="ar",
+        allows_price_updated_lead_in=True,
     ),
     # Within the window a clarifying question may restate the price.
     Scenario(
@@ -378,6 +384,7 @@ SCENARIOS: tuple[Scenario, ...] = (
         expected_stay=_OCTOBER_5_TO_7,
         requires_quote=True,
         language="ar",
+        allows_price_updated_lead_in=True,
     ),
 )
 
@@ -495,6 +502,8 @@ def asked_instead_of_guessing(
 # prompt.py's quote_reply: at most four lines, ending in a question that
 # moves toward booking, never a general "anything else?".
 MAX_QUOTE_REPLY_LINES = 4
+# A re-quote after an expired price may add one "price updated" line.
+MAX_REQUOTE_REPLY_LINES = 5
 GENERIC_CLOSERS = ("anything else", "شي ثاني", "شيء آخر", "ada lagi", "ada yang lain")
 # prompt.py's search_before_resolving_a_hotel confirmation, per language.
 CONFIRMATION_MARKERS: dict[ReplyLanguage, str] = {
@@ -550,8 +559,9 @@ def quote_reply_complete(
 ) -> bool | None:
     """For a priced scenario, whether the reply copies every value a
     complete quote reply needs from the last priced get_quote result, in
-    the scenario's language, stays within four lines, and ends with a
-    question that is not a generic "anything else?". None for every other
+    the scenario's language, stays within four lines (five for a re-quote
+    that may open with a "price updated" line), and ends with a question
+    that is not a generic "anything else?". None for every other
     scenario."""
     if not scenario.requires_quote:
         return None
@@ -559,13 +569,18 @@ def quote_reply_complete(
     if quote is None:
         return False
     suffix = "_ar" if scenario.language == "ar" else ""
+    max_lines = (
+        MAX_REQUOTE_REPLY_LINES
+        if scenario.allows_price_updated_lead_in
+        else MAX_QUOTE_REPLY_LINES
+    )
     lines = [line for line in reply_text.strip().splitlines() if line.strip()]
     return (
         all(value in reply_text for value in _required_quote_values(quote, suffix))
         and mentions_night_count(reply_text, quote["night_count"], scenario.language)
         and reply_text.rstrip().endswith(("?", "؟"))
         and not any(closer in reply_text.casefold() for closer in GENERIC_CLOSERS)
-        and len(lines) <= MAX_QUOTE_REPLY_LINES
+        and len(lines) <= max_lines
     )
 
 
@@ -613,6 +628,15 @@ _BOOKING_TOOL = "request_booking_follow_up"
 _PHRASE_DEMANDS = ("اكتب", "please type", "ketik")
 
 
+def booking_passed_on(tool_calls: Sequence[ToolCallRecord]) -> bool:
+    """Whether a request_booking_follow_up call passed a booking on in this
+    turn -- what production tells the output guard."""
+    return any(
+        call.name == _BOOKING_TOOL and call.result.get("requested") is True
+        for call in tool_calls
+    )
+
+
 def _demands_a_phrase(reply_text: str) -> bool:
     lowered = reply_text.casefold()
     return any(demand in lowered for demand in _PHRASE_DEMANDS)
@@ -639,16 +663,16 @@ def booking_answer_handled(
     """For a clear yes: request_booking_follow_up passed the booking on and
     the reply demands no phrase. For an unclear answer: no booking was
     passed on, and the reply is one question demanding no phrase. For a
-    tapped "I have a question": no booking tool call at all, and the reply
-    is a question. None for every other scenario."""
+    tapped "I have a question": a reply inviting the question (a question
+    mark is not required), with no booking tool call and no booking claim
+    (output_guard.booking_claims). None for every other scenario."""
     if scenario.expects_question_prompt:
-        return not any(
-            call.name == _BOOKING_TOOL for call in tool_calls
-        ) and reply_text.rstrip().endswith(("?", "؟"))
-    passed_on = any(
-        call.name == _BOOKING_TOOL and call.result.get("requested") is True
-        for call in tool_calls
-    )
+        return (
+            bool(reply_text.strip())
+            and not any(call.name == _BOOKING_TOOL for call in tool_calls)
+            and not find_booking_claims(reply_text)
+        )
+    passed_on = booking_passed_on(tool_calls)
     if scenario.expects_booking_request:
         return passed_on and not _demands_a_phrase(reply_text)
     if scenario.expects_yes_no_question:

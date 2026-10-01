@@ -28,6 +28,7 @@ from services.agent.llm.config import DEFAULT_QUOTE_VALIDITY_MINUTES
 from services.agent.llm.dispatch import dispatch_get_quote
 from services.agent.llm.errors import ConversationNotFoundError
 from services.agent.output_guard.enforcement import (
+    REASON_BOOKING_CLAIM,
     REASON_FOREIGN_CURRENCY,
     REASON_MISMATCH,
     REASON_MISSING_CURRENCY,
@@ -1033,3 +1034,117 @@ def test_the_window_passed_in_is_the_one_applied(
     )
 
     assert 135_000 in allowed.amounts_halalas
+
+
+# The approved English confirmation for a 1,350.00 SAR stay -- a booking
+# claim (services/agent/output_guard/booking_claims.py).
+_CONFIRMATION = (
+    "Done — I've passed your request to a colleague: Test Hotel, Standard "
+    "room, 5 October to 7 October, total 1,350.00 SAR. They'll contact you "
+    "shortly to confirm the booking."
+)
+
+
+def _conversation_with_a_quote(db_conn: psycopg.Connection[Any]) -> int:
+    hotel_id, room_type_id = seed_hotel_and_room_type(db_conn)
+    conversation_id = seed_conversation(db_conn, customer_phone="+966533333333")
+    seed_quote(
+        db_conn,
+        hotel_id,
+        room_type_id,
+        conversation_id=conversation_id,
+        ask_price_total=135_000,
+        min_allowed_total=90_000,
+    )
+    return conversation_id
+
+
+def test_a_booking_claim_without_a_request_is_blocked_and_escalated(
+    db_conn: psycopg.Connection[Any],
+) -> None:
+    """Owner decision 2026-10-01: the price is right, but nothing was passed
+    on in this turn, so the customer must not be told it was."""
+    conversation_id = _conversation_with_a_quote(db_conn)
+
+    verdict = enforce_outbound_text(
+        db_conn,
+        conversation_id=conversation_id,
+        text=_CONFIRMATION,
+        quote_validity=_QUOTE_VALIDITY,
+    )
+
+    assert verdict.allowed is False
+    assert verdict.booking_claims == ("passed your request",)
+    row = db_conn.execute(
+        "SELECT id, reason, notes FROM escalations WHERE conversation_id = %s",
+        (conversation_id,),
+    ).fetchone()
+    assert row is not None
+    escalation_id, reason, notes = row
+    assert escalation_id == verdict.escalation_id
+    assert reason == REASON_BOOKING_CLAIM
+    parsed = json.loads(notes)
+    assert parsed["booking_claims"] == ["passed your request"]
+    assert parsed["reasons"] == ["matched"]
+
+
+def test_the_same_claim_passes_when_the_booking_was_passed_on_this_turn(
+    db_conn: psycopg.Connection[Any],
+) -> None:
+    conversation_id = _conversation_with_a_quote(db_conn)
+
+    verdict = enforce_outbound_text(
+        db_conn,
+        conversation_id=conversation_id,
+        text=_CONFIRMATION,
+        quote_validity=_QUOTE_VALIDITY,
+        booking_passed_on=True,
+    )
+
+    assert verdict.allowed is True
+    assert verdict.booking_claims == ()
+    count = db_conn.execute("SELECT count(*) FROM escalations").fetchone()
+    assert count == (0,)
+
+
+def test_a_passed_on_booking_does_not_excuse_a_wrong_amount(
+    db_conn: psycopg.Connection[Any],
+) -> None:
+    conversation_id = _conversation_with_a_quote(db_conn)
+
+    verdict = enforce_outbound_text(
+        db_conn,
+        conversation_id=conversation_id,
+        text=_CONFIRMATION.replace("1,350.00 SAR", "999.00 SAR"),
+        quote_validity=_QUOTE_VALIDITY,
+        booking_passed_on=True,
+    )
+
+    assert verdict.allowed is False
+    reason = db_conn.execute(
+        "SELECT reason FROM escalations WHERE id = %s", (verdict.escalation_id,)
+    ).fetchone()
+    assert reason == (REASON_MISMATCH,)
+
+
+def test_a_booking_claim_outranks_a_wrong_amount_as_the_reason(
+    db_conn: psycopg.Connection[Any],
+) -> None:
+    """The customer would expect a call: that is what staff must see first.
+    The amount findings stay in the notes."""
+    conversation_id = _conversation_with_a_quote(db_conn)
+
+    verdict = enforce_outbound_text(
+        db_conn,
+        conversation_id=conversation_id,
+        text=_CONFIRMATION.replace("1,350.00 SAR", "999.00 SAR"),
+        quote_validity=_QUOTE_VALIDITY,
+    )
+
+    row = db_conn.execute(
+        "SELECT reason, notes FROM escalations WHERE id = %s",
+        (verdict.escalation_id,),
+    ).fetchone()
+    assert row is not None
+    assert row[0] == REASON_BOOKING_CLAIM
+    assert json.loads(row[1])["reasons"] == ["not_in_quotes"]

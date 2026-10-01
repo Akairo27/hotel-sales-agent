@@ -89,6 +89,7 @@ from tests.eval_scenarios import (
     ScenarioResult,
     asked_instead_of_guessing,
     booking_answer_handled,
+    booking_passed_on,
     buttons_attachable,
     hotel_confirmed_before_pricing,
     hotel_name_retried_and_confirmed,
@@ -482,6 +483,7 @@ async def run_scenario(
         conversation_id=conversation_id,
         text=reply.text,
         quote_validity=settings.quote_validity,
+        booking_passed_on=booking_passed_on(reply.tool_calls),
     )
     return ScenarioResult(
         scenario_key=scenario.key,

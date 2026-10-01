@@ -25,6 +25,7 @@ from typing import Any
 import psycopg
 
 from services.agent.llm.errors import ConversationNotFoundError
+from services.agent.output_guard.booking_claims import find_booking_claims
 from services.agent.output_guard.decision import (
     AMOUNT_BELOW_FLOOR,
     AMOUNT_FOREIGN_CURRENCY,
@@ -59,6 +60,10 @@ REASON_MISMATCH = "output_guard_violation_mismatch"
 REASON_FOREIGN_CURRENCY = "output_guard_violation_foreign_currency"
 REASON_MISSING_CURRENCY = "output_guard_violation_missing_currency"
 REASON_PERCENTAGE_STATED = "output_guard_violation_percentage_stated"
+# A reply claiming a booking was passed on, confirmed or made, with no
+# successful request_booking_follow_up in its turn (owner decision
+# 2026-10-01): the customer would be promised a call nobody owes them.
+REASON_BOOKING_CLAIM = "output_guard_violation_booking_claim"
 
 _MISMATCH_REASONS = frozenset({AMOUNT_NOT_IN_QUOTES, AMOUNT_BELOW_FLOOR})
 
@@ -89,15 +94,24 @@ class GuardVerdict:
     findings: tuple[AmountFinding, ...]
     quote_ids: tuple[int, ...]
     escalation_id: int | None
+    # The booking-claim phrases that blocked the reply (booking_claims.py),
+    # in their normalized form; empty when none did.
+    booking_claims: tuple[str, ...] = ()
 
 
-def _escalation_reason(findings: tuple[AmountFinding, ...]) -> str:
+def _escalation_reason(
+    findings: tuple[AmountFinding, ...], booking_claims: tuple[str, ...]
+) -> str:
     """Picks the single escalations.reason value for a blocked reply.
 
     Precedence when one reply triggers more than one kind of finding,
     most urgent first — the full per-amount detail survives regardless in
-    notes["reasons"], so this only decides what a human sees first:
+    notes["reasons"] and the claims in notes["booking_claims"], so this
+    only decides what a human sees first:
 
+    0. REASON_BOOKING_CLAIM: the customer was about to be told a booking
+       was passed on or confirmed, so they expect a call -- the one block
+       a human must act on whatever else the reply got wrong.
     1. REASON_MISMATCH (not_in_quotes / below_floor): a concrete wrong
        amount is the most urgent read regardless of what else is wrong
        with the same reply.
@@ -111,6 +125,8 @@ def _escalation_reason(findings: tuple[AmountFinding, ...]) -> str:
        gap rather than a pricing one.
     5. REASON_UNPARSEABLE: the fallback when nothing more specific fired.
     """
+    if booking_claims:
+        return REASON_BOOKING_CLAIM
     if any(finding.reason in _MISMATCH_REASONS for finding in findings):
         return REASON_MISMATCH
     if any(finding.reason == AMOUNT_PERCENTAGE_STATED for finding in findings):
@@ -166,6 +182,7 @@ def _open_escalation(
     reason: str,
     quote_ids: tuple[int, ...],
     findings: tuple[AmountFinding, ...],
+    booking_claims: tuple[str, ...],
     reply_text: str,
 ) -> int:
     """Inserts one escalations row for a blocked reply — the output-guard-
@@ -181,6 +198,7 @@ def _open_escalation(
             finding.halalas for finding in findings if finding.halalas is not None
         ],
         "reasons": [finding.reason for finding in findings],
+        "booking_claims": list(booking_claims),
         "blocked_reply_text": reply_text,
         "retention": _RETENTION_NOTE,
     }
@@ -195,12 +213,21 @@ def enforce_outbound_text(
     conversation_id: int,
     text: str,
     quote_validity: timedelta,
+    booking_passed_on: bool = False,
 ) -> GuardVerdict:
     """Checks text against conversation_id's still-valid quotes (made less
-    than quote_validity ago -- quotes.load_allowed_amounts) and, if any
-    stated amount does not match or falls below its floor, opens an
-    escalation and logs the block before returning. A price restated from
-    an expired quote is blocked like any other unmatched amount.
+    than quote_validity ago -- quotes.load_allowed_amounts) and for a
+    booking claim (booking_claims.find_booking_claims), and, if any stated
+    amount does not match or falls below its floor, or the text claims a
+    booking was passed on, confirmed or made while booking_passed_on is
+    False, opens an escalation and logs the block before returning. A price
+    restated from an expired quote is blocked like any other unmatched
+    amount.
+
+    booking_passed_on is True only for the confirmation code renders after
+    a request_booking_follow_up that succeeded in the same turn. Its
+    default is False: every other text -- a model reply, a fixed text --
+    may never make such a claim.
 
     Raises:
         ConversationNotFoundError: conversation_id does not exist. Only
@@ -211,8 +238,9 @@ def enforce_outbound_text(
     """
     allowed = load_allowed_amounts(conn, conversation_id, quote_validity=quote_validity)
     findings = evaluate_amounts(text, allowed)
+    booking_claims = () if booking_passed_on else find_booking_claims(text)
 
-    if amounts_are_allowed(findings):
+    if amounts_are_allowed(findings) and not booking_claims:
         if findings:
             logger.info(
                 json.dumps(
@@ -231,13 +259,14 @@ def enforce_outbound_text(
             escalation_id=None,
         )
 
-    reason = _escalation_reason(findings)
+    reason = _escalation_reason(findings, booking_claims)
     escalation_id = _open_escalation(
         conn,
         conversation_id=conversation_id,
         reason=reason,
         quote_ids=allowed.quote_ids,
         findings=findings,
+        booking_claims=booking_claims,
         reply_text=text,
     )
     logger.error(
@@ -251,6 +280,7 @@ def enforce_outbound_text(
                     1 for finding in findings if finding.reason != AMOUNT_MATCHED
                 ),
                 "reasons": [finding.reason for finding in findings],
+                "booking_claims": list(booking_claims),
             }
         )
     )
@@ -259,4 +289,5 @@ def enforce_outbound_text(
         findings=findings,
         quote_ids=allowed.quote_ids,
         escalation_id=escalation_id,
+        booking_claims=booking_claims,
     )
