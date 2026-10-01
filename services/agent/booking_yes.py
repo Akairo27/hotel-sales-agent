@@ -24,6 +24,10 @@ this one. Anything else goes to the model.
 
 None means "the model answers": a question tap, any other text, or a check
 that sends the turn there.
+
+When the model itself passes a booking on (request_booking_follow_up), the
+customer still gets the fixed code-rendered confirmation, never the
+model's words (owner decision 2026-10-01): confirmation_for_passed_on_quote.
 """
 
 from __future__ import annotations
@@ -37,12 +41,14 @@ from typing import Any, Literal
 import psycopg
 
 from services.agent.booking_buttons import (
+    DEFAULT_OFFER_LANGUAGE,
     ButtonTap,
     ends_with_booking_offer,
     is_bare_decisive_yes,
     offer_language,
     parse_button_id,
 )
+from services.agent.booking_confirmation import render_booking_passed_on
 from services.agent.fixed_texts import Language
 from services.agent.llm.booking_follow_up import QuoteSummary, load_quote_summary
 from services.agent.llm.session import load_session_start
@@ -89,6 +95,14 @@ _LATEST_QUOTE_SQL = """
     WHERE q.conversation_id = %(conversation_id)s
       AND q.created_at >= COALESCE(%(session_start)s, '-infinity'::timestamptz)
     ORDER BY q.created_at DESC, q.id DESC
+    LIMIT 1
+"""
+
+_LATEST_OUTBOUND_SQL = """
+    SELECT body
+    FROM messages
+    WHERE conversation_id = %(conversation_id)s AND direction = 'outbound'
+    ORDER BY created_at DESC, id DESC
     LIMIT 1
 """
 
@@ -142,6 +156,12 @@ class ButtonMismatch:
 BookingDecision = PassOn | OfferNewerPrice | ButtonMismatch
 
 
+class PassedOnQuoteNotFoundError(Exception):
+    """Raised when request_booking_follow_up reported a quote passed on
+    that cannot be read back for this conversation -- never expected; the
+    turn then ends in the webhook's failure funnel."""
+
+
 @dataclass(frozen=True)
 class _LatestQuote:
     quote_id: int
@@ -178,6 +198,33 @@ def decide_booking_yes(
         conversation_id=conversation_id,
         quote_validity=quote_validity,
     )
+
+
+def confirmation_for_passed_on_quote(
+    conn: psycopg.Connection[Any], *, conversation_id: int, quote_id: int
+) -> str:
+    """The fixed confirmation for a quote request_booking_follow_up passed
+    on in this turn, in the language of our latest message -- the offer the
+    customer answered, as for a booking yes code answers -- or
+    DEFAULT_OFFER_LANGUAGE when there is none.
+
+    Raises:
+        PassedOnQuoteNotFoundError: quote_id is not a quote of
+            conversation_id.
+        psycopg.Error: a read failed.
+    """
+    summary = load_quote_summary(
+        conn, conversation_id=conversation_id, quote_id=quote_id
+    )
+    if summary is None:
+        raise PassedOnQuoteNotFoundError(
+            f"quote {quote_id} is not a quote of conversation {conversation_id}"
+        )
+    row = conn.execute(
+        _LATEST_OUTBOUND_SQL, {"conversation_id": conversation_id}
+    ).fetchone()
+    language = DEFAULT_OFFER_LANGUAGE if row is None else offer_language(str(row[0]))
+    return render_booking_passed_on(summary, language)
 
 
 def _decide_tap(

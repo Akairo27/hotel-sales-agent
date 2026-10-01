@@ -27,6 +27,7 @@ from services.agent.llm.prompt import (
     render_system_instruction,
     sanitize_customer_name,
 )
+from services.agent.output_guard.booking_claims import find_booking_claims
 from services.agent.output_guard.extraction import extract_candidate_amounts
 from services.inventory.operations import StayAvailability
 
@@ -495,8 +496,8 @@ def test_quote_reply_names_every_field_a_complete_reply_copies() -> None:
     rule = _rule("quote_reply")
     for field in (
         "hotel_name",
-        "room_type_name",
-        "night_count",
+        "room_display",
+        "night_count_display",
         "total_price_display",
         "price_per_night_display",
         "lowest_night_price_display",
@@ -508,6 +509,28 @@ def test_quote_reply_names_every_field_a_complete_reply_copies() -> None:
     assert "at most four short lines" in rule.english
     assert "moves toward booking" in rule.english
     assert "never add a walking time" in rule.english
+
+
+def test_quote_reply_copies_the_room_and_night_count_as_rendered() -> None:
+    """Owner decision 2026-10-01 (live test: «2 ليلة», «غرفة جناح ملكي»):
+    code renders both in every reply language; the model copies them."""
+    rule = _rule("quote_reply")
+    assert "Copy room_display and night_count_display exactly as they are" in (
+        rule.english
+    )
+    assert "never write the number of nights yourself" in rule.english
+    assert "the fields ending in _indonesian" in rule.english
+    for suffix in ("", "_ar", "_indonesian"):
+        assert f"room_display{suffix}" in dispatch_module.QUOTE_RESULT_KEYS
+        assert f"night_count_display{suffix}" in dispatch_module.QUOTE_RESULT_KEYS
+    for example in (
+        prompt_module._ARABIC_EXAMPLE_QUOTE_REPLY,
+        prompt_module._ENGLISH_EXAMPLE_QUOTE_REPLY,
+        prompt_module._INDONESIAN_EXAMPLE_QUOTE_REPLY,
+    ):
+        assert "غرفة [" not in example
+        assert "] room" not in example
+        assert "kamar [" not in example
 
 
 def test_quote_reply_examples_are_short_and_end_with_a_question() -> None:
@@ -541,8 +564,6 @@ def test_no_booking_actions_takes_a_yes_in_any_dialect_and_never_a_phrase() -> N
     question."""
     rule = _rule("no_booking_actions")
     assert "request_booking_follow_up (it takes no arguments)" in rule.english
-    assert "restate exactly the stay it returns" in rule.english
-    assert "never say the booking is confirmed" in rule.english
     assert "Never ask the customer to type a specific phrase" in rule.english
     for word in prompt_module.BOOKING_YES_WORDS:
         assert word in rule.english
@@ -552,15 +573,21 @@ def test_no_booking_actions_takes_a_yes_in_any_dialect_and_never_a_phrase() -> N
     assert prompt_module._ARABIC_EXAMPLE_UNCLEAR_YES in rule.english
 
 
-def test_booking_passed_on_examples_restate_the_stay_and_its_total() -> None:
-    for example in (
-        prompt_module._ARABIC_EXAMPLE_BOOKING_PASSED_ON,
-        prompt_module._ENGLISH_EXAMPLE_BOOKING_PASSED_ON,
-        prompt_module._INDONESIAN_EXAMPLE_BOOKING_PASSED_ON,
-    ):
-        assert example in _rule("no_booking_actions").english
-    assert "[السعر الإجمالي]" in prompt_module._ARABIC_EXAMPLE_BOOKING_PASSED_ON
-    assert "أبشر" in prompt_module._ARABIC_EXAMPLE_BOOKING_PASSED_ON
+def test_the_model_never_writes_the_booking_confirmation() -> None:
+    """Owner decision 2026-10-01 (eval run 36819478043: the model wrote the
+    confirmation without calling the tool): code sends the confirmation,
+    and the rule says so."""
+    rule = _rule("no_booking_actions")
+    assert "the system itself sends the customer a fixed confirmation" in rule.english
+    assert "nothing you write in that turn is sent" in rule.english
+    assert "Never write a booking confirmation yourself" in rule.english
+    assert "whether or not you called the tool" in rule.english
+
+
+def test_the_prompt_shows_no_booking_claim_to_copy() -> None:
+    """No rule or example holds a phrase the output guard blocks as a
+    booking claim: an example would only teach the model to write one."""
+    assert find_booking_claims(_render(None)) == ()
 
 
 def test_search_rule_confirms_a_hotel_known_only_by_translation_or_context() -> None:

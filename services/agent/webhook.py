@@ -164,6 +164,7 @@ from services.agent.booking_yes import (
     CustomerMessage,
     OfferNewerPrice,
     PassOn,
+    confirmation_for_passed_on_quote,
     decide_booking_yes,
 )
 from services.agent.fixed_texts import (
@@ -175,7 +176,10 @@ from services.agent.fixed_texts import (
     customer_language,
     media_placeholder,
 )
-from services.agent.llm.booking_follow_up import pass_quote_on
+from services.agent.llm.booking_follow_up import (
+    REQUEST_BOOKING_FOLLOW_UP_TOOL,
+    pass_quote_on,
+)
 from services.agent.llm.caps import (
     MessageRateCapExceededError,
     check_message_rate_cap,
@@ -1369,6 +1373,15 @@ async def _process_turn(
         conn, conversation_id=conversation_id, tool_calls=outcome.tool_calls
     )
 
+    passed_on_quote_id = _passed_on_quote_id(outcome)
+    if passed_on_quote_id is not None:
+        return await _confirm_model_booking_request(
+            conn,
+            quote_id=passed_on_quote_id,
+            conversation_id=conversation_id,
+            customer_phone=customer_phone,
+            llm_settings=llm_settings,
+        )
     return await _deliver_reply(
         conn,
         conversation_id=conversation_id,
@@ -1378,6 +1391,56 @@ async def _process_turn(
         offer=buttons_for_reply(
             to_whatsapp_formatting(outcome.text), outcome.quote_ids
         ),
+    )
+
+
+def _passed_on_quote_id(outcome: AgentReply) -> int | None:
+    """The quote a request_booking_follow_up call passed on this turn (the
+    last, if there were several), or None when none succeeded."""
+    passed_on = [
+        int(call.result["quote_id"])
+        for call in outcome.tool_calls
+        if call.name == REQUEST_BOOKING_FOLLOW_UP_TOOL
+        and call.result.get("requested") is True
+    ]
+    return passed_on[-1] if passed_on else None
+
+
+async def _confirm_model_booking_request(
+    conn: psycopg.Connection[Any],
+    *,
+    quote_id: int,
+    conversation_id: int,
+    customer_phone: str,
+    llm_settings: LlmSettings,
+) -> str:
+    """Sends the fixed confirmation in place of the model's reply after the
+    model passed a booking on: the confirmation is never model-written
+    (owner decision 2026-10-01).
+
+    Raises:
+        PassedOnQuoteNotFoundError, psycopg.Error: see
+            booking_yes.confirmation_for_passed_on_quote -- the caller's
+            last-resort net escalates and sends the fallback.
+    """
+    logger.info(
+        json.dumps(
+            {
+                "event": "booking_request_confirmed_in_code",
+                "conversation_id": conversation_id,
+                "quote_id": quote_id,
+            }
+        )
+    )
+    return await _deliver_reply(
+        conn,
+        conversation_id=conversation_id,
+        customer_phone=customer_phone,
+        reply_text=confirmation_for_passed_on_quote(
+            conn, conversation_id=conversation_id, quote_id=quote_id
+        ),
+        quote_validity=llm_settings.quote_validity,
+        booking_passed_on=True,
     )
 
 
@@ -1521,6 +1584,7 @@ async def _pass_on_and_confirm(
         customer_phone=customer_phone,
         reply_text=render_booking_passed_on(decision.quote, decision.language),
         quote_validity=llm_settings.quote_validity,
+        booking_passed_on=True,
     )
 
 
@@ -1572,6 +1636,7 @@ def _check_reply_and_prepare_sender(
     conversation_id: int,
     text: str,
     quote_validity: timedelta,
+    booking_passed_on: bool,
 ) -> WhatsAppSender | GuardVerdict | Exception:
     """Runs the output guard on the reply, then builds the WhatsApp sender
     for an allowed one. Returns the sender (allowed), the blocking
@@ -1579,13 +1644,15 @@ def _check_reply_and_prepare_sender(
     or the exception if the guard or the send setup raised. Returned
     rather than raised for the same reason as
     _generate_reply_or_exception: the caller hands it to the funnel
-    outside this `except` block."""
+    outside this `except` block. booking_passed_on: see
+    enforce_outbound_text."""
     try:
         verdict = enforce_outbound_text(
             conn,
             conversation_id=conversation_id,
             text=text,
             quote_validity=quote_validity,
+            booking_passed_on=booking_passed_on,
         )
         if not verdict.allowed:
             return verdict
@@ -1612,6 +1679,7 @@ async def _send_reply(
     reply_text: str,
     quote_validity: timedelta,
     offer: BookingOfferButtons | None,
+    booking_passed_on: bool,
 ) -> _DeliveryFailure | None:
     """Sends a reply, with offer's buttons when given; returns None when it
     was delivered, otherwise why not: blank or over-length (not sendable at
@@ -1623,6 +1691,9 @@ async def _send_reply(
     Markdown-bold price ("**343.85 SAR**") must not be checked in a form
     the customer will never see. For the same reason the button titles are
     checked with the body (booking_buttons.text_with_button_titles).
+    booking_passed_on is True only for the code-rendered confirmation of a
+    booking passed on this turn: any other text claiming one is blocked
+    (output_guard.booking_claims).
     """
     formatted_text = to_whatsapp_formatting(reply_text)
     undeliverable_reason = _undeliverable_reply_reason(formatted_text)
@@ -1644,6 +1715,7 @@ async def _send_reply(
         conversation_id=conversation_id,
         text=text_with_button_titles(formatted_text, offer),
         quote_validity=quote_validity,
+        booking_passed_on=booking_passed_on,
     )
     if isinstance(prepared, Exception):
         logger.error(
@@ -1685,10 +1757,11 @@ async def _deliver_reply(
     reply_text: str,
     quote_validity: timedelta,
     offer: BookingOfferButtons | None = None,
+    booking_passed_on: bool = False,
 ) -> str:
     """Delivers a reply ("processed"), with offer's buttons when given, or
     hands the turn to _escalate_and_notify for whatever stopped it
-    (_send_reply). Never raises."""
+    (_send_reply). booking_passed_on: see _send_reply. Never raises."""
     failure = await _send_reply(
         conn,
         conversation_id=conversation_id,
@@ -1696,6 +1769,7 @@ async def _deliver_reply(
         reply_text=reply_text,
         quote_validity=quote_validity,
         offer=offer,
+        booking_passed_on=booking_passed_on,
     )
     if failure is None:
         return _STATUS_PROCESSED

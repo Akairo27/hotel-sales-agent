@@ -1012,8 +1012,9 @@ def test_receive_message_logs_a_blocked_fallback_if_it_ever_happens(
         conversation_id: int,
         text: str,
         quote_validity: timedelta,
+        booking_passed_on: bool = False,
     ) -> GuardVerdict:
-        del conversation_id, text, quote_validity
+        del conversation_id, text, quote_validity, booking_passed_on
         call_count["n"] += 1
         escalation_id = 111 if call_count["n"] == 1 else 222
         return GuardVerdict(
@@ -1061,8 +1062,9 @@ def test_receive_message_escalates_when_the_guard_check_itself_errors(
         conversation_id: int,
         text: str,
         quote_validity: timedelta,
+        booking_passed_on: bool = False,
     ) -> None:
-        del conversation_id, text, quote_validity
+        del conversation_id, text, quote_validity, booking_passed_on
         raise RuntimeError("simulated guard-check database error")
 
     monkeypatch.setattr(webhook_module, "enforce_outbound_text", _fake_enforce)
@@ -1521,8 +1523,9 @@ def test_receive_message_logs_a_blocked_turn_cap_fallback_if_it_ever_happens(
         conversation_id: int,
         text: str,
         quote_validity: timedelta,
+        booking_passed_on: bool = False,
     ) -> GuardVerdict:
-        del conversation_id, text, quote_validity
+        del conversation_id, text, quote_validity, booking_passed_on
         return GuardVerdict(allowed=False, findings=(), quote_ids=(), escalation_id=999)
 
     monkeypatch.setattr(webhook_module, "enforce_outbound_text", _fake_enforce)

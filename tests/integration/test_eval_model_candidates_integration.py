@@ -143,8 +143,8 @@ def _write_the_english_quote_reply(turns: list[Turn]) -> ModelTurn:
     quote = _last_quote(turns)
     return ModelTurn(
         text=(
-            f"{quote['hotel_name']}, {quote['room_type_name']} room, "
-            f"{quote['night_count']} nights, 5 to 7 October:\n"
+            f"{quote['hotel_name']}, {quote['room_display']}, "
+            f"{quote['night_count_display']}, 5 to 7 October:\n"
             f"Total *{quote['total_price_display']}* "
             f"({quote['price_per_night_display']} per night).\n"
             f"Only {quote['distance_to_haram_display']} from the Haram.\n"
@@ -158,8 +158,8 @@ def _write_the_arabic_quote_reply(turns: list[Turn]) -> ModelTurn:
     quote = _last_quote(turns)
     return ModelTurn(
         text=(
-            f"{quote['hotel_name']}، غرفة {quote['room_type_name']}، ليلتين "
-            "من 5 إلى 7 أكتوبر:\n"
+            f"{quote['hotel_name']}، {quote['room_display_ar']}، "
+            f"{quote['night_count_display_ar']} من 5 إلى 7 أكتوبر:\n"
             f"الإجمالي *{quote['total_price_display_ar']}* "
             f"({quote['price_per_night_display_ar']} لليلة).\n"
             f"يبعد {quote['distance_to_haram_display_ar']} عن الحرم.\n"
@@ -554,6 +554,33 @@ def test_a_clear_yes_passes_the_seeded_quote_on_and_restates_it(
         "AND quote_id IS NOT NULL"
     ).fetchone()
     assert requests == (1,)
+
+
+def test_a_confirmation_written_without_the_tool_fails_and_is_blocked(
+    db_conn: psycopg.Connection[Any],
+) -> None:
+    """Eval run 36819478043's failure mode: the model writes the approved
+    confirmation without calling request_booking_follow_up. Nothing was
+    passed on, and the real guard blocks the claim (owner decision
+    2026-10-01)."""
+    transport = _ScriptedTransport([_restate_what_was_passed_on_from_history])
+
+    result = _run(db_conn, _scenario("booking_yes_gulf"), transport)
+
+    assert result.booking_ok is False
+    assert result.guard_allowed is False
+    assert not result.passed
+
+
+def _restate_what_was_passed_on_from_history(_turns: list[Turn]) -> ModelTurn:
+    return ModelTurn(
+        text=(
+            "أبشر، بلّغت زميلي بطلبك: Test Hotel، غرفة Standard، من 5 إلى 7 "
+            "أكتوبر، الإجمالي 900.00 ريال. يتواصل معك قريباً إن شاء الله "
+            "لتأكيد الحجز."
+        ),
+        tool_calls=(),
+    )
 
 
 def test_the_seeded_quote_is_as_old_as_the_scenario_says(

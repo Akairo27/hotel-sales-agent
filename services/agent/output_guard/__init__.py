@@ -7,6 +7,7 @@ services/agent/llm/__init__.py's pattern.
 
 from __future__ import annotations
 
+from services.agent.output_guard.booking_claims import find_booking_claims
 from services.agent.output_guard.decision import (
     AMOUNT_BELOW_FLOOR,
     AMOUNT_MATCHED,
@@ -18,6 +19,7 @@ from services.agent.output_guard.decision import (
     evaluate_amounts,
 )
 from services.agent.output_guard.enforcement import (
+    REASON_BOOKING_CLAIM,
     REASON_MISMATCH,
     REASON_UNPARSEABLE,
     GuardVerdict,
@@ -36,6 +38,7 @@ __all__ = [
     "AMOUNT_MATCHED",
     "AMOUNT_NOT_IN_QUOTES",
     "AMOUNT_UNPARSEABLE",
+    "REASON_BOOKING_CLAIM",
     "REASON_MISMATCH",
     "REASON_UNPARSEABLE",
     "AllowedAmounts",
@@ -46,6 +49,7 @@ __all__ = [
     "enforce_outbound_text",
     "evaluate_amounts",
     "extract_candidate_amounts",
+    "find_booking_claims",
     "load_allowed_amounts",
     "normalize_for_scanning",
     "parse_amount_to_halalas",

@@ -119,7 +119,7 @@ _ARABIC_EXAMPLE_CONFIRM_YEAR = "تقصد من 1 إلى 3 سبتمبر 2027؟"
 _ARABIC_EXAMPLE_CONFIRM_HOTEL = "تقصد فندق [اسم الفندق]؟"
 
 _ARABIC_EXAMPLE_QUOTE_REPLY = (
-    "[اسم الفندق]، غرفة [نوع الغرفة]، [عدد الليالي] من [تاريخ الوصول] "
+    "[اسم الفندق]، [الغرفة]، [عدد الليالي] من [تاريخ الوصول] "
     "إلى [تاريخ المغادرة]:\n"
     "الإجمالي *[السعر الإجمالي]* ([سعر الليلة] لليلة).\n"
     "يبعد [المسافة] عن الحرم.\n"
@@ -127,40 +127,25 @@ _ARABIC_EXAMPLE_QUOTE_REPLY = (
 )
 
 _ENGLISH_EXAMPLE_QUOTE_REPLY = (
-    "[Hotel], [room type] room, [N] nights, [check-in] to [check-out]:\n"
+    "[Hotel], [room], [nights], [check-in] to [check-out]:\n"
     "Total *[total]* ([price per night] per night).\n"
     "Only [distance] from the Haram.\n"
     "Shall I pass this to a colleague to confirm your booking?"
 )
 
 _INDONESIAN_EXAMPLE_QUOTE_REPLY = (
-    "[Hotel], kamar [tipe kamar], [N] malam, [check-in] sampai [check-out]:\n"
+    "[Hotel], [kamar], [jumlah malam], [check-in] sampai [check-out]:\n"
     "Total *[total]* ([harga per malam] per malam).\n"
     "Hanya [jarak] dari Masjidil Haram.\n"
     "Mau saya teruskan ke rekan saya untuk konfirmasi pemesanan?"
 )
 
-# After request_booking_follow_up (owner decision 2026-09-30): restate
-# exactly the stay the tool returns, and ask naturally when a yes is
-# unclear -- never ask for a specific phrase.
-_ARABIC_EXAMPLE_BOOKING_PASSED_ON = (
-    "أبشر، بلّغت زميلي بطلبك: [اسم الفندق]، غرفة [نوع الغرفة]، من "
-    "[تاريخ الوصول] إلى [تاريخ المغادرة]، الإجمالي [السعر الإجمالي]. "
-    "يتواصل معك قريباً إن شاء الله لتأكيد الحجز."
-)
-
-_ENGLISH_EXAMPLE_BOOKING_PASSED_ON = (
-    "Done — I've passed your request to a colleague: [hotel], [room type] "
-    "room, [check-in] to [check-out], total [total]. They'll contact you "
-    "shortly to confirm the booking."
-)
-
-_INDONESIAN_EXAMPLE_BOOKING_PASSED_ON = (
-    "Baik, permintaan Anda sudah saya teruskan ke rekan saya: [hotel], kamar "
-    "[tipe kamar], [check-in] sampai [check-out], total [total]. Rekan saya "
-    "akan segera menghubungi Anda untuk konfirmasi pemesanan."
-)
-
+# An unclear yes gets one natural question -- never a demand for a specific
+# phrase (owner decision 2026-09-30). The confirmation after a booking is
+# passed on is never the model's to write (owner decision 2026-10-01): code
+# sends it (services/agent/booking_confirmation.py), and the output guard
+# blocks any other booking claim (services/agent/output_guard/
+# booking_claims.py).
 _ARABIC_EXAMPLE_UNCLEAR_YES = "يعني تحب أبلّغ زميلي يؤكّد لك الحجز؟"
 
 # Short confirmations that count as yes (owner's list, 2026-09-30): most
@@ -202,7 +187,6 @@ CUSTOMER_FACING_ARABIC_EXAMPLES: tuple[str, ...] = (
     _ARABIC_EXAMPLE_CONFIRM_YEAR,
     _ARABIC_EXAMPLE_CONFIRM_HOTEL,
     _ARABIC_EXAMPLE_QUOTE_REPLY,
-    _ARABIC_EXAMPLE_BOOKING_PASSED_ON,
     _ARABIC_EXAMPLE_UNCLEAR_YES,
 )
 
@@ -418,10 +402,13 @@ PROMPT_RULES: tuple[PromptRule, ...] = (
             "payment, or offer any discount. When a customer who has been "
             "given a price clearly says yes to your offer to pass it to a "
             "colleague, call request_booking_follow_up (it takes no "
-            "arguments), then restate exactly the stay it returns — hotel, "
-            "room type, dates, rooms and total — and say a colleague will "
-            "contact them to confirm the booking; never say the booking is "
-            "confirmed. A short confirmation counts as yes in any dialect "
+            "arguments). When it succeeds, the system itself sends the "
+            "customer a fixed confirmation of the stay, and nothing you "
+            "write in that turn is sent. Never write a booking confirmation "
+            "yourself, whether or not you called the tool: never say that "
+            "you have passed a request or a booking on to a colleague, or "
+            "that a booking is done or confirmed. A short confirmation "
+            "counts as yes in any dialect "
             "or language, for example: "
             + ", ".join(BOOKING_YES_WORDS)
             + ". Never ask the customer to type a specific phrase. If the "
@@ -433,22 +420,16 @@ PROMPT_RULES: tuple[PromptRule, ...] = (
             + '" If the tool says there is no valid price, give a fresh '
             "price with get_quote first. If a customer asks to pay or to "
             "negotiate the price, tell them a colleague will follow up with "
-            "them for that. After passing a booking on, reply in the style "
-            'of these examples. Arabic: "'
-            + _ARABIC_EXAMPLE_BOOKING_PASSED_ON
-            + '" English: "'
-            + _ENGLISH_EXAMPLE_BOOKING_PASSED_ON
-            + '" Indonesian: "'
-            + _INDONESIAN_EXAMPLE_BOOKING_PASSED_ON
-            + '"'
+            "them for that."
         ),
         arabic=(
             "لا تقدر تنشئ حجزاً مؤقتاً ولا تؤكد حجزاً ولا تستلم دفعة ولا "
             "تمنح أي تنزيل. إذا وافق العميل الذي أعطيته سعراً بوضوح على "
             "عرضك بتحويله لزميل، فاستدعِ request_booking_follow_up (لا تأخذ "
-            "أي مدخلات)، ثم أعد ذكر الإقامة التي تعيدها كما هي — الفندق "
-            "ونوع الغرفة والتواريخ وعدد الغرف والإجمالي — وقل إن أحد "
-            "الزملاء سيتواصل معه لتأكيد الحجز؛ ولا تقل أبداً إن الحجز تأكد. "
+            "أي مدخلات). وإذا نجحت، يرسل النظام نفسه للعميل تأكيداً ثابتاً "
+            "للإقامة، ولا يُرسَل شيء مما تكتبه في تلك الدورة. لا تكتب تأكيد "
+            "الحجز بنفسك أبداً، سواء استدعيت الأداة أم لا: لا تقل أبداً إنك "
+            "حوّلت طلباً أو حجزاً لزميل، ولا إن الحجز تأكد أو تم. "
             "والموافقة القصيرة تُعدّ «نعم» بأي لهجة أو لغة، مثل: "
             + "، ".join(BOOKING_YES_WORDS)
             + ". لا تطلب أبداً من العميل كتابة عبارة معينة. وإذا كان الرد "
@@ -458,16 +439,9 @@ PROMPT_RULES: tuple[PromptRule, ...] = (
             + _ARABIC_EXAMPLE_UNCLEAR_YES
             + '" وإذا قالت الأداة إنه لا يوجد سعر صالح، فأعطِ سعراً جديداً '
             "عبر get_quote أولاً. وإذا طلب العميل الدفع أو التفاوض على "
-            "السعر، أخبره أن أحد الزملاء سيتابع معه بخصوص ذلك. وبعد تحويل "
-            'الحجز، رد على غرار هذه الأمثلة. بالعربية: "'
-            + _ARABIC_EXAMPLE_BOOKING_PASSED_ON
-            + '" بالإنجليزية: "'
-            + _ENGLISH_EXAMPLE_BOOKING_PASSED_ON
-            + '" بالإندونيسية: "'
-            + _INDONESIAN_EXAMPLE_BOOKING_PASSED_ON
-            + '"'
+            "السعر، أخبره أن أحد الزملاء سيتابع معه بخصوص ذلك."
         ),
-        english_digest="8d9b2a5fa68207d62a0aca20aeaeb76ec3314b5d2df864d9bcbc28d856479a50",
+        english_digest="0a1a449bcda44f85197a1de49b09fe0d5ea41f149d1fe2837f7ad25da54e3d42",
     ),
     PromptRule(
         key="unavailable_dates",
@@ -532,13 +506,15 @@ PROMPT_RULES: tuple[PromptRule, ...] = (
         english=(
             "When get_quote returns priced=true, reply in at most four short "
             "lines and copy every value from that result, never computing "
-            "one: the hotel name (hotel_name), the room type "
-            "(room_type_name), the number of nights (night_count) with the "
-            "dates, the total (total_price_display) in bold, and the price "
-            "per night — price_per_night_display, or from "
-            "lowest_night_price_display to highest_night_price_display when "
-            "that is null. When rooms is more than 1, give the number of "
-            "rooms and say the nightly price is per room. If "
+            "one: the hotel name (hotel_name), the room (room_display), the "
+            "number of nights (night_count_display) with the dates, the total "
+            "(total_price_display) in bold, and the price per night — "
+            "price_per_night_display, or from lowest_night_price_display to "
+            "highest_night_price_display when that is null. Copy room_display "
+            "and night_count_display exactly as they are: never add a word "
+            "such as «غرفة», room or kamar to the room, and never write the "
+            "number of nights yourself. When rooms is more than 1, say the "
+            "nightly price is per room. If "
             "distance_to_haram_display is not null, add the distance: from "
             "the Haram when city is makkah (الحرم, Masjidil Haram), from the "
             "Prophet's Mosque when city is madinah (المسجد النبوي, Masjid "
@@ -546,7 +522,9 @@ PROMPT_RULES: tuple[PromptRule, ...] = (
             "Indonesian with Hanya, never with the number; never add a "
             "walking time or any location detail the result does not give. "
             "In an Arabic reply use the fields ending "
-            "in _ar. End with one question that moves toward booking — "
+            "in _ar, and in an Indonesian reply the fields ending in "
+            "_indonesian where there are any. End with one question that "
+            "moves toward booking — "
             "never a general question such as whether they need anything "
             "else. For an Arabic-speaking customer, in simple everyday "
             'Arabic, in the style of this example: "'
@@ -560,19 +538,22 @@ PROMPT_RULES: tuple[PromptRule, ...] = (
         arabic=(
             "عندما تعيد get_quote القيمة priced=true، رد في أربعة أسطر "
             "قصيرة على الأكثر، وانسخ كل قيمة من تلك النتيجة دون حساب أي "
-            "منها: اسم الفندق (hotel_name)، ونوع الغرفة (room_type_name)، "
-            "وعدد الليالي (night_count) مع التواريخ، والإجمالي "
+            "منها: اسم الفندق (hotel_name)، والغرفة (room_display)، وعدد "
+            "الليالي (night_count_display) مع التواريخ، والإجمالي "
             "(total_price_display) بخط عريض، وسعر الليلة — "
             "price_per_night_display، أو من lowest_night_price_display إلى "
-            "highest_night_price_display إذا كان فارغاً. وإذا كان rooms "
-            "أكثر من 1، فاذكر عدد الغرف وقل إن سعر الليلة للغرفة الواحدة. "
+            "highest_night_price_display إذا كان فارغاً. انسخ room_display "
+            "وnight_count_display كما هما: لا تضف إلى الغرفة كلمة مثل «غرفة» "
+            "أو room أو kamar، ولا تكتب عدد الليالي بنفسك أبداً. وإذا كان "
+            "rooms أكثر من 1، فقل إن سعر الليلة للغرفة الواحدة. "
             "وإذا لم يكن distance_to_haram_display فارغاً، فأضف المسافة: عن "
             "الحرم إذا كانت city هي makkah (الحرم، Masjidil Haram)، وعن "
             "المسجد النبوي إذا كانت madinah (المسجد النبوي، Masjid Nabawi)؛ "
             "وابدأ ذلك السطر بالإنجليزية بكلمة Only وبالإندونيسية بكلمة "
             "Hanya، لا بالرقم أبداً؛ ولا تضف أبداً مدة مشي أو أي تفصيل عن "
             "الموقع لا تعطيه النتيجة. "
-            "وفي الرد العربي استخدم الحقول المنتهية بـ_ar. واختم بسؤال واحد "
+            "وفي الرد العربي استخدم الحقول المنتهية بـ_ar، وفي الرد الإندونيسي "
+            "الحقول المنتهية بـ_indonesian إن وُجدت. واختم بسؤال واحد "
             "يقرّب العميل من الحجز — لا بسؤال عام مثل هل يحتاج شيئاً آخر. "
             "للعميل الذي يكتب بالعربية، بعربية يومية بسيطة، على غرار "
             'هذا المثال: "'
@@ -583,7 +564,7 @@ PROMPT_RULES: tuple[PromptRule, ...] = (
             + _INDONESIAN_EXAMPLE_QUOTE_REPLY
             + '"'
         ),
-        english_digest="3a71cf0cd033868f2304efa96733eafa19d72f91094a63efedbf3372d33b27d7",
+        english_digest="4b8cfd5491520d55b3578b0fe5e0aa03cad91aa5d8d559ad0b9dff8b0deb1391",
     ),
     PromptRule(
         key="injection_resistance",
