@@ -113,8 +113,21 @@ const MS_PER_MINUTE = 60_000;
 const MINUTES_PER_HOUR = 60;
 const HOURS_PER_DAY = 24;
 
-/** How long ago an escalation opened: «الآن», «منذ دقيقتين», «منذ 5
- * ساعات», «منذ 12 يوماً». */
+function twoUnits(
+  whole: number,
+  wholeForms: ArabicCountForms,
+  part: number,
+  partForms: ArabicCountForms,
+): string {
+  const first = arabicCount(whole, wholeForms);
+  return part === 0 ? first : `${first} و${arabicCount(part, partForms)}`;
+}
+
+/** How long ago something happened, never rounded away (owner request
+ * 2026-10-01: 1 hour 49 minutes used to read «منذ ساعة»): minutes under an
+ * hour, hours and minutes under a day, days and hours beyond -- «الآن»,
+ * «منذ 49 دقيقة», «منذ ساعة و49 دقيقة», «منذ ساعتين», «منذ يوم و4 ساعات».
+ * A part that is zero is left out. */
 export function formatAge(openedAt: string, now: Date): string {
   const minutes = Math.floor((now.getTime() - new Date(openedAt).getTime()) / MS_PER_MINUTE);
   if (minutes < 1) {
@@ -125,9 +138,9 @@ export function formatAge(openedAt: string, now: Date): string {
   }
   const hours = Math.floor(minutes / MINUTES_PER_HOUR);
   if (hours < HOURS_PER_DAY) {
-    return `منذ ${arabicCount(hours, HOURS)}`;
+    return `منذ ${twoUnits(hours, HOURS, minutes % MINUTES_PER_HOUR, MINUTES)}`;
   }
-  return `منذ ${arabicCount(Math.floor(hours / HOURS_PER_DAY), DAYS)}`;
+  return `منذ ${twoUnits(Math.floor(hours / HOURS_PER_DAY), DAYS, hours % HOURS_PER_DAY, HOURS)}`;
 }
 
 /** An escalation's notes column, which the agent writes as JSON text: the
