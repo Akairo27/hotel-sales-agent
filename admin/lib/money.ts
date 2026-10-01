@@ -42,3 +42,23 @@ export function halalasToRiyals(halalas: number): number {
   }
   return halalas / HALALAS_PER_SAR;
 }
+
+const RIYAL_WORD = "ريال";
+const HALALA_DIGITS = 2;
+
+/** Renders a halalas amount for reading, the way the customer saw it:
+ * "1,250.00 ريال" — the same string lib/money.py's
+ * format_halalas_as_arabic_riyal produces, from integer arithmetic only
+ * (CLAUDE.md rule 5: no float in a money path).
+ *
+ * Raises:
+ *   RangeError: halalas is not a non-negative integer.
+ */
+export function formatHalalasAsRiyal(halalas: number): string {
+  if (!Number.isInteger(halalas) || halalas < 0) {
+    throw new RangeError(`halalas must be a non-negative integer, got ${halalas}`);
+  }
+  const riyals = Math.floor(halalas / HALALAS_PER_SAR);
+  const remainder = String(halalas % HALALAS_PER_SAR).padStart(HALALA_DIGITS, "0");
+  return `${riyals.toLocaleString("en-US")}.${remainder} ${RIYAL_WORD}`;
+}

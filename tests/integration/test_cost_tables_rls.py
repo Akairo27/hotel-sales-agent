@@ -72,8 +72,11 @@ def test_authenticated_cannot_select_cost_table(
 ) -> None:
     """authenticated has schema USAGE (migration 0010) but no table-level
     grant on either of these — permission denied at the table, not a
-    missing schema. If this ever starts returning rows instead, cost data
-    is reachable from the browser without column masking in place."""
+    missing schema. (Since migration 0033 quotes has a column-scoped grant
+    for the escalations screen that never includes nights or
+    min_allowed_total, so SELECT * is still refused.) If this ever starts
+    returning rows instead, cost data is reachable from the browser without
+    column masking in place."""
     select = sql.SQL("SELECT * FROM {table}").format(table=sql.Identifier(table))
     db_conn.execute("SET SESSION AUTHORIZATION authenticated")
     try:

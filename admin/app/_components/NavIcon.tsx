@@ -1,8 +1,8 @@
 import type { NavIconName } from "@/lib/nav";
 import type { ReactElement } from "react";
 
-// Line icons drawn inline instead of pulled from an icon package: six
-// glyphs do not justify a runtime dependency, and inline paths inherit
+// Line icons drawn inline instead of pulled from an icon package: a
+// handful of glyphs do not justify a runtime dependency, and inline paths inherit
 // currentColor so the active/inactive nav states need no second rule.
 const PATHS: Record<NavIconName, ReactElement> = {
   home: (
@@ -11,6 +11,12 @@ const PATHS: Record<NavIconName, ReactElement> = {
       <rect x="13.5" y="3.5" width="7" height="7" rx="1.5" />
       <rect x="3.5" y="13.5" width="7" height="7" rx="1.5" />
       <rect x="13.5" y="13.5" width="7" height="7" rx="1.5" />
+    </>
+  ),
+  escalations: (
+    <>
+      <path d="M6.25 16.5V11a5.75 5.75 0 0 1 11.5 0v5.5l1.75 2H4.5Z" />
+      <path d="M10 20.5a2.1 2.1 0 0 0 4 0" />
     </>
   ),
   hotels: (
