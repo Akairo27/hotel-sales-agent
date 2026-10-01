@@ -192,6 +192,20 @@ jobs:
       - name: pip-audit
         run: uv run pip-audit
 
+      # The dashboard's npm dependencies, the other half of CLAUDE.md §3's
+      # gate (zero high or critical). Missing until 2026-10-01, when a
+      # critical Next.js advisory was found by hand. npm audit reads
+      # admin/package-lock.json against the registry's advisories, so no
+      # install is needed; dev dependencies are included on purpose -- they
+      # run in CI and on the build host.
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+
+      - name: npm audit (admin)
+        working-directory: admin
+        run: npm audit --audit-level=high
+
   migrations:
     name: migrations lint
     runs-on: ubuntu-24.04
