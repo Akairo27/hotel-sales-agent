@@ -88,6 +88,36 @@ PLEASE_TYPE = FixedText(
     ),
 )
 
+# The two reply buttons on a booking offer (owner-approved 2026-10-01;
+# services/agent/booking_buttons.py). Each title is at most 20 characters,
+# Meta's limit for a button title.
+BOOKING_YES_BUTTON = FixedText(
+    arabic="نعم، أكّد الحجز",
+    english="Yes, confirm",
+    indonesian="Ya, konfirmasi",
+)
+BOOKING_QUESTION_BUTTON = FixedText(
+    arabic="عندي سؤال",
+    english="I have a question",
+    indonesian="Ada pertanyaan",
+)
+
+# Sent when the customer taps "yes" on an offer that a newer price has
+# replaced, with buttons for the newer one (owner-approved 2026-10-01).
+NEWER_PRICE = FixedText(
+    arabic=(
+        "في سعر أحدث من هذا بالأعلى. تحب أبلّغ زميلي يؤكّد لك الحجز على السعر الأحدث؟"
+    ),
+    english=(
+        "There's a newer price above this one. Shall I pass the newer one to "
+        "a colleague to confirm your booking?"
+    ),
+    indonesian=(
+        "Ada harga yang lebih baru di atas. Mau saya teruskan yang terbaru ke "
+        "rekan saya untuk konfirmasi pemesanan?"
+    ),
+)
+
 # Owner-approved (2026-09-30): Latin-script text with any of these whole
 # words is Indonesian, otherwise English. Deliberately no word English
 # shares (such as "hotel").

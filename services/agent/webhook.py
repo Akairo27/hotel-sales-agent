@@ -45,7 +45,9 @@ response can take without this split). Order matters and is deliberate:
    already closed by the time Starlette schedules the background job. A
    voice note, an image or other media never reaches the model: a
    background job sends a fixed notice and escalates
-   (_send_notice_without_a_model_turn). Steps 4-7 are the text path.
+   (_send_notice_without_a_model_turn). Steps 4-7 are the text path; a
+   tapped booking button takes it too, and a booking yes that code answers
+   (services/agent/booking_yes.py) skips the model call in step 4.
 
 4. Call generate_reply. Its tool-calling loop can raise any of several
    exceptions (see conversation.py's own docstring) after one or more
@@ -148,14 +150,32 @@ import psycopg
 from fastapi import APIRouter, BackgroundTasks, HTTPException, Query, Request
 from fastapi.responses import JSONResponse, PlainTextResponse
 
+from services.agent.booking_buttons import (
+    BookingOfferButtons,
+    ButtonTap,
+    booking_offer_buttons,
+    buttons_for_reply,
+    text_with_button_titles,
+)
+from services.agent.booking_confirmation import render_booking_passed_on
+from services.agent.booking_yes import (
+    BookingDecision,
+    ButtonMismatch,
+    CustomerMessage,
+    OfferNewerPrice,
+    PassOn,
+    decide_booking_yes,
+)
 from services.agent.fixed_texts import (
     FALLBACK,
+    NEWER_PRICE,
     PLEASE_TYPE,
     FixedText,
     Language,
     customer_language,
     media_placeholder,
 )
+from services.agent.llm.booking_follow_up import pass_quote_on
 from services.agent.llm.caps import (
     MessageRateCapExceededError,
     check_message_rate_cap,
@@ -195,6 +215,7 @@ from services.agent.staff_follow_up import open_follow_up_for_dates_not_open
 from services.agent.whatsapp_send import (
     WHATSAPP_TEXT_BODY_MAX_CHARS,
     WhatsAppCloudApiSender,
+    WhatsAppMessageRejectedError,
     WhatsAppSender,
     WhatsAppSendSettings,
     load_whatsapp_send_settings,
@@ -320,24 +341,31 @@ def _signature_problem(
 
 
 # How the fast path handles each inbound message type (owner decision A,
-# revised 2026-09-29). Only text reaches the model. A voice note or an
-# image gets fixed_texts.PLEASE_TYPE; the other media listed get the
-# fallback; both open an escalation for staff. Every other type --
-# reaction, sticker, and any type not listed here -- is deliberately
-# ignored: not stored, not answered (ARCHITECTURE.md §7, "لا صمت").
+# revised 2026-09-29). Only text and a tapped reply button reach a turn
+# (_TURN_MESSAGE_TYPES). A voice note or an image gets
+# fixed_texts.PLEASE_TYPE; the other media listed get the fallback; both
+# open an escalation for staff. Every other type -- reaction, sticker, and
+# any type not listed here -- is deliberately ignored: not stored, not
+# answered (ARCHITECTURE.md §7, "لا صمت").
 _TEXT_MESSAGE_TYPE = "text"
+# Not a WhatsApp type: an "interactive" message whose interactive.type is
+# "button_reply" (a booking offer's button, services/agent/booking_buttons.py)
+# is given this one when parsed. Any other interactive message keeps
+# "interactive" and gets the fallback.
+_BUTTON_REPLY_MESSAGE_TYPE = "button_reply"
+_INTERACTIVE_MESSAGE_TYPE = "interactive"
+_TURN_MESSAGE_TYPES = frozenset({_TEXT_MESSAGE_TYPE, _BUTTON_REPLY_MESSAGE_TYPE})
 _PLEASE_TYPE_MESSAGE_TYPES = frozenset({"audio", "image"})
 _FALLBACK_MESSAGE_TYPES = frozenset(
-    {"video", "document", "location", "contacts", "interactive"}
+    {"video", "document", "location", "contacts", _INTERACTIVE_MESSAGE_TYPE}
 )
 _HANDLED_MESSAGE_TYPES = (
-    frozenset({_TEXT_MESSAGE_TYPE})
-    | _PLEASE_TYPE_MESSAGE_TYPES
-    | _FALLBACK_MESSAGE_TYPES
+    _TURN_MESSAGE_TYPES | _PLEASE_TYPE_MESSAGE_TYPES | _FALLBACK_MESSAGE_TYPES
 )
 
 _REASON_UNSUPPORTED_MESSAGE_TYPE = "unsupported_message_type"
 _REASON_MESSAGE_RATE_CAP_EXCEEDED = "message_rate_cap_exceeded"
+_REASON_BOOKING_BUTTON_MISMATCH = "booking_button_mismatch"
 
 
 @dataclass(frozen=True)
@@ -346,10 +374,12 @@ class InboundMessage:
     customer_name: str | None
     whatsapp_message_id: str
     message_type: str
-    # The text for a text message; for any other type a fixed placeholder
-    # ("[image message]"), plus its caption when it has one -- what staff
-    # and the model's later context see in place of the media itself.
+    # The text for a text message and a tapped button's title for a button
+    # reply; for any other type a fixed placeholder ("[image message]"),
+    # plus its caption when it has one -- what staff and the model's later
+    # context see in place of the media itself.
     body: str
+    button: ButtonTap | None = None
 
 
 def _normalize_phone(wa_id: str) -> str:
@@ -380,6 +410,25 @@ def _message_body(message: dict[str, Any], message_type: str) -> str:
     return f"{placeholder} {caption}" if isinstance(caption, str) else placeholder
 
 
+def _button_tap(message: dict[str, Any]) -> ButtonTap | None:
+    """The tapped reply button in an interactive message, or None for any
+    other interactive message (a list reply, or a button reply without an
+    id or a non-blank title), which then gets the fallback."""
+    interactive = _as_dict(message.get(_INTERACTIVE_MESSAGE_TYPE))
+    if interactive.get("type") != _BUTTON_REPLY_MESSAGE_TYPE:
+        return None
+    reply = _as_dict(interactive.get(_BUTTON_REPLY_MESSAGE_TYPE))
+    button_id, title = reply.get("id"), reply.get("title")
+    if not (isinstance(button_id, str) and isinstance(title, str) and title.strip()):
+        return None
+    context_id = _as_dict(message.get("context")).get("id")
+    return ButtonTap(
+        button_id=button_id,
+        title=title,
+        context_message_id=context_id if isinstance(context_id, str) else None,
+    )
+
+
 def _parse_one_message(
     message: dict[str, Any], contacts: list[Any]
 ) -> InboundMessage | None:
@@ -387,7 +436,8 @@ def _parse_one_message(
     every message needs (a sender, an id, a type, and text.body for a text
     message). The sender's display name comes from the contact whose
     wa_id matches; a payload with no "from" falls back to its only
-    contact."""
+    contact. A tapped reply button becomes a button_reply whose body is
+    the button's title."""
     names = {
         contact.get("wa_id"): _as_dict(contact.get("profile")).get("name")
         for contact in map(_as_dict, contacts)
@@ -403,10 +453,14 @@ def _parse_one_message(
         and isinstance(message_type, str)
     ):
         return None
-    try:
-        body = _message_body(message, message_type)
-    except KeyError:
-        return None
+    button = _button_tap(message) if message_type == _INTERACTIVE_MESSAGE_TYPE else None
+    if button is not None:
+        message_type, body = _BUTTON_REPLY_MESSAGE_TYPE, button.title
+    else:
+        try:
+            body = _message_body(message, message_type)
+        except KeyError:
+            return None
     name = names.get(wa_id)
     return InboundMessage(
         customer_phone=_normalize_phone(wa_id),
@@ -414,6 +468,7 @@ def _parse_one_message(
         whatsapp_message_id=message_id,
         message_type=message_type,
         body=body,
+        button=button,
     )
 
 
@@ -509,6 +564,62 @@ def _insert_outbound_message(
     touch_last_message_at(conn, conversation_id=conversation_id)
 
 
+async def _send_text_or_offer(
+    sender: WhatsAppSender,
+    *,
+    conversation_id: int,
+    to_phone: str,
+    text: str,
+    offer: BookingOfferButtons | None,
+) -> str:
+    """Sends text with offer's reply buttons, or as plain text when there
+    are none. Returns the WhatsApp message id.
+
+    Only a definite refusal of the button message as invalid
+    (WhatsAppMessageRejectedError: nothing was sent) is logged at ERROR and
+    sent once more as plain text with the same body -- the offer question is
+    in the body, so a typed yes still works. Any other failure, such as a
+    timeout, may have delivered the offer already, so it is raised, never
+    retried: the customer must never get the offer twice (owner decisions
+    2026-10-01); the caller's failure funnel answers instead.
+
+    Raises:
+        Whatever sender.send_reply_buttons raises other than
+        WhatsAppMessageRejectedError, or whatever sender.send_text raises.
+    """
+    if offer is not None:
+        try:
+            whatsapp_message_id = await sender.send_reply_buttons(
+                to_phone=to_phone, body=text, buttons=offer.buttons
+            )
+        except WhatsAppMessageRejectedError as exc:
+            logger.error(
+                json.dumps(
+                    {
+                        "event": "booking_offer_buttons_rejected",
+                        "conversation_id": conversation_id,
+                        "quote_id": offer.quote_id,
+                        "exception_type": type(exc).__name__,
+                        "exception_message": str(exc),
+                    }
+                ),
+                exc_info=exc,
+            )
+        else:
+            logger.info(
+                json.dumps(
+                    {
+                        "event": "booking_offer_buttons_sent",
+                        "conversation_id": conversation_id,
+                        "quote_id": offer.quote_id,
+                        "whatsapp_message_id": whatsapp_message_id,
+                    }
+                )
+            )
+            return whatsapp_message_id
+    return await sender.send_text(to_phone=to_phone, body=text)
+
+
 async def _send_or_log_failure(
     sender: WhatsAppSender,
     *,
@@ -516,10 +627,12 @@ async def _send_or_log_failure(
     conversation_id: int,
     customer_phone: str,
     text: str,
+    offer: BookingOfferButtons | None = None,
 ) -> str | None:
-    """Attempts the real WhatsApp send; on any failure (deliberately not
-    narrowed to WhatsAppSendError — see _record_usage_or_log_failure's
-    own docstring for the identical reasoning), logs at ERROR with the
+    """Attempts the real WhatsApp send (_send_text_or_offer); on any
+    failure (deliberately not narrowed to WhatsAppSendError — see
+    _record_usage_or_log_failure's own docstring for the identical
+    reasoning), logs at ERROR with the
     conversation id, exception type, message, and full traceback, and
     returns None rather than propagating. On success, attempts to record
     the outbound message (_insert_outbound_message) and always returns
@@ -528,11 +641,19 @@ async def _send_or_log_failure(
     has the message — so a failure to log it afterward must not be
     reported the same way as the send itself failing, and must not
     propagate either, for the same reasons as every other write in this
-    module. This function therefore never raises.
+    module. This function therefore never raises. Only text is recorded,
+    never the button titles, so the model's later history reads as for any
+    reply.
     """
     to_phone = customer_phone.removeprefix("+")
     try:
-        whatsapp_message_id = await sender.send_text(to_phone=to_phone, body=text)
+        whatsapp_message_id = await _send_text_or_offer(
+            sender,
+            conversation_id=conversation_id,
+            to_phone=to_phone,
+            text=text,
+            offer=offer,
+        )
     except Exception as exc:
         logger.error(
             json.dumps(
@@ -1189,17 +1310,32 @@ async def _process_turn(
     conversation_id: int,
     customer_name: str | None,
     customer_phone: str,
+    message: CustomerMessage,
     llm_settings: LlmSettings,
     now: datetime,
 ) -> str:
     """Steps 4-7 of the module docstring: the model call through the
     output-guard-checked send, plus the staff follow-up for dates not open
     for booking (services/agent/staff_follow_up.py) when the turn's tools
-    reported any. Returns a status label that
-    _generate_and_deliver_reply logs; no caller reads it as an HTTP
-    response anymore. Every path ends in either the reply delivered
-    ("processed") or _escalate_and_notify (CLAUDE.md rule 12).
+    reported any. A booking yes that code answers (services/agent/
+    booking_yes.py) skips the model entirely: no model call, no usage, no
+    turn counted. A reply offering exactly one priced stay goes out with
+    the booking buttons (booking_buttons.buttons_for_reply). Returns a
+    status label that _generate_and_deliver_reply logs; no caller reads it
+    as an HTTP response anymore. Every path ends in either the reply
+    delivered ("processed") or _escalate_and_notify (CLAUDE.md rule 12).
     """
+    decision = _booking_decision_or_none(
+        conn, message, conversation_id=conversation_id, llm_settings=llm_settings
+    )
+    if decision is not None:
+        return await _answer_booking_decision(
+            conn,
+            decision,
+            conversation_id=conversation_id,
+            customer_phone=customer_phone,
+            llm_settings=llm_settings,
+        )
     transport = get_model_transport(llm_settings)
     outcome = await _generate_reply_or_exception(
         conn,
@@ -1238,6 +1374,152 @@ async def _process_turn(
         conversation_id=conversation_id,
         customer_phone=customer_phone,
         reply_text=outcome.text,
+        quote_validity=llm_settings.quote_validity,
+        offer=buttons_for_reply(
+            to_whatsapp_formatting(outcome.text), outcome.quote_ids
+        ),
+    )
+
+
+def _booking_decision_or_none(
+    conn: psycopg.Connection[Any],
+    message: CustomerMessage,
+    *,
+    conversation_id: int,
+    llm_settings: LlmSettings,
+) -> BookingDecision | None:
+    """decide_booking_yes, with a failed read logged at ERROR and answered
+    by the model instead: the model path still has the booking tool, and
+    its own failures end in the funnel. Never raises."""
+    try:
+        return decide_booking_yes(
+            conn,
+            message,
+            conversation_id=conversation_id,
+            quote_validity=llm_settings.quote_validity,
+        )
+    except Exception as exc:
+        logger.error(
+            json.dumps(
+                {
+                    "event": "booking_yes_check_failed",
+                    "conversation_id": conversation_id,
+                    "exception_type": type(exc).__name__,
+                    "exception_message": str(exc),
+                }
+            ),
+            exc_info=exc,
+        )
+        return None
+
+
+async def _answer_booking_decision(
+    conn: psycopg.Connection[Any],
+    decision: BookingDecision,
+    *,
+    conversation_id: int,
+    customer_phone: str,
+    llm_settings: LlmSettings,
+) -> str:
+    """Acts on a booking yes code answers, without a model call: a
+    mismatched button gets the funnel (fallback and escalation); a tap on
+    a replaced offer gets fixed_texts.NEWER_PRICE with buttons for the
+    newer quote; otherwise the quote is passed on (one escalation per
+    quote, booking_follow_up.pass_quote_on) and confirmed. Every text goes
+    through _deliver_reply and so the output guard.
+
+    Raises:
+        psycopg.Error: pass_quote_on's write failed -- the caller's
+            last-resort net escalates and sends the fallback.
+    """
+    if isinstance(decision, ButtonMismatch):
+        logger.warning(
+            json.dumps(
+                {
+                    "event": "booking_button_mismatch",
+                    "conversation_id": conversation_id,
+                    "problem": decision.problem,
+                }
+            )
+        )
+        return await _escalate_and_notify(
+            conn,
+            conversation_id=conversation_id,
+            customer_phone=customer_phone,
+            reason=_REASON_BOOKING_BUTTON_MISMATCH,
+            exc=None,
+            extra_notes={"problem": decision.problem},
+        )
+    if isinstance(decision, OfferNewerPrice):
+        return await _offer_newer_price(
+            conn,
+            decision,
+            conversation_id=conversation_id,
+            customer_phone=customer_phone,
+            llm_settings=llm_settings,
+        )
+    return await _pass_on_and_confirm(
+        conn,
+        decision,
+        conversation_id=conversation_id,
+        customer_phone=customer_phone,
+        llm_settings=llm_settings,
+    )
+
+
+async def _offer_newer_price(
+    conn: psycopg.Connection[Any],
+    decision: OfferNewerPrice,
+    *,
+    conversation_id: int,
+    customer_phone: str,
+    llm_settings: LlmSettings,
+) -> str:
+    logger.info(
+        json.dumps(
+            {
+                "event": "booking_button_newer_price_offered",
+                "conversation_id": conversation_id,
+                "tapped_quote_id": decision.tapped_quote_id,
+                "quote_id": decision.quote_id,
+            }
+        )
+    )
+    return await _deliver_reply(
+        conn,
+        conversation_id=conversation_id,
+        customer_phone=customer_phone,
+        reply_text=NEWER_PRICE.render(decision.language),
+        quote_validity=llm_settings.quote_validity,
+        offer=booking_offer_buttons(decision.quote_id, decision.language),
+    )
+
+
+async def _pass_on_and_confirm(
+    conn: psycopg.Connection[Any],
+    decision: PassOn,
+    *,
+    conversation_id: int,
+    customer_phone: str,
+    llm_settings: LlmSettings,
+) -> str:
+    result = pass_quote_on(conn, conversation_id=conversation_id, quote=decision.quote)
+    logger.info(
+        json.dumps(
+            {
+                "event": "booking_yes_handled_in_code",
+                "conversation_id": conversation_id,
+                "quote_id": decision.quote.quote_id,
+                "already_requested": result["already_requested"],
+                "source": decision.source,
+            }
+        )
+    )
+    return await _deliver_reply(
+        conn,
+        conversation_id=conversation_id,
+        customer_phone=customer_phone,
+        reply_text=render_booking_passed_on(decision.quote, decision.language),
         quote_validity=llm_settings.quote_validity,
     )
 
@@ -1329,15 +1611,18 @@ async def _send_reply(
     customer_phone: str,
     reply_text: str,
     quote_validity: timedelta,
+    offer: BookingOfferButtons | None,
 ) -> _DeliveryFailure | None:
-    """Sends a model reply; returns None when it was delivered, otherwise
-    why not: blank or over-length (not sendable at all), a guard or
-    send-setup error, a guard block, or a failed send. Never raises.
+    """Sends a reply, with offer's buttons when given; returns None when it
+    was delivered, otherwise why not: blank or over-length (not sendable at
+    all), a guard or send-setup error, a guard block, or a failed send.
+    Never raises.
 
     The reply is converted to WhatsApp formatting before the guard checks
     it: the guard must validate exactly what will be sent, and a
     Markdown-bold price ("**343.85 SAR**") must not be checked in a form
-    the customer will never see.
+    the customer will never see. For the same reason the button titles are
+    checked with the body (booking_buttons.text_with_button_titles).
     """
     formatted_text = to_whatsapp_formatting(reply_text)
     undeliverable_reason = _undeliverable_reply_reason(formatted_text)
@@ -1357,7 +1642,7 @@ async def _send_reply(
     prepared = _check_reply_and_prepare_sender(
         conn,
         conversation_id=conversation_id,
-        text=formatted_text,
+        text=text_with_button_titles(formatted_text, offer),
         quote_validity=quote_validity,
     )
     if isinstance(prepared, Exception):
@@ -1385,6 +1670,7 @@ async def _send_reply(
         conversation_id=conversation_id,
         customer_phone=customer_phone,
         text=formatted_text,
+        offer=offer,
     )
     if whatsapp_message_id is None:
         return _DeliveryFailure(reason=_REASON_DELIVERY_FAILED)
@@ -1398,16 +1684,18 @@ async def _deliver_reply(
     customer_phone: str,
     reply_text: str,
     quote_validity: timedelta,
+    offer: BookingOfferButtons | None = None,
 ) -> str:
-    """Delivers a model reply ("processed"), or hands the turn to
-    _escalate_and_notify for whatever stopped it (_send_reply). Never
-    raises."""
+    """Delivers a reply ("processed"), with offer's buttons when given, or
+    hands the turn to _escalate_and_notify for whatever stopped it
+    (_send_reply). Never raises."""
     failure = await _send_reply(
         conn,
         conversation_id=conversation_id,
         customer_phone=customer_phone,
         reply_text=reply_text,
         quote_validity=quote_validity,
+        offer=offer,
     )
     if failure is None:
         return _STATUS_PROCESSED
@@ -1496,6 +1784,7 @@ async def _process_turn_or_exception(
     conversation_id: int,
     customer_name: str | None,
     customer_phone: str,
+    message: CustomerMessage,
     llm_settings: LlmSettings,
     now: datetime,
 ) -> str | Exception:
@@ -1510,6 +1799,7 @@ async def _process_turn_or_exception(
                 conversation_id=conversation_id,
                 customer_name=customer_name,
                 customer_phone=customer_phone,
+                message=message,
                 llm_settings=llm_settings,
                 now=now,
             )
@@ -1522,6 +1812,7 @@ async def _generate_and_deliver_reply(
     conversation_id: int,
     customer_name: str | None,
     customer_phone: str,
+    message: CustomerMessage,
     llm_settings: LlmSettings,
     now: datetime,
 ) -> None:
@@ -1548,6 +1839,7 @@ async def _generate_and_deliver_reply(
         conversation_id=conversation_id,
         customer_name=customer_name,
         customer_phone=customer_phone,
+        message=message,
         llm_settings=llm_settings,
         now=now,
     )
@@ -1687,15 +1979,21 @@ def _schedule_after_storing(
     background_tasks: BackgroundTasks,
 ) -> str:
     """Schedules the background job for a stored, uncapped message: a
-    model turn for text, a notice for any other handled type (decision A:
-    fixed_texts.PLEASE_TYPE for a voice note or an image, the fallback
-    for other media, an escalation either way). Returns its status."""
-    if inbound.message_type == _TEXT_MESSAGE_TYPE:
+    turn for text or a tapped button, a notice for any other handled type
+    (decision A: fixed_texts.PLEASE_TYPE for a voice note or an image, the
+    fallback for other media, an escalation either way). Returns its
+    status."""
+    if inbound.message_type in _TURN_MESSAGE_TYPES:
         background_tasks.add_task(
             _generate_and_deliver_reply,
             conversation_id=conversation_id,
             customer_name=inbound.customer_name,
             customer_phone=inbound.customer_phone,
+            message=CustomerMessage(
+                whatsapp_message_id=inbound.whatsapp_message_id,
+                text=inbound.body,
+                button=inbound.button,
+            ),
             llm_settings=llm_settings,
             now=now,
         )

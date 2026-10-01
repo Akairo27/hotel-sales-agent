@@ -17,7 +17,13 @@ import psycopg
 import pytest
 
 from lib.money import format_halalas_as_arabic_riyal, format_halalas_as_sar
-from services.agent.fixed_texts import FALLBACK, PLEASE_TYPE
+from services.agent.fixed_texts import (
+    BOOKING_QUESTION_BUTTON,
+    BOOKING_YES_BUTTON,
+    FALLBACK,
+    NEWER_PRICE,
+    PLEASE_TYPE,
+)
 from services.agent.llm.config import DEFAULT_QUOTE_VALIDITY_MINUTES
 from services.agent.llm.dispatch import dispatch_get_quote
 from services.agent.llm.errors import ConversationNotFoundError
@@ -709,7 +715,13 @@ def test_an_arabic_reply_quoting_the_arabic_riyal_display_is_allowed(
 
 _FIXED_TEXT_RENDERINGS = [
     pytest.param(text.render(language), id=f"{name}-{language or 'bilingual'}")
-    for name, text in (("fallback", FALLBACK), ("please_type", PLEASE_TYPE))
+    for name, text in (
+        ("fallback", FALLBACK),
+        ("please_type", PLEASE_TYPE),
+        ("booking_yes_button", BOOKING_YES_BUTTON),
+        ("booking_question_button", BOOKING_QUESTION_BUTTON),
+        ("newer_price", NEWER_PRICE),
+    )
     for language in ("ar", "en", "id", None)
 ]
 

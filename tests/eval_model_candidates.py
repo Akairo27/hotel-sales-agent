@@ -89,6 +89,7 @@ from tests.eval_scenarios import (
     ScenarioResult,
     asked_instead_of_guessing,
     booking_answer_handled,
+    buttons_attachable,
     hotel_confirmed_before_pricing,
     hotel_name_retried_and_confirmed,
     quote_reply_complete,
@@ -497,6 +498,7 @@ async def run_scenario(
             scenario, reply.tool_calls, reply.text
         ),
         booking_ok=booking_answer_handled(scenario, reply.tool_calls, reply.text),
+        buttons_ok=buttons_attachable(scenario, reply.quote_ids, reply.text),
         guard_allowed=verdict.allowed,
         leaked=reply_leaked(scenario, reply.text),
         reply_text=reply.text,

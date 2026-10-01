@@ -192,6 +192,7 @@ def test_a_correct_price_answer_passes_every_check(
 
     assert result.passed
     assert result.quote_reply_ok is True
+    assert result.buttons_ok is True
     assert result.tool_names == ("search_hotels", "get_quote")
     assert result.reply_text is not None
     assert result.reply_text.startswith("Test Hotel, Standard room, 2 nights")
@@ -341,6 +342,42 @@ def test_the_confirmed_hotel_is_quoted_with_the_earlier_messages_in_view(
     assert result.quote_reply_ok is True
     assert result.guard_allowed is True
     assert result.passed
+
+
+def test_an_expired_yes_tap_passes_with_a_fresh_button_ready_quote(
+    db_conn: psycopg.Connection[Any],
+) -> None:
+    """button_yes_expired_ar: the stored tap title reaches the model, which
+    prices the stay again and writes a complete reply ending with the
+    offer -- one the buttons can go out with."""
+    transport = _ScriptedTransport(
+        [
+            _search_hotels_step(),
+            _call_tool("get_quote", "2026-10-05", "2026-10-07"),
+            _write_the_arabic_quote_reply,
+        ]
+    )
+
+    result = _run(db_conn, _scenario("button_yes_expired_ar"), transport)
+
+    assert result.quote_ok is True
+    assert result.quote_reply_ok is True
+    assert result.buttons_ok is True
+    assert result.guard_allowed is True
+    assert result.passed
+
+
+def test_repeating_the_expired_price_fails_the_expired_tap_scenario(
+    db_conn: psycopg.Connection[Any],
+) -> None:
+    transport = _ScriptedTransport([_say("تمام، الإجمالي *900.00 ريال*.")])
+
+    result = _run(db_conn, _scenario("button_yes_expired_ar"), transport)
+
+    assert result.quote_ok is False
+    assert result.buttons_ok is False
+    assert result.guard_allowed is False
+    assert not result.passed
 
 
 def test_a_reply_that_never_quotes_fails_a_price_scenario(

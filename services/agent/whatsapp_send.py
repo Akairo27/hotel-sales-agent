@@ -2,8 +2,9 @@
 called — mirrors services/agent/llm/client.py's pattern (CLAUDE.md §9: a
 single interface module, no direct SDK/API calls scattered across the
 code) for the same reason: services/agent/webhook.py needs to send a
-text message without knowing anything about the Graph API's request
-shape, and tests need a fake transport with no network access.
+text message, or a message with reply buttons, without knowing anything
+about the Graph API's request shape, and tests need a fake transport with
+no network access.
 
 See WHATSAPP_GRAPH_API_VERSION's own comment below for why its pin is
 not verified the way client.py's Gemini model pin is.
@@ -41,6 +42,25 @@ _DEFAULT_TIMEOUT_MS = 10_000
 # failed send.
 WHATSAPP_TEXT_BODY_MAX_CHARS = 4096
 
+# Limits of an interactive reply-buttons message, from Meta's "Interactive
+# reply buttons messages" reference (checked 2026-10-01): at most 3
+# buttons, body text 1024 characters, button title 20, button id 256.
+# Counted with len(), as above.
+MAX_REPLY_BUTTONS = 3
+REPLY_BUTTONS_BODY_MAX_CHARS = 1024
+REPLY_BUTTON_TITLE_MAX_CHARS = 20
+REPLY_BUTTON_ID_MAX_CHARS = 256
+
+# The Graph API error codes that refuse a message as invalid, from Meta's
+# WhatsApp Cloud API "Error codes" reference (checked 2026-10-01): Invalid
+# parameter, Missing required parameter, Invalid parameter value,
+# Unsupported message type. With a 4xx status they mean the message was not
+# sent. Rate limits, an expired token, temporary or unknown errors and
+# delivery errors have codes of their own and are not in this set.
+INVALID_MESSAGE_ERROR_CODES = frozenset({100, 131008, 131009, 131051})
+_CLIENT_ERROR_MIN_STATUS = 400
+_SERVER_ERROR_MIN_STATUS = 500
+
 
 class WhatsAppSendConfigurationError(Exception):
     """Raised when WHATSAPP_PHONE_NUMBER_ID or WHATSAPP_ACCESS_TOKEN is
@@ -60,6 +80,46 @@ class WhatsAppSendError(Exception):
     call is not the same question as whether Meta retries the webhook
     delivery that triggered it).
     """
+
+
+class WhatsAppMessageRejectedError(WhatsAppSendError):
+    """Raised when the message was definitely not sent because it was
+    refused as invalid: the Graph API answered with a 4xx status and one of
+    INVALID_MESSAGE_ERROR_CODES. Every other failure -- a timeout, a
+    transport error, any other status or code, or no code at all -- is a
+    plain WhatsAppSendError, after which the message may or may not have
+    gone out."""
+
+
+class InvalidReplyButtonsError(WhatsAppMessageRejectedError):
+    """Raised before any request when a reply-buttons message breaks one of
+    Meta's limits (the constants above): refused as invalid, and certainly
+    not sent."""
+
+
+@dataclass(frozen=True)
+class ReplyButton:
+    """One reply button: the id WhatsApp echoes back when it is tapped,
+    and the title the customer sees."""
+
+    button_id: str
+    title: str
+
+
+def check_reply_buttons(body: str, buttons: tuple[ReplyButton, ...]) -> None:
+    """Raises InvalidReplyButtonsError unless body and buttons fit Meta's
+    limits for a reply-buttons message."""
+    if not 1 <= len(buttons) <= MAX_REPLY_BUTTONS:
+        raise InvalidReplyButtonsError(f"{len(buttons)} buttons, not 1 to 3")
+    if not body.strip() or len(body) > REPLY_BUTTONS_BODY_MAX_CHARS:
+        raise InvalidReplyButtonsError(f"body of {len(body)} characters")
+    for button in buttons:
+        if not 1 <= len(button.title) <= REPLY_BUTTON_TITLE_MAX_CHARS:
+            raise InvalidReplyButtonsError(f"title of {len(button.title)} characters")
+        if not 1 <= len(button.button_id) <= REPLY_BUTTON_ID_MAX_CHARS:
+            raise InvalidReplyButtonsError(
+                f"button id of {len(button.button_id)} characters"
+            )
 
 
 @dataclass(frozen=True)
@@ -117,6 +177,26 @@ def to_whatsapp_formatting(text: str) -> str:
     return _MARKDOWN_STRIKETHROUGH_RE.sub(r"~\1~", converted)
 
 
+def _refused_as_invalid(status_code: int | None, body: object) -> bool:
+    """Whether a failed response is Meta refusing the message as invalid:
+    a 4xx status with one of INVALID_MESSAGE_ERROR_CODES in error.code."""
+    if status_code is None or not (
+        _CLIENT_ERROR_MIN_STATUS <= status_code < _SERVER_ERROR_MIN_STATUS
+    ):
+        return False
+    if not isinstance(body, dict):
+        return False
+    error = body.get("error")
+    if not isinstance(error, dict):
+        return False
+    code = error.get("code")
+    return (
+        isinstance(code, int)
+        and not isinstance(code, bool)
+        and code in INVALID_MESSAGE_ERROR_CODES
+    )
+
+
 def _graph_api_error_detail(body: object) -> str | None:
     """Extracts only the Graph API's own `error.code`/`error.message`
     fields from a parsed JSON response body, if present — never the full
@@ -143,6 +223,11 @@ class WhatsAppSender(Protocol):
 
     async def send_text(
         self, *, to_phone: str, body: str
+    ) -> str:  # returns the WhatsApp message id
+        ...
+
+    async def send_reply_buttons(
+        self, *, to_phone: str, body: str, buttons: tuple[ReplyButton, ...]
     ) -> str:  # returns the WhatsApp message id
         ...
 
@@ -173,12 +258,64 @@ class WhatsAppCloudApiSender:
             WhatsAppSendError: the request timed out, failed at the
                 transport level, or the API reported a non-2xx response.
         """
-        payload: dict[str, Any] = {
-            "messaging_product": "whatsapp",
-            "to": to_phone,
-            "type": "text",
-            "text": {"body": body},
-        }
+        return await self._post(
+            {
+                "messaging_product": "whatsapp",
+                "to": to_phone,
+                "type": "text",
+                "text": {"body": body},
+            }
+        )
+
+    async def send_reply_buttons(
+        self, *, to_phone: str, body: str, buttons: tuple[ReplyButton, ...]
+    ) -> str:
+        """Sends one interactive message with reply buttons, in the shape
+        of Meta's "Interactive reply buttons messages" reference: no
+        header or footer, the body text, and one "reply" button per entry.
+        Returns the WhatsApp-assigned message id, as send_text does.
+
+        Raises:
+            InvalidReplyButtonsError: body or buttons break Meta's limits;
+                nothing was sent.
+            WhatsAppMessageRejectedError: Meta refused the message as
+                invalid; nothing was sent.
+            WhatsAppSendError: any other failure, as for send_text.
+        """
+        check_reply_buttons(body, buttons)
+        return await self._post(
+            {
+                "messaging_product": "whatsapp",
+                "recipient_type": "individual",
+                "to": to_phone,
+                "type": "interactive",
+                "interactive": {
+                    "type": "button",
+                    "body": {"text": body},
+                    "action": {
+                        "buttons": [
+                            {
+                                "type": "reply",
+                                "reply": {
+                                    "id": button.button_id,
+                                    "title": button.title,
+                                },
+                            }
+                            for button in buttons
+                        ]
+                    },
+                },
+            }
+        )
+
+    async def _post(self, payload: dict[str, Any]) -> str:
+        """POSTs one message payload; returns its WhatsApp message id.
+
+        Raises:
+            WhatsAppMessageRejectedError: a 4xx response with one of
+                INVALID_MESSAGE_ERROR_CODES.
+            WhatsAppSendError: any other failure; see send_text.
+        """
         headers = {"Authorization": f"Bearer {self._settings.access_token}"}
         try:
             async with httpx.AsyncClient(
@@ -197,16 +334,19 @@ class WhatsAppCloudApiSender:
             # identifying fields we've deliberately chosen are safe.
             response_obj = getattr(exc, "response", None)
             status_code = response_obj.status_code if response_obj is not None else None
-            detail = None
+            body: object = None
             if response_obj is not None:
                 try:
-                    detail = _graph_api_error_detail(response_obj.json())
+                    body = response_obj.json()
                 except ValueError:
-                    detail = None
+                    body = None
+            detail = _graph_api_error_detail(body)
             description = f"WhatsApp send failed: {type(exc).__name__}"
             if status_code is not None:
                 description += f" (status={status_code}"
                 description += f", {detail})" if detail else ")"
+            if _refused_as_invalid(status_code, body):
+                raise WhatsAppMessageRejectedError(description) from exc
             raise WhatsAppSendError(description) from exc
 
         data = response.json()
