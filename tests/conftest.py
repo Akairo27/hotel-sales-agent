@@ -47,6 +47,21 @@ $$;
 # session-local "request.jwt.claim.sub" GUC that PostgREST sets per
 # request from the verified JWT — tests set it directly to simulate being
 # signed in as a given user.
+# Supabase Realtime's publication, which every Supabase project has and a
+# plain Postgres does not: created here, empty, so migration 0033's
+# ALTER PUBLICATION runs in CI exactly as it runs on Supabase. Publications
+# live outside any schema, so the public-schema reset below leaves it in
+# place between sessions; its tables leave it when they are dropped.
+_REALTIME_PUBLICATION_SQL = """
+DO $$
+BEGIN
+    IF NOT EXISTS (SELECT FROM pg_publication WHERE pubname = 'supabase_realtime') THEN
+        CREATE PUBLICATION supabase_realtime;
+    END IF;
+END
+$$;
+"""
+
 _AUTH_SCHEMA_SQL = """
 CREATE SCHEMA IF NOT EXISTS auth;
 
@@ -122,6 +137,7 @@ def _schema(test_database_url: str) -> None:
     with psycopg.connect(test_database_url, autocommit=True) as conn:
         conn.execute(_ROLES_SQL)
         conn.execute(_AUTH_SCHEMA_SQL)
+        conn.execute(_REALTIME_PUBLICATION_SQL)
         conn.execute("DROP SCHEMA public CASCADE")
         conn.execute("CREATE SCHEMA public")
         conn.execute(_DEFAULT_ACL_BASELINE_PATH.read_text(encoding="utf-8"))

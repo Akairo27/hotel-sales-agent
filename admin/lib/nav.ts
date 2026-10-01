@@ -2,6 +2,7 @@ import type { AppRole } from "@/lib/types";
 
 export type NavIconName =
   | "home"
+  | "escalations"
   | "hotels"
   | "seasons"
   | "cost"
@@ -21,6 +22,12 @@ export interface NavItem {
 // them as its sidebar, so a screen added in one place can never go missing
 // from the other.
 export const NAV_ITEMS: NavItem[] = [
+  {
+    href: "/escalations",
+    label: "التصعيدات",
+    description: "طلبات العملاء التي تحتاج زميلاً من الفريق",
+    icon: "escalations",
+  },
   {
     href: "/hotels",
     label: "الفنادق وأنواع الغرف",

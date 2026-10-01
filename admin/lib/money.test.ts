@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { halalasToRiyals, riyalsToHalalas } from "./money";
+import { formatHalalasAsRiyal, halalasToRiyals, riyalsToHalalas } from "./money";
 
 describe("riyalsToHalalas", () => {
   it("converts a whole riyal amount to halalas", () => {
@@ -38,5 +38,19 @@ describe("halalasToRiyals", () => {
 
   it("rejects an amount that is not a whole number of riyals", () => {
     expect(() => halalasToRiyals(1_250)).toThrow(RangeError);
+  });
+});
+
+describe("formatHalalasAsRiyal", () => {
+  it("renders riyals and halalas with a thousands separator", () => {
+    expect(formatHalalasAsRiyal(125_000)).toBe("1,250.00 ريال");
+    expect(formatHalalasAsRiyal(68_770)).toBe("687.70 ريال");
+    expect(formatHalalasAsRiyal(5)).toBe("0.05 ريال");
+    expect(formatHalalasAsRiyal(0)).toBe("0.00 ريال");
+  });
+
+  it("rejects a negative or fractional amount", () => {
+    expect(() => formatHalalasAsRiyal(-1)).toThrow(RangeError);
+    expect(() => formatHalalasAsRiyal(1.5)).toThrow(RangeError);
   });
 });

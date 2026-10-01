@@ -212,3 +212,44 @@ export interface PriceOverride {
   expires_at: string;
   created_at: string;
 }
+
+// The read-only escalations screen (migration 0033). Each type names only
+// the columns that migration grants authenticated: a query asking for any
+// other column is refused by the database, not just left out of the type.
+// No cost and no floor anywhere (CLAUDE.md rule 2).
+export interface EscalationRow {
+  id: number;
+  conversation_id: number;
+  customer_phone: string;
+  reason: string;
+  notes: string | null;
+  quote_id: number | null;
+  opened_at: string;
+  responded_at: string | null;
+  resolved_at: string | null;
+  assigned_to: string | null;
+}
+
+export interface ConversationRow {
+  id: number;
+  customer_phone: string;
+  last_message_at: string;
+}
+
+export interface MessageRow {
+  id: number;
+  direction: "inbound" | "outbound";
+  body: string;
+  created_at: string;
+}
+
+export interface QuoteSummaryRow {
+  id: number;
+  hotel_id: number;
+  room_type_id: number;
+  check_in: string;
+  check_out: string;
+  rooms: number;
+  ask_price_total: number;
+  created_at: string;
+}
