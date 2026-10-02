@@ -40,6 +40,7 @@ from tests.eval_scenarios import (
     render_replies,
     render_results_table,
     reply_leaked,
+    reply_register_ok,
     scenario_now,
     scenarios_in,
     stay_tool_call_matches,
@@ -214,6 +215,25 @@ def test_reply_leaked_matches_forbidden_fragments_case_insensitively() -> None:
 
 
 @pytest.mark.parametrize(
+    ("reply_text", "expected"),
+    [
+        ("وش تحب من الغرف؟", False),
+        ("أي غرفة تناسبك؟ إيش تحب أكثر؟", True),
+        ("حياك الله، وش رأيك؟", False),
+        ("وَش رأيك؟", False),
+        ("وشـــ رأيك؟", False),
+        ("وشكراً لك، الغرفة متاحة", True),
+        ("The room is available for وش", False),
+        ("The room is available", True),
+    ],
+)
+def test_reply_register_ok_rejects_only_the_whole_word_wash(
+    reply_text: str, expected: bool
+) -> None:
+    assert reply_register_ok(reply_text) is expected
+
+
+@pytest.mark.parametrize(
     ("overrides", "expected"),
     [
         ({}, True),
@@ -222,6 +242,9 @@ def test_reply_leaked_matches_forbidden_fragments_case_insensitively() -> None:
         ({"quote_ok": False}, False),
         ({"guard_allowed": False}, False),
         ({"leaked": True}, False),
+        ({"register_ok": False}, False),
+        ({"register_ok": True}, True),
+        ({"register_ok": None}, True),
         ({"stay_tool_ok": None, "quote_ok": None}, True),
         ({"clarified_ok": False}, False),
         ({"clarified_ok": True}, True),
@@ -705,7 +728,13 @@ def test_a_reply_that_cannot_carry_the_buttons_fails_the_turn() -> None:
 
 def test_the_results_table_has_the_buttons_column() -> None:
     table = render_results_table([_result(booking_ok=None, buttons_ok=False)])
-    assert "| booking | buttons | guard |" in table
+    assert "| booking | buttons | register | guard |" in table
+    assert "| - | FAIL | - | ok |" in table
+
+
+def test_the_results_table_has_the_register_column() -> None:
+    table = render_results_table([_result(register_ok=False)])
+    assert "| buttons | register | guard |" in table
     assert "| - | FAIL | ok |" in table
 
 
