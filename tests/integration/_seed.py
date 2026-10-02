@@ -507,3 +507,18 @@ def seed_takeover(
             "resolved" if ended_at is not None else None,
         ),
     )
+
+
+def seed_staff_reply(
+    conn: psycopg.Connection[Any], takeover_id: int, *, body: str = "Hello"
+) -> int:
+    """One staff_replies row (migration 0035) from the takeover's holder,
+    for the takeover's conversation, written directly as the privileged
+    test role."""
+    return returning_id(
+        conn,
+        "INSERT INTO staff_replies (takeover_id, conversation_id, sent_by, body) "
+        "SELECT id, conversation_id, taken_over_by, %s "
+        "FROM conversation_takeovers WHERE id = %s RETURNING id",
+        (body, takeover_id),
+    )

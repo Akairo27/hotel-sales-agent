@@ -125,6 +125,25 @@ def _token_problem(authorization: str | None, expected_token: str) -> str | None
     return None
 
 
+def require_internal_token(request: Request) -> None:
+    """Refuses a request to an internal endpoint (this one, and
+    services/agent/staff_reply.py's) that does not carry
+    AGENT_INTERNAL_TOKEN as a Bearer token -- checked before any database
+    access, logged with the reason only.
+
+    Raises:
+        HTTPException(401): the token is missing, malformed or wrong.
+    """
+    problem = _token_problem(
+        request.headers.get("authorization"), get_internal_api_settings().token
+    )
+    if problem is not None:
+        logger.warning(
+            json.dumps({"event": "internal_request_rejected", "problem": problem})
+        )
+        raise HTTPException(status_code=401, detail="unauthorized")
+
+
 @dataclass(frozen=True)
 class ClaimedAcknowledgement:
     conversation_id: int
@@ -249,18 +268,10 @@ async def acknowledge_takeover(takeover_id: int, request: Request) -> JSONRespon
     offer to try again).
 
     Raises:
-        HTTPException(401): the Bearer token is missing or wrong -- checked
-            before any database access, logged with the reason only.
+        HTTPException(401): the Bearer token is missing or wrong
+            (require_internal_token).
     """
-    problem = _token_problem(
-        request.headers.get("authorization"), get_internal_api_settings().token
-    )
-    if problem is not None:
-        logger.warning(
-            json.dumps({"event": "internal_request_rejected", "problem": problem})
-        )
-        raise HTTPException(status_code=401, detail="unauthorized")
-
+    require_internal_token(request)
     try:
         with webhook.get_db_connection() as conn:
             status = await acknowledge(conn, takeover_id=takeover_id)

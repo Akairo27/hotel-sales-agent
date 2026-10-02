@@ -21,3 +21,9 @@ from __future__ import annotations
 
 # 100.00 SAR. See the module docstring above for why this exact value.
 MIN_BARE_PRICE_HALALAS = 10_000
+
+# The longest bare, unmarked digit run a staff reply's amounts audit
+# records (staff_replies.py): 9,999,999 SAR. A longer run is a phone or ID
+# number, not a price, and audit_log outlives a customer's erasure
+# (ARCHITECTURE.md §10), so it must never carry one.
+MAX_AUDITED_BARE_AMOUNT_DIGITS = 7

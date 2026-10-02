@@ -270,12 +270,17 @@ def test_escalations_and_messages_stream_through_supabase_realtime(
     db_conn: psycopg.Connection[Any],
 ) -> None:
     """Owner decision 8: live updates. Only these tables are published --
-    takeovers since migration 0034; conversations and quotes are re-read
-    when an event arrives."""
+    takeovers since migration 0034, staff replies since 0035; conversations
+    and quotes are re-read when an event arrives."""
     rows = db_conn.execute(
         "SELECT tablename FROM pg_publication_tables "
         "WHERE pubname = 'supabase_realtime' AND schemaname = 'public' "
         "ORDER BY tablename"
     ).fetchall()
 
-    assert rows == [("conversation_takeovers",), ("escalations",), ("messages",)]
+    assert rows == [
+        ("conversation_takeovers",),
+        ("escalations",),
+        ("messages",),
+        ("staff_replies",),
+    ]
