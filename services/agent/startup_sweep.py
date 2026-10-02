@@ -22,6 +22,8 @@ Deliberately not covered (owner decisions, 2026-09-29):
 - Only a conversation's last message is judged: an earlier lost message
   followed by a later answered one was seen by the model in that later
   turn.
+- A conversation a staff member took over after its last message (owner
+  decision D6, 2026-10-02): see find_unanswered_messages.
 """
 
 from __future__ import annotations
@@ -121,7 +123,11 @@ def find_unanswered_messages(
     stored inside [started_at - lookback, started_at - CLOCK_SKEW_
     TOLERANCE), most recent first. A conversation with any later message --
     a reply, a fallback, or a newer message the live process is handling --
-    is not returned. Uses only the messages columns hotel_agent can read."""
+    is not returned. Nor is one a staff member held at any time after that
+    message (a takeover still active, or one that ended after it): the
+    message was theirs to answer, and the bot stays silent during a
+    takeover (owner decision D6, 2026-10-02). Uses only the columns
+    hotel_agent can read."""
     rows = conn.execute(
         "SELECT id, conversation_id, customer_phone, created_at FROM ("
         " SELECT DISTINCT ON (conversation_id)"
@@ -130,6 +136,9 @@ def find_unanswered_messages(
         " ORDER BY conversation_id, created_at DESC, id DESC"
         ") AS last_message "
         "WHERE direction = 'inbound' AND created_at < %s "
+        "AND NOT EXISTS (SELECT FROM conversation_takeovers AS t"
+        " WHERE t.conversation_id = last_message.conversation_id"
+        " AND (t.ended_at IS NULL OR t.ended_at > last_message.created_at)) "
         "ORDER BY created_at DESC, id DESC",
         (started_at - lookback, started_at - CLOCK_SKEW_TOLERANCE),
     ).fetchall()

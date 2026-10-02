@@ -118,6 +118,21 @@ NEWER_PRICE = FixedText(
     ),
 )
 
+# Sent once when a staff member takes the conversation over from the
+# dashboard; the bot then stays silent until it is resolved or handed back
+# (owner-approved 2026-10-01, ARCHITECTURE.md §7; services/agent/takeover.py).
+TAKEN_OVER = FixedText(
+    arabic="حياك الله، معك الآن زميلي من فريق الحجوزات، ويكمل معك من هنا إن شاء الله.",
+    english=(
+        "A colleague from our reservations team is with you now and will "
+        "continue from here."
+    ),
+    indonesian=(
+        "Rekan saya dari tim reservasi sekarang bersama Anda dan akan "
+        "melanjutkan dari sini."
+    ),
+)
+
 # Owner-approved (2026-09-30): Latin-script text with any of these whole
 # words is Indonesian, otherwise English. Deliberately no word English
 # shares (such as "hotel").

@@ -2,8 +2,10 @@
 
 Health-check plus the WhatsApp Cloud API webhook (services/agent/webhook.py)
 — signature verification, idempotent inbound logging, and spend/rate-cap
-enforcement. The lifespan handler refuses to start with a missing setting
-(validate_startup_configuration), then starts the startup sweep for
+enforcement — and the internal takeover acknowledgement the dashboard
+calls (services/agent/takeover_ack.py). The lifespan handler refuses to
+start with a missing setting (validate_startup_configuration), then starts
+the startup sweep for
 messages lost to a hard kill (services/agent/startup_sweep.py) in the
 background. No booking/payment code path here — CLAUDE.md rule 10 requires
 asking about before adding anything touching payment/booking confirmation.
@@ -29,6 +31,8 @@ from services.agent.startup_sweep import (
     load_startup_sweep_settings,
     run_startup_sweep,
 )
+from services.agent.takeover_ack import load_internal_api_settings
+from services.agent.takeover_ack import router as takeover_ack_router
 from services.agent.webhook import get_model_transport, load_webhook_settings
 from services.agent.webhook import router as webhook_router
 from services.agent.whatsapp_send import load_whatsapp_send_settings
@@ -121,7 +125,8 @@ def validate_startup_configuration() -> None:
 
     Raises:
         WebhookConfigurationError, LlmConfigurationError,
-        WhatsAppSendConfigurationError, StartupSweepConfigurationError:
+        WhatsAppSendConfigurationError, StartupSweepConfigurationError,
+        InternalApiConfigurationError:
             from the respective loaders.
         StartupConfigurationError: DATABASE_URL is unset or empty.
     """
@@ -129,6 +134,7 @@ def validate_startup_configuration() -> None:
     get_model_transport(load_llm_settings())
     load_whatsapp_send_settings()
     load_startup_sweep_settings()
+    load_internal_api_settings()
     if not os.environ.get("DATABASE_URL"):
         raise StartupConfigurationError("DATABASE_URL is not set")
 
@@ -155,6 +161,7 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
 
 app = FastAPI(title="hotel-sales-agent", lifespan=_lifespan)
 app.include_router(webhook_router)
+app.include_router(takeover_ack_router)
 
 
 @app.get("/health")

@@ -37,7 +37,7 @@ from services.agent.startup_sweep import (
     run_startup_sweep,
 )
 from services.agent.whatsapp_send import WhatsAppSendError, WhatsAppSendSettings
-from tests.integration._seed import seed_conversation, seed_message
+from tests.integration._seed import seed_conversation, seed_message, seed_takeover
 
 pytestmark = pytest.mark.usefixtures("db_conn")
 
@@ -186,6 +186,59 @@ def test_sweep_answers_a_message_lost_before_the_start(
         "skipped_over_limit": 0,
         "statuses": {"escalated": 1},
     }
+
+
+@pytest.mark.parametrize(
+    ("taken_over_ago", "ended_ago"),
+    [
+        pytest.param(timedelta(minutes=10), None, id="taken-over-before-it"),
+        pytest.param(timedelta(minutes=1), None, id="taken-over-after-it"),
+        pytest.param(timedelta(minutes=5), timedelta(minutes=1), id="ended-since"),
+        pytest.param(timedelta(minutes=1), timedelta(seconds=30), id="held-after-it"),
+    ],
+)
+def test_sweep_leaves_a_message_a_staff_member_held_alone(
+    sender: _RecordingSender,
+    db_conn: psycopg.Connection[Any],
+    taken_over_ago: timedelta,
+    ended_ago: timedelta | None,
+) -> None:
+    """Owner decision D6 (2026-10-02): a conversation taken over at any
+    time after its last message was the staff member's to answer, and the
+    bot stays silent during a takeover."""
+    conversation_id = seed_conversation(db_conn, customer_phone=_PHONE)
+    _seed_inbound(db_conn, conversation_id, ago=timedelta(minutes=3))
+    seed_takeover(
+        db_conn,
+        conversation_id,
+        taken_over_at=_STARTED_AT - taken_over_ago,
+        ended_at=None if ended_ago is None else _STARTED_AT - ended_ago,
+    )
+
+    _sweep()
+
+    assert sender.calls == []
+    assert _escalations(db_conn) == []
+
+
+def test_sweep_answers_a_message_that_came_after_a_takeover_ended(
+    sender: _RecordingSender, db_conn: psycopg.Connection[Any]
+) -> None:
+    conversation_id = seed_conversation(db_conn, customer_phone=_PHONE)
+    seed_takeover(
+        db_conn,
+        conversation_id,
+        taken_over_at=_STARTED_AT - timedelta(minutes=10),
+        ended_at=_STARTED_AT - timedelta(minutes=5),
+    )
+    _seed_inbound(db_conn, conversation_id, ago=timedelta(minutes=3))
+
+    _sweep()
+
+    assert sender.calls == [(_WA_ID, FALLBACK.english)]
+    assert _escalations(db_conn) == [
+        ("unanswered_at_startup", {"source": "startup_sweep"})
+    ]
 
 
 def test_sweep_leaves_an_answered_message_alone(

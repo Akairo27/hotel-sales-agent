@@ -33,6 +33,12 @@ response can take without this split). Order matters and is deliberate:
    on, since a redelivery would be dropped as a duplicate. Reactions,
    stickers and unknown types are ignored, not stored
    (_HANDLED_MESSAGE_TYPES).
+2a. If a staff member has taken the conversation over from the dashboard
+   (services/agent/takeover.py), stop here: the message stays stored for
+   them and nothing is sent (owner decision D6, 2026-10-02). The same check
+   runs again just before anything goes out to the customer, in
+   _deliver_reply and _escalate_and_notify, for a turn the takeover
+   overtakes.
 3. Check the per-number-per-day message rate (services.agent.llm.caps).
    The first message past it gets the fallback and an escalation; later
    ones that day stay silent (owner decision B).
@@ -216,6 +222,7 @@ from services.agent.output_guard.enforcement import (
     open_escalation,
 )
 from services.agent.staff_follow_up import open_follow_up_for_dates_not_open
+from services.agent.takeover import is_taken_over
 from services.agent.whatsapp_send import (
     WHATSAPP_TEXT_BODY_MAX_CHARS,
     WhatsAppCloudApiSender,
@@ -785,6 +792,11 @@ _STATUS_RATE_LIMITED = "rate_limited"
 _STATUS_UNSUPPORTED_TYPE = "unsupported_type"
 _STATUS_NOT_STORED = "not_stored"
 _STATUS_BATCH = "batch"
+# Stored for the staff member who took the conversation over; nothing sent.
+_STATUS_TAKEN_OVER = "taken_over"
+# A turn whose reply or fallback was not sent because a takeover began while
+# it ran (the approved takeover silence, ARCHITECTURE.md §7).
+_STATUS_SUPPRESSED_TAKEN_OVER = "suppressed_taken_over"
 
 # The four outcomes of _escalate_and_notify, one per combination of "was a
 # human escalation opened" and "did the customer get the fallback". Named
@@ -905,6 +917,27 @@ def _safe_exception_log_fields(exc: BaseException) -> dict[str, str]:
         "exception_type": type(exc).__name__,
         "traceback": "".join(traceback.format_tb(exc.__traceback__)),
     }
+
+
+def _send_suppressed_by_takeover(
+    conn: psycopg.Connection[Any], *, conversation_id: int, withheld: str
+) -> bool:
+    """Whether a takeover began after this turn started, so `withheld` (a
+    log label: "reply" or "fallback") must not be sent -- logged at INFO
+    when so. A failed check reads as no takeover (takeover.is_taken_over).
+    Never raises."""
+    if not is_taken_over(conn, conversation_id=conversation_id):
+        return False
+    logger.info(
+        json.dumps(
+            {
+                "event": "customer_send_suppressed_taken_over",
+                "conversation_id": conversation_id,
+                "withheld": withheld,
+            }
+        )
+    )
+    return True
 
 
 def _funnel_status(*, escalated: bool, delivered: bool) -> str:
@@ -1056,6 +1089,31 @@ async def _send_fallback_or_log_failure(
     return whatsapp_message_id is not None
 
 
+async def send_fixed_text_or_log_failure(
+    conn: psycopg.Connection[Any],
+    *,
+    conversation_id: int,
+    customer_phone: str,
+    notice: FixedText,
+    purpose: str,
+) -> bool:
+    """Sends one fixed text outside any turn -- today only the takeover
+    acknowledgement (services/agent/takeover_ack.py) -- exactly as the
+    funnel sends its fallback: in the customer's language, through the
+    output guard (CLAUDE.md rule 8), recorded as an outbound message.
+    `purpose` labels the log lines. Deliberately no takeover check: the
+    acknowledgement is the one text sent during a takeover. Returns whether
+    it was delivered; never raises."""
+    return await _send_fallback_or_log_failure(
+        conn,
+        conversation_id=conversation_id,
+        customer_phone=customer_phone,
+        reason=purpose,
+        escalation_id=None,
+        notice=notice,
+    )
+
+
 async def _escalate_and_notify(
     conn: psycopg.Connection[Any],
     *,
@@ -1089,10 +1147,15 @@ async def _escalate_and_notify(
     connection, with the database itself still up, must not become a
     silent turn.
 
+    The one exception to sending the fallback: a staff member took the
+    conversation over while the turn ran. The escalation still opens, for
+    them to see, but the customer gets nothing from the bot (the approved
+    takeover silence, ARCHITECTURE.md §7).
+
     Returns one of the four _STATUS_ESCALATED* / _STATUS_NOTIFIED_* /
-    _STATUS_FAILED_UNRECORDED labels. Whatever usage the turn incurred is
-    the caller's to have recorded before this runs; this function never
-    records usage. Never raises.
+    _STATUS_FAILED_UNRECORDED labels, or _STATUS_SUPPRESSED_TAKEN_OVER.
+    Whatever usage the turn incurred is the caller's to have recorded
+    before this runs; this function never records usage. Never raises.
     """
     escalation_id = existing_escalation_id
     if escalation_id is None:
@@ -1103,6 +1166,10 @@ async def _escalate_and_notify(
             exc=exc,
             extra_notes=extra_notes,
         )
+    if _send_suppressed_by_takeover(
+        conn, conversation_id=conversation_id, withheld="fallback"
+    ):
+        return _STATUS_SUPPRESSED_TAKEN_OVER
     delivered = await _send_fallback_or_log_failure(
         conn,
         conversation_id=conversation_id,
@@ -1761,7 +1828,13 @@ async def _deliver_reply(
 ) -> str:
     """Delivers a reply ("processed"), with offer's buttons when given, or
     hands the turn to _escalate_and_notify for whatever stopped it
-    (_send_reply). booking_passed_on: see _send_reply. Never raises."""
+    (_send_reply). Sends nothing if a staff member took the conversation
+    over while the turn ran (suppressed_taken_over). booking_passed_on: see
+    _send_reply. Never raises."""
+    if _send_suppressed_by_takeover(
+        conn, conversation_id=conversation_id, withheld="reply"
+    ):
+        return _STATUS_SUPPRESSED_TAKEN_OVER
     failure = await _send_reply(
         conn,
         conversation_id=conversation_id,
@@ -2095,7 +2168,10 @@ def _accept_inbound_message(
     background_tasks: BackgroundTasks,
 ) -> str:
     """Stores one inbound message and schedules what answers it. Returns
-    its status.
+    its status. A message to a conversation a staff member has taken over
+    is stored and nothing is scheduled -- not even the "please type" notice
+    or the rate-cap fallback, and the rate cap is not checked (owner
+    decision D6, 2026-10-02).
 
     Everything before the insert may raise -- the message is not stored
     yet, so a retry can still process it. Everything after may not: the
@@ -2131,6 +2207,17 @@ def _accept_inbound_message(
         return _STATUS_DUPLICATE
 
     _touch_last_message_at_or_log_failure(conn, conversation_id=conversation_id)
+    if is_taken_over(conn, conversation_id=conversation_id):
+        logger.info(
+            json.dumps(
+                {
+                    "event": "inbound_while_taken_over",
+                    "conversation_id": conversation_id,
+                    "message_type": inbound.message_type,
+                }
+            )
+        )
+        return _STATUS_TAKEN_OVER
     cap_exc = _rate_cap_blocks(
         conn,
         inbound,

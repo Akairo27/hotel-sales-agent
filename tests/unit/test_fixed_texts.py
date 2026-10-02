@@ -19,6 +19,7 @@ from services.agent.fixed_texts import (
     FALLBACK,
     NEWER_PRICE,
     PLEASE_TYPE,
+    TAKEN_OVER,
     FixedText,
     Language,
     detect_language,
@@ -33,6 +34,7 @@ _FIXED_TEXTS = (
     ("booking_yes_button", BOOKING_YES_BUTTON),
     ("booking_question_button", BOOKING_QUESTION_BUTTON),
     ("newer_price", NEWER_PRICE),
+    ("taken_over", TAKEN_OVER),
 )
 _RENDERINGS = [
     pytest.param(text.render(language), id=f"{name}-{language or 'bilingual'}")
@@ -96,6 +98,21 @@ def test_the_booking_button_and_newer_price_wording_is_pinned() -> None:
     )
 
 
+def test_the_takeover_acknowledgement_wording_is_pinned() -> None:
+    """Owner-approved 2026-10-01 (ARCHITECTURE.md §7, item 8)."""
+    assert TAKEN_OVER.arabic == (
+        "حياك الله، معك الآن زميلي من فريق الحجوزات، ويكمل معك من هنا إن شاء الله."
+    )
+    assert TAKEN_OVER.english == (
+        "A colleague from our reservations team is with you now and will "
+        "continue from here."
+    )
+    assert TAKEN_OVER.indonesian == (
+        "Rekan saya dari tim reservasi sekarang bersama Anda dan akan "
+        "melanjutkan dari sini."
+    )
+
+
 @pytest.mark.parametrize("language", ["ar", "en", "id"])
 @pytest.mark.parametrize("text", [BOOKING_YES_BUTTON, BOOKING_QUESTION_BUTTON])
 def test_every_button_title_fits_whatsapp(text: FixedText, language: Language) -> None:
@@ -126,7 +143,7 @@ def test_each_known_language_gets_that_language_alone(text: FixedText) -> None:
     assert text.render("id") == text.indonesian
 
 
-@pytest.mark.parametrize("text", [FALLBACK, PLEASE_TYPE])
+@pytest.mark.parametrize("text", [FALLBACK, PLEASE_TYPE, TAKEN_OVER])
 def test_an_unknown_language_gets_arabic_then_english(text: FixedText) -> None:
     assert text.render(None) == f"{text.arabic}\n{text.english}"
 
