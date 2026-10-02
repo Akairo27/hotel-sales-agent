@@ -13,6 +13,7 @@ import {
 } from "@/lib/escalations";
 import { formatHalalasAsRiyal } from "@/lib/money";
 import { getCurrentAppUser } from "@/lib/session";
+import { staffMessageLabel } from "@/lib/staffReply";
 import { noticeState } from "@/lib/takeoverNotice";
 import type {
   ConversationRow,
@@ -25,8 +26,10 @@ import { createClient } from "@/utils/supabase/server";
 import { LiveRefresh } from "../../LiveRefresh";
 import { ReasonDetails } from "../../_parts/ReasonDetails";
 import { loadStayNames, type StayNames } from "../../_parts/names";
+import { loadStaffReplyContext } from "../../_parts/staffReplies";
 import { type ActiveTakeover, loadActiveTakeovers } from "../../_parts/takeovers";
 import { ConversationScroll } from "./ConversationScroll";
+import { ReplyBox } from "./ReplyBox";
 import { type PanelTakeover, TakeoverPanel } from "./TakeoverPanel";
 
 // The latest messages of the conversation shown, oldest first.
@@ -117,6 +120,18 @@ function escalationsBeforeEachMessage(
   return { before, after: chronological.slice(next) };
 }
 
+/** Who wrote a message: the customer, a staff member from the dashboard
+ * («الموظف: name»), or the agent. */
+function messageSender(message: MessageRow, authorNames: Map<number, string>): string {
+  if (message.direction === "inbound") {
+    return "العميل";
+  }
+  if (message.staff_reply_id !== null) {
+    return staffMessageLabel(authorNames.get(message.staff_reply_id) ?? null);
+  }
+  return "الوكيل";
+}
+
 function EscalationMarker({ escalation }: { escalation: EscalationRow }) {
   return (
     <p className="my-2 text-center text-xs text-muted-foreground">
@@ -138,9 +153,10 @@ function panelTakeover(takeover: ActiveTakeover | undefined): PanelTakeover | nu
   };
 }
 
-// One customer's escalations and conversation (staff notification steps 1
-// and 2a, ARCHITECTURE.md §7; grouped by customer, owner decision
-// 2026-10-01), with take over, resolve and hand back (TakeoverPanel). Every
+// One customer's escalations and conversation (staff notification steps 1,
+// 2a and 3, ARCHITECTURE.md §7; grouped by customer, owner decision
+// 2026-10-01), with take over, resolve and hand back (TakeoverPanel) and the
+// holder's reply box (ReplyBox). Every
 // read goes through the signed-in user's own session, so migrations 0033
 // and 0034's policies decide what exists here; customer text is rendered as
 // text, never as HTML.
@@ -160,8 +176,14 @@ export default async function CustomerEscalationsPage({
   }
 
   const supabase = await createClient();
-  const [conversationResult, escalationsResult, messagesResult, quotesResult, takeovers] =
-    await Promise.all([
+  const [
+    conversationResult,
+    escalationsResult,
+    messagesResult,
+    lastInboundResult,
+    quotesResult,
+    takeovers,
+  ] = await Promise.all([
     supabase
       .from("conversations")
       .select("id, customer_phone, last_message_at")
@@ -174,12 +196,22 @@ export default async function CustomerEscalationsPage({
       .overrideTypes<EscalationRow[], { merge: false }>(),
     supabase
       .from("messages")
-      .select("id, direction, body, created_at")
+      .select("id, direction, body, created_at, staff_reply_id")
       .eq("conversation_id", conversationId)
       .order("created_at", { ascending: false })
       .order("id", { ascending: false })
       .limit(MESSAGE_LIMIT)
       .overrideTypes<MessageRow[], { merge: false }>(),
+    // Apart from the messages shown: the 24-hour window counts from the
+    // customer's last message, which a long run of replies could push out.
+    supabase
+      .from("messages")
+      .select("created_at")
+      .eq("conversation_id", conversationId)
+      .eq("direction", "inbound")
+      .order("created_at", { ascending: false })
+      .limit(1)
+      .maybeSingle<{ created_at: string }>(),
     supabase
       .from("quotes")
       .select(QUOTE_COLUMNS)
@@ -194,6 +226,11 @@ export default async function CustomerEscalationsPage({
     notFound();
   }
   const messages = [...(messagesResult.data ?? [])].reverse();
+  const staffReplies = await loadStaffReplyContext(
+    supabase,
+    conversationId,
+    messages.flatMap((message) => (message.staff_reply_id === null ? [] : [message.staff_reply_id])),
+  );
   const quotes = quotesResult.data ?? [];
   const stays = escalations.flatMap((escalation) => notOpenStays(parseNotes(escalation.notes)));
   const names = await loadStayNames(
@@ -204,6 +241,7 @@ export default async function CustomerEscalationsPage({
   const { before, after } = escalationsBeforeEachMessage(messages, escalations);
   const openCount = escalations.filter(isOpen).length;
   const now = new Date();
+  const takeover = takeovers.byConversation.get(conversationId);
 
   return (
     <AppShell appUser={appUser}>
@@ -225,7 +263,7 @@ export default async function CustomerEscalationsPage({
           <TakeoverPanel
             conversationId={conversationId}
             openCount={openCount}
-            takeover={panelTakeover(takeovers.byConversation.get(conversationId))}
+            takeover={panelTakeover(takeover)}
             currentUserId={appUser.id}
             isAdmin={appUser.app_role === "admin"}
             now={now.toISOString()}
@@ -264,11 +302,13 @@ export default async function CustomerEscalationsPage({
                     className={
                       message.direction === "inbound"
                         ? "me-12 rounded-xl border border-border bg-surface-subtle p-3"
-                        : "ms-12 rounded-xl border border-border p-3"
+                        : message.staff_reply_id === null
+                          ? "ms-12 rounded-xl border border-border p-3"
+                          : "ms-12 rounded-xl border border-accent/40 p-3"
                     }
                   >
                     <p className="text-xs text-muted-foreground">
-                      {message.direction === "inbound" ? "العميل" : "الوكيل"} ·{" "}
+                      {messageSender(message, staffReplies.authorNames)} ·{" "}
                       <span dir="ltr">{formatRiyadhDateTime(message.created_at)}</span>
                     </p>
                     <p className="mt-1 whitespace-pre-wrap break-words">{message.body}</p>
@@ -280,6 +320,19 @@ export default async function CustomerEscalationsPage({
               <EscalationMarker key={escalation.id} escalation={escalation} />
             ))}
           </ConversationScroll>
+          <ReplyBox
+            conversationId={conversationId}
+            takeoverId={takeover?.id ?? null}
+            holderId={takeover?.taken_over_by ?? null}
+            currentUserId={appUser.id}
+            lastInboundAt={lastInboundResult.data?.created_at ?? null}
+            replies={staffReplies.recent.map((reply) => ({
+              ...reply,
+              authorName: staffReplies.authorNames.get(reply.id) ?? null,
+            }))}
+            loadFailed={staffReplies.failed}
+            now={now.toISOString()}
+          />
         </section>
 
         {quotes.length > 0 && (

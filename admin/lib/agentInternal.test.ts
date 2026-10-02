@@ -1,5 +1,11 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { AGENT_BASE_URL, requestTakeoverNotice } from "./agentInternal";
+import {
+  AGENT_BASE_URL,
+  AGENT_REQUEST_TIMEOUT_MS,
+  STAFF_REPLY_REQUEST_TIMEOUT_MS,
+  requestStaffReplySend,
+  requestTakeoverNotice,
+} from "./agentInternal";
 
 // A placeholder, never a real token.
 const TOKEN = "test-agent-internal-token-placeholder";
@@ -79,6 +85,88 @@ describe("requestTakeoverNotice", () => {
     await requestTakeoverNotice(1);
 
     expect(logged).toHaveBeenCalled();
+    expect(JSON.stringify(logged.mock.calls)).not.toContain(TOKEN);
+  });
+});
+
+describe("requestStaffReplySend", () => {
+  const fetchMock = vi.fn<typeof fetch>();
+
+  beforeEach(() => {
+    vi.stubGlobal("fetch", fetchMock);
+    vi.stubEnv("AGENT_INTERNAL_TOKEN", TOKEN);
+    vi.spyOn(console, "error").mockImplementation(() => {});
+  });
+
+  afterEach(() => {
+    fetchMock.mockReset();
+    vi.unstubAllGlobals();
+    vi.unstubAllEnvs();
+    vi.restoreAllMocks();
+  });
+
+  it("posts only the reply id to the agent's loopback endpoint, with the Bearer token", async () => {
+    fetchMock.mockResolvedValue(answer(200, { status: "sent" }));
+
+    expect(await requestStaffReplySend(7)).toBe("sent");
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    const [url, init] = fetchMock.mock.calls[0];
+    expect(url).toBe(`${AGENT_BASE_URL}/internal/staff-replies/7/send`);
+    expect(init?.method).toBe("POST");
+    expect(init?.headers).toEqual({ Authorization: `Bearer ${TOKEN}` });
+    expect(init?.body).toBeUndefined();
+    expect(init?.signal).toBeInstanceOf(AbortSignal);
+  });
+
+  it("waits longer than the notice does, for the WhatsApp send itself", () => {
+    expect(STAFF_REPLY_REQUEST_TIMEOUT_MS).toBeGreaterThan(AGENT_REQUEST_TIMEOUT_MS);
+  });
+
+  it("returns the agent's status for each code it answers with", async () => {
+    fetchMock.mockResolvedValueOnce(answer(200, { status: "outside_window" }));
+    fetchMock.mockResolvedValueOnce(answer(200, { status: "already_claimed" }));
+    fetchMock.mockResolvedValueOnce(answer(404, { status: "not_found" }));
+    fetchMock.mockResolvedValueOnce(answer(502, { status: "failed" }));
+    fetchMock.mockResolvedValueOnce(answer(503, { status: "unavailable" }));
+
+    expect(await requestStaffReplySend(1)).toBe("outside_window");
+    expect(await requestStaffReplySend(1)).toBe("already_claimed");
+    expect(await requestStaffReplySend(1)).toBe("not_found");
+    expect(await requestStaffReplySend(1)).toBe("failed");
+    expect(await requestStaffReplySend(1)).toBe("unavailable");
+  });
+
+  it("calls nothing and reports unreachable when no token is configured", async () => {
+    vi.stubEnv("AGENT_INTERNAL_TOKEN", "");
+
+    expect(await requestStaffReplySend(1)).toBe("unreachable");
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("reports a refused token, a network error, a timeout or a non-JSON answer as unreachable", async () => {
+    fetchMock.mockResolvedValueOnce(answer(401, { detail: "unauthorized" }));
+    fetchMock.mockRejectedValueOnce(new TypeError("fetch failed"));
+    fetchMock.mockRejectedValueOnce(new DOMException("timed out", "TimeoutError"));
+    fetchMock.mockResolvedValueOnce(new Response("<html>", { status: 200 }));
+
+    for (let attempt = 0; attempt < 4; attempt += 1) {
+      expect(await requestStaffReplySend(1)).toBe("unreachable");
+    }
+  });
+
+  it("logs the reply id under its own key, and never the token", async () => {
+    const logged = vi.spyOn(console, "error").mockImplementation(() => {});
+    fetchMock.mockResolvedValueOnce(answer(401, {}));
+    fetchMock.mockRejectedValueOnce(new TypeError(`failed with ${TOKEN}`));
+
+    await requestStaffReplySend(5);
+    await requestStaffReplySend(5);
+
+    expect(logged).toHaveBeenCalledTimes(2);
+    const first = JSON.parse(String(logged.mock.calls[0][0])) as Record<string, unknown>;
+    expect(first).toMatchObject({ event: "agent_internal_token_refused", staff_reply_id: 5 });
+    expect(first).not.toHaveProperty("takeover_id");
     expect(JSON.stringify(logged.mock.calls)).not.toContain(TOKEN);
   });
 });

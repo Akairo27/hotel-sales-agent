@@ -7,7 +7,7 @@ import { createClient } from "@/utils/supabase/client";
 // Live updates for the escalations screens (owner decision 8, 2026-10-01):
 // Supabase Realtime on escalations, messages and, since migration 0034,
 // conversation_takeovers -- so a takeover on one screen shows on every
-// other -- checked per subscriber against the tables' policies. An event's payload is never shown --
+// other -- and, since 0035, staff_replies, checked per subscriber against the tables' policies. An event's payload is never shown --
 // it only triggers router.refresh(), so the page re-reads everything
 // through the signed-in user's own RLS-scoped session. While the channel
 // is not connected (still joining, timed out, closed or in error) the page
@@ -47,8 +47,9 @@ export function LiveRefresh({
           refreshSoon,
         );
     } else {
-      // One customer's page: its conversation's escalations, messages and
-      // takeovers.
+      // One customer's page: its conversation's escalations, messages,
+      // takeovers and, since migration 0035, staff replies (a reply's sent
+      // or failed outcome is an update of its row).
       const filter = `conversation_id=eq.${conversationId}`;
       channel
         .on("postgres_changes", { event: "*", schema: "public", table: "escalations", filter }, refreshSoon)
@@ -56,6 +57,11 @@ export function LiveRefresh({
         .on(
           "postgres_changes",
           { event: "*", schema: "public", table: "conversation_takeovers", filter },
+          refreshSoon,
+        )
+        .on(
+          "postgres_changes",
+          { event: "*", schema: "public", table: "staff_replies", filter },
           refreshSoon,
         );
     }
