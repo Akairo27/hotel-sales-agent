@@ -1,11 +1,13 @@
 // The escalations screen's display rules (staff notification, step 1;
 // owner decisions 2026-10-01, ARCHITECTURE.md §7): which group a reason
 // belongs to and its Arabic label (the same labels the WhatsApp staff
-// alert will carry), the masked phone the list shows, Riyadh times, the
-// age of an escalation, and the notes an escalation carries, read safely.
+// alert will carry), the masked phone the list shows, Riyadh times, stay
+// dates as the bot writes them, the age of an escalation, and the notes an
+// escalation carries, read safely.
 //
 // A reason this file does not know (a newer agent writing a new one) falls
 // into "failure": shown, never hidden.
+import { monthName } from "@/lib/monthNames";
 
 export type EscalationGroup =
   | "booking"
@@ -78,6 +80,26 @@ export function formatRiyadhDateTime(instant: string): string {
     RIYADH_TIME.formatToParts(new Date(instant)).map((part) => [part.type, part.value]),
   );
   return `${parts.year}-${parts.month}-${parts.day} ${parts.hour}:${parts.minute}`;
+}
+
+const ISO_DATE = /^(\d{4})-(\d{2})-(\d{2})$/;
+
+/** A stay date ("2026-10-20") as the bot writes it to customers: «20
+ * أكتوبر», Western digits (owner request 2026-10-02), with the year added
+ * only when it is not the current year in Riyadh («5 يناير 2027»). Anything
+ * that is not such a date is returned as it is, never hidden. */
+export function formatStayDate(isoDate: string, now: Date): string {
+  const match = ISO_DATE.exec(isoDate);
+  if (!match) {
+    return isoDate;
+  }
+  const [, year, month, day] = match;
+  const dayAndMonth = `${Number(day)} ${monthName("gregorian", Number(month))}`;
+  return year === riyadhYear(now) ? dayAndMonth : `${dayAndMonth} ${year}`;
+}
+
+function riyadhYear(now: Date): string {
+  return RIYADH_TIME.formatToParts(now).find((part) => part.type === "year")?.value ?? "";
 }
 
 interface ArabicCountForms {

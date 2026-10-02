@@ -157,6 +157,22 @@ jobs:
       - name: vitest
         run: npx vitest run
 
+      # AGENT_INTERNAL_TOKEN must never reach the browser (owner requirement
+      # 2026-10-02): a production build with a random canary in its place,
+      # then scripts/check-client-bundle.mjs looks for the canary and the
+      # variable's name in everything the browser downloads. The Supabase
+      # values are placeholders: nothing at build time connects to them.
+      - name: next build, then check the browser bundle for the agent token
+        env:
+          NEXT_TELEMETRY_DISABLED: "1"
+          NEXT_PUBLIC_SUPABASE_URL: https://ci-placeholder.supabase.co
+          NEXT_PUBLIC_SUPABASE_ANON_KEY: ci-placeholder-anon-key
+        run: |
+          AGENT_INTERNAL_TOKEN="ci-canary-$(openssl rand -hex 24)"
+          export AGENT_INTERNAL_TOKEN
+          npx next build
+          node scripts/check-client-bundle.mjs
+
   secrets:
     name: secret scan
     runs-on: ubuntu-24.04

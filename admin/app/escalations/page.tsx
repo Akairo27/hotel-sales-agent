@@ -4,6 +4,7 @@ import { AppShell } from "@/app/_components/AppShell";
 import { PageHeader } from "@/app/_components/PageHeader";
 import {
   type CustomerEscalations,
+  type CustomerTakeover,
   customerPage,
   groupByCustomer,
 } from "@/lib/escalationCustomers";
@@ -19,6 +20,7 @@ import type { EscalationRow } from "@/lib/types";
 import { BADGE, BADGE_ACCENT, HINT } from "@/lib/ui";
 import { createClient } from "@/utils/supabase/server";
 import { LiveRefresh } from "./LiveRefresh";
+import { loadActiveTakeovers } from "./_parts/takeovers";
 
 // The escalations one list reads, newest first. Open escalations stay few
 // while staff handle them; if this many are ever open at once the page says
@@ -39,14 +41,24 @@ function filterHref(status: StatusFilter, group: EscalationGroup | undefined): s
   return `/escalations?${query.toString()}`;
 }
 
-function statusLabel(customer: CustomerEscalations): string {
-  if (customer.openCount === 0) {
-    return "مغلق";
+function statusLabel(customer: CustomerEscalations, currentUserId: string, now: Date): string {
+  if (customer.takeover) {
+    const holder =
+      customer.takeover.holderId === currentUserId ? "أنت" : customer.takeover.holderName;
+    return `استلمه ${holder} ${formatAge(customer.takeover.takenOverAt, now)}`;
   }
-  return customer.oldestUnhandledAt === null ? "مستلم" : "لم يُستلم";
+  return customer.openCount === 0 ? "مغلق" : "لم يُستلم";
 }
 
-function CustomerCard({ customer, now }: { customer: CustomerEscalations; now: Date }) {
+function CustomerCard({
+  customer,
+  currentUserId,
+  now,
+}: {
+  customer: CustomerEscalations;
+  currentUserId: string;
+  now: Date;
+}) {
   const [topGroup, ...otherGroups] =
     customer.openCount > 0 ? customer.openGroups : customer.allGroups;
   return (
@@ -74,19 +86,23 @@ function CustomerCard({ customer, now }: { customer: CustomerEscalations; now: D
             أقدم ما لم يُستلم: {formatAge(customer.oldestUnhandledAt, now)}
           </span>
         )}
-        <span className={`${customer.openCount > 0 ? BADGE_ACCENT : BADGE} ms-auto`}>
-          {statusLabel(customer)}
+        <span
+          className={`${customer.openCount > 0 && !customer.takeover ? BADGE_ACCENT : BADGE} ms-auto`}
+        >
+          {statusLabel(customer, currentUserId, now)}
         </span>
       </Link>
     </li>
   );
 }
 
-// Staff notification, step 1 (ARCHITECTURE.md §7), grouped by customer
-// (owner decision 2026-10-01): one card per conversation, customers with an
-// open booking request first, then the oldest unhandled first. Read-only.
-// Admin and sales both see every escalation; migration 0033's policies limit
-// the rows, through the user's own session.
+// Staff notification, steps 1 and 2a (ARCHITECTURE.md §7), grouped by
+// customer (owner decision 2026-10-01): one card per conversation, with who
+// holds it. Customers nobody holds come first -- an open booking request
+// first, then the oldest -- then the ones taken over, the current user's
+// own first. Taking over happens on a customer's page. Admin and sales
+// both see every escalation; migrations 0033 and 0034's policies limit the
+// rows, through the user's own session.
 export default async function EscalationsPage({
   searchParams,
 }: {
@@ -112,9 +128,22 @@ export default async function EscalationsPage({
   if (status === "open") {
     query = query.is("resolved_at", null);
   }
-  const { data, error } = await query.overrideTypes<EscalationRow[], { merge: false }>();
+  const [{ data, error }, takeovers] = await Promise.all([
+    query.overrideTypes<EscalationRow[], { merge: false }>(),
+    loadActiveTakeovers(supabase),
+  ]);
   const rows = data ?? [];
-  const customers = groupByCustomer(rows).filter(
+  const holders = new Map<number, CustomerTakeover>(
+    [...takeovers.byConversation].map(([conversationId, takeover]) => [
+      conversationId,
+      {
+        holderId: takeover.taken_over_by,
+        holderName: takeover.holderName,
+        takenOverAt: takeover.taken_over_at,
+      },
+    ]),
+  );
+  const customers = groupByCustomer(rows, holders, appUser.id).filter(
     (customer) =>
       !group || (status === "open" ? customer.openGroups : customer.allGroups).includes(group),
   );
@@ -152,6 +181,9 @@ export default async function EscalationsPage({
         ))}
       </div>
 
+      {takeovers.failed && (
+        <p className={`${HINT} mb-3`}>تعذّر تحميل من استلم كل عميل. أعد تحميل الصفحة.</p>
+      )}
       {rows.length === LIST_LIMIT && (
         <p className={`${HINT} mb-3`}>تظهر أحدث {LIST_LIMIT} تصعيد فقط.</p>
       )}
@@ -162,7 +194,12 @@ export default async function EscalationsPage({
       ) : (
         <ul className="grid min-w-0 gap-3">
           {customers.map((customer) => (
-            <CustomerCard key={customer.conversationId} customer={customer} now={now} />
+            <CustomerCard
+              key={customer.conversationId}
+              customer={customer}
+              currentUserId={appUser.id}
+              now={now}
+            />
           ))}
         </ul>
       )}

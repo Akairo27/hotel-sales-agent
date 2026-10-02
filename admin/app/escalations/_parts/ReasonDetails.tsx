@@ -1,5 +1,6 @@
 import {
   escalationGroup,
+  formatStayDate,
   halalasList,
   notOpenStays,
   stringList,
@@ -11,17 +12,20 @@ import type { StayNames } from "./names";
 
 // What an escalation is about, in words, per reason group: the booking
 // request's stay, the nights not yet open, the reply the guard blocked, or
-// the media type -- otherwise that the customer got the fallback.
+// the media type -- otherwise that the customer got the fallback. Stay
+// dates read as the bot writes them («20 أكتوبر»), not ISO.
 export function ReasonDetails({
   escalation,
   notes,
   quote,
   names,
+  now,
 }: {
   escalation: EscalationRow;
   notes: Record<string, unknown>;
   quote: QuoteSummaryRow | undefined;
   names: StayNames;
+  now: Date;
 }) {
   const group = escalationGroup(escalation.reason);
   if (group === "booking" && quote) {
@@ -29,7 +33,7 @@ export function ReasonDetails({
       <p>
         طلب العميل حجز {names.hotels.get(quote.hotel_id) ?? `الفندق ${quote.hotel_id}`}،{" "}
         {names.roomTypes.get(quote.room_type_id) ?? `نوع الغرفة ${quote.room_type_id}`}، من{" "}
-        <span dir="ltr">{quote.check_in}</span> إلى <span dir="ltr">{quote.check_out}</span>، عدد
+        {formatStayDate(quote.check_in, now)} إلى {formatStayDate(quote.check_out, now)}، عدد
         الغرف {quote.rooms}، الإجمالي {formatHalalasAsRiyal(quote.ask_price_total)} (العرض رقم{" "}
         {quote.id}).
       </p>
@@ -42,7 +46,7 @@ export function ReasonDetails({
           <li key={`${stay.hotelId}-${stay.roomTypeId}`}>
             {names.hotels.get(stay.hotelId) ?? `الفندق ${stay.hotelId}`}،{" "}
             {names.roomTypes.get(stay.roomTypeId) ?? `نوع الغرفة ${stay.roomTypeId}`}: ليالٍ لم
-            يُفتح حجزها <span dir="ltr">{stay.nights.join(", ")}</span>
+            يُفتح حجزها {stay.nights.map((night) => formatStayDate(night, now)).join("، ")}
           </li>
         ))}
       </ul>
