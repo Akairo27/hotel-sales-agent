@@ -6,6 +6,7 @@ import {
   escalationLabel,
   formatAge,
   formatRiyadhDateTime,
+  formatStayDate,
   notOpenStays,
   parseNotes,
   technicalNotes,
@@ -292,7 +293,8 @@ export default async function CustomerEscalationsPage({
                     {names.roomTypes.get(quote.room_type_id) ?? `نوع الغرفة ${quote.room_type_id}`}
                   </p>
                   <p className={HINT}>
-                    العرض رقم {quote.id} · <span dir="ltr">{quote.check_in} → {quote.check_out}</span> ·
+                    العرض رقم {quote.id} · من {formatStayDate(quote.check_in, now)} إلى{" "}
+                    {formatStayDate(quote.check_out, now)} ·
                     عدد الغرف {quote.rooms} · الإجمالي {formatHalalasAsRiyal(quote.ask_price_total)}
                   </p>
                 </li>
