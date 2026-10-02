@@ -5,6 +5,7 @@ import {
   escalationLabel,
   formatAge,
   formatRiyadhDateTime,
+  formatStayDate,
   halalasList,
   maskPhone,
   notOpenStays,
@@ -76,6 +77,27 @@ describe("formatRiyadhDateTime", () => {
   it("renders the instant in Riyadh time with Western digits", () => {
     expect(formatRiyadhDateTime("2026-10-01T05:50:46.12+00:00")).toBe("2026-10-01 08:50");
     expect(formatRiyadhDateTime("2026-09-30T21:30:00Z")).toBe("2026-10-01 00:30");
+  });
+});
+
+describe("formatStayDate", () => {
+  // 2026-10-02 08:00 in Riyadh.
+  const now = new Date("2026-10-02T05:00:00Z");
+
+  it("writes a stay date as the bot does: day and Arabic month, Western digits", () => {
+    expect(formatStayDate("2026-10-20", now)).toBe("20 أكتوبر");
+    expect(formatStayDate("2026-12-01", now)).toBe("1 ديسمبر");
+  });
+
+  it("adds the year only when it is not the current year in Riyadh", () => {
+    expect(formatStayDate("2027-01-05", now)).toBe("5 يناير 2027");
+    // 31 Dec 22:00 UTC is already 1 January in Riyadh.
+    expect(formatStayDate("2027-01-05", new Date("2026-12-31T22:00:00Z"))).toBe("5 يناير");
+  });
+
+  it("shows anything that is not a date as it is, never hides it", () => {
+    expect(formatStayDate("next week", now)).toBe("next week");
+    expect(formatStayDate("2026-10-20T00:00:00Z", now)).toBe("2026-10-20T00:00:00Z");
   });
 });
 

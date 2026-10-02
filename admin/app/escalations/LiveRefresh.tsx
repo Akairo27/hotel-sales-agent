@@ -5,8 +5,9 @@ import { useEffect } from "react";
 import { createClient } from "@/utils/supabase/client";
 
 // Live updates for the escalations screens (owner decision 8, 2026-10-01):
-// Supabase Realtime on escalations and messages, checked per subscriber
-// against migration 0033's policies. An event's payload is never shown --
+// Supabase Realtime on escalations, messages and, since migration 0034,
+// conversation_takeovers -- so a takeover on one screen shows on every
+// other -- checked per subscriber against the tables' policies. An event's payload is never shown --
 // it only triggers router.refresh(), so the page re-reads everything
 // through the signed-in user's own RLS-scoped session. While the channel
 // is not connected (still joining, timed out, closed or in error) the page
@@ -37,14 +38,26 @@ export function LiveRefresh({
 
     const channel = supabase.channel(channelName);
     if (conversationId === undefined) {
-      // The list: any escalation opened or changed.
-      channel.on("postgres_changes", { event: "*", schema: "public", table: "escalations" }, refreshSoon);
+      // The list: any escalation or takeover opened or changed.
+      channel
+        .on("postgres_changes", { event: "*", schema: "public", table: "escalations" }, refreshSoon)
+        .on(
+          "postgres_changes",
+          { event: "*", schema: "public", table: "conversation_takeovers" },
+          refreshSoon,
+        );
     } else {
-      // One escalation's page: its conversation's escalations and messages.
+      // One customer's page: its conversation's escalations, messages and
+      // takeovers.
       const filter = `conversation_id=eq.${conversationId}`;
       channel
         .on("postgres_changes", { event: "*", schema: "public", table: "escalations", filter }, refreshSoon)
-        .on("postgres_changes", { event: "INSERT", schema: "public", table: "messages", filter }, refreshSoon);
+        .on("postgres_changes", { event: "INSERT", schema: "public", table: "messages", filter }, refreshSoon)
+        .on(
+          "postgres_changes",
+          { event: "*", schema: "public", table: "conversation_takeovers", filter },
+          refreshSoon,
+        );
     }
     channel.subscribe((status) => {
       connected = status === "SUBSCRIBED";

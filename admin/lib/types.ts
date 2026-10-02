@@ -253,3 +253,25 @@ export interface QuoteSummaryRow {
   ask_price_total: number;
   created_at: string;
 }
+
+// Migration 0034: one row per takeover of a conversation by a staff member
+// (staff notification step 2a). ended_at is null while it is active; the
+// three ack_* columns record the one notice the agent sends the customer.
+export interface TakeoverRow {
+  id: number;
+  conversation_id: number;
+  taken_over_by: string;
+  taken_over_at: string;
+  ended_at: string | null;
+  ack_claimed_at: string | null;
+  ack_sent_at: string | null;
+  ack_failed_at: string | null;
+}
+
+// staff_take_over_conversation's one result row (migration 0034).
+export interface TakeOverResultRow {
+  takeover_id: number;
+  won: boolean;
+  holder_id: string;
+  holder_since: string;
+}

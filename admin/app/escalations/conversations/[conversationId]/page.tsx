@@ -12,6 +12,7 @@ import {
 } from "@/lib/escalations";
 import { formatHalalasAsRiyal } from "@/lib/money";
 import { getCurrentAppUser } from "@/lib/session";
+import { noticeState } from "@/lib/takeoverNotice";
 import type {
   ConversationRow,
   EscalationRow,
@@ -23,6 +24,9 @@ import { createClient } from "@/utils/supabase/server";
 import { LiveRefresh } from "../../LiveRefresh";
 import { ReasonDetails } from "../../_parts/ReasonDetails";
 import { loadStayNames, type StayNames } from "../../_parts/names";
+import { type ActiveTakeover, loadActiveTakeovers } from "../../_parts/takeovers";
+import { ConversationScroll } from "./ConversationScroll";
+import { type PanelTakeover, TakeoverPanel } from "./TakeoverPanel";
 
 // The latest messages of the conversation shown, oldest first.
 const MESSAGE_LIMIT = 100;
@@ -68,6 +72,7 @@ function EscalationEntry({
           notes={notes}
           quote={quotes.find((quote) => quote.id === escalation.quote_id)}
           names={names}
+          now={now}
         />
         {technical.length > 0 && (
           <details className="mt-3">
@@ -119,11 +124,25 @@ function EscalationMarker({ escalation }: { escalation: EscalationRow }) {
   );
 }
 
-// One customer's escalations and conversation, read-only (staff
-// notification step 1, ARCHITECTURE.md §7; grouped by customer, owner
-// decision 2026-10-01). Every read goes through the signed-in user's own
-// session, so migration 0033's policies decide what exists here; customer
-// text is rendered as text, never as HTML.
+function panelTakeover(takeover: ActiveTakeover | undefined): PanelTakeover | null {
+  if (!takeover) {
+    return null;
+  }
+  return {
+    id: takeover.id,
+    holderId: takeover.taken_over_by,
+    holderName: takeover.holderName,
+    takenOverAt: takeover.taken_over_at,
+    noticeState: noticeState(takeover),
+  };
+}
+
+// One customer's escalations and conversation (staff notification steps 1
+// and 2a, ARCHITECTURE.md §7; grouped by customer, owner decision
+// 2026-10-01), with take over, resolve and hand back (TakeoverPanel). Every
+// read goes through the signed-in user's own session, so migrations 0033
+// and 0034's policies decide what exists here; customer text is rendered as
+// text, never as HTML.
 export default async function CustomerEscalationsPage({
   params,
 }: {
@@ -140,7 +159,8 @@ export default async function CustomerEscalationsPage({
   }
 
   const supabase = await createClient();
-  const [conversationResult, escalationsResult, messagesResult, quotesResult] = await Promise.all([
+  const [conversationResult, escalationsResult, messagesResult, quotesResult, takeovers] =
+    await Promise.all([
     supabase
       .from("conversations")
       .select("id, customer_phone, last_message_at")
@@ -165,6 +185,7 @@ export default async function CustomerEscalationsPage({
       .eq("conversation_id", conversationId)
       .order("created_at", { ascending: false })
       .overrideTypes<QuoteSummaryRow[], { merge: false }>(),
+    loadActiveTakeovers(supabase, conversationId),
   ]);
   const conversation = conversationResult.data;
   const escalations = orderEscalations(escalationsResult.data ?? []);
@@ -200,9 +221,15 @@ export default async function CustomerEscalationsPage({
               {conversation.customer_phone}
             </a>
           </p>
-          <p className={HINT}>
-            {openCount > 0 ? "لم يستلم أحد هذه التصعيدات بعد." : "كل تصعيدات هذا العميل مغلقة."}
-          </p>
+          <TakeoverPanel
+            conversationId={conversationId}
+            openCount={openCount}
+            takeover={panelTakeover(takeovers.byConversation.get(conversationId))}
+            currentUserId={appUser.id}
+            isAdmin={appUser.app_role === "admin"}
+            now={now.toISOString()}
+            loadFailed={takeovers.failed}
+          />
         </section>
 
         <section className={CARD}>
@@ -225,31 +252,33 @@ export default async function CustomerEscalationsPage({
           {messages.length === MESSAGE_LIMIT && (
             <p className={HINT}>تظهر آخر {MESSAGE_LIMIT} رسالة فقط.</p>
           )}
-          <ol className="mt-3 space-y-2">
-            {messages.map((message) => (
-              <li key={message.id} className="min-w-0">
-                {(before.get(message.id) ?? []).map((escalation) => (
-                  <EscalationMarker key={escalation.id} escalation={escalation} />
-                ))}
-                <div
-                  className={
-                    message.direction === "inbound"
-                      ? "me-12 rounded-xl border border-border bg-surface-subtle p-3"
-                      : "ms-12 rounded-xl border border-border p-3"
-                  }
-                >
-                  <p className="text-xs text-muted-foreground">
-                    {message.direction === "inbound" ? "العميل" : "الوكيل"} ·{" "}
-                    <span dir="ltr">{formatRiyadhDateTime(message.created_at)}</span>
-                  </p>
-                  <p className="mt-1 whitespace-pre-wrap break-words">{message.body}</p>
-                </div>
-              </li>
+          <ConversationScroll messageCount={messages.length}>
+            <ol className="space-y-2">
+              {messages.map((message) => (
+                <li key={message.id} className="min-w-0">
+                  {(before.get(message.id) ?? []).map((escalation) => (
+                    <EscalationMarker key={escalation.id} escalation={escalation} />
+                  ))}
+                  <div
+                    className={
+                      message.direction === "inbound"
+                        ? "me-12 rounded-xl border border-border bg-surface-subtle p-3"
+                        : "ms-12 rounded-xl border border-border p-3"
+                    }
+                  >
+                    <p className="text-xs text-muted-foreground">
+                      {message.direction === "inbound" ? "العميل" : "الوكيل"} ·{" "}
+                      <span dir="ltr">{formatRiyadhDateTime(message.created_at)}</span>
+                    </p>
+                    <p className="mt-1 whitespace-pre-wrap break-words">{message.body}</p>
+                  </div>
+                </li>
+              ))}
+            </ol>
+            {after.map((escalation) => (
+              <EscalationMarker key={escalation.id} escalation={escalation} />
             ))}
-          </ol>
-          {after.map((escalation) => (
-            <EscalationMarker key={escalation.id} escalation={escalation} />
-          ))}
+          </ConversationScroll>
         </section>
 
         {quotes.length > 0 && (
