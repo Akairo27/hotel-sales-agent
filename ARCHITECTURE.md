@@ -1660,7 +1660,7 @@ Studio بشارة UNRESTRICTED للسبب نفسه المشروح أدناه.
 `staff_replies` بلا عمود `customer_phone` مثل `conversation_takeovers`: نص كتبه
 موظف يُوصل إليه عبر المحادثة، ومسح بيانات العميل يحذفه معها، والرد المرسَل
 منسوخ في `messages` التي تحمل الرقم للتصدير. `staff_replies` في نشر
-`supabase_realtime`. وقائمة `audit_log_select_admin_only` المسموحة (0019، 0022)
+`supabase_realtime`. وقائمة `audit_log_select_admin_only` المسموحة (0019، 0022، 0029)
 تشمل الآن `('staff_replies', 'amounts')`.
 
 ### الدور الذي يتصل به الـ backend بقاعدة البيانات (2026-09-25)

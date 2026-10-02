@@ -39,7 +39,9 @@ CREATE TABLE staff_replies (
     sent_at timestamptz,
     failed_at timestamptz,
     failure_reason text,
-    CONSTRAINT staff_replies_body_not_blank CHECK (btrim(body) <> ''),
+    -- At least one non-whitespace character: btrim() strips spaces only,
+    -- so a body of newlines would pass it.
+    CONSTRAINT staff_replies_body_not_blank CHECK (body ~ '[^[:space:]]'),
     -- WhatsApp's limit for a text message body.
     CONSTRAINT staff_replies_body_within_whatsapp_limit CHECK (char_length(body) <= 4096),
     CONSTRAINT staff_replies_outcome_after_claim CHECK (
@@ -49,7 +51,13 @@ CREATE TABLE staff_replies (
     ),
     CONSTRAINT staff_replies_failure_has_reason CHECK (
         (failed_at IS NULL AND failure_reason IS NULL)
-        OR (failed_at IS NOT NULL AND failure_reason IN ('outside_window', 'send_failed'))
+        -- IS NOT NULL is explicit: a NULL reason would make IN yield NULL,
+        -- which a CHECK accepts.
+        OR (
+            failed_at IS NOT NULL
+            AND failure_reason IS NOT NULL
+            AND failure_reason IN ('outside_window', 'send_failed')
+        )
     )
 );
 
@@ -262,8 +270,9 @@ $$;
 GRANT EXECUTE ON FUNCTION staff_reply_record_amounts(bigint, jsonb) TO hotel_agent;
 
 -- A staff member's stated amount is a price the customer was told, not a
--- cost or margin figure, so every admin may read it: widens 0022's
--- allow-list by this one (table_name, column_name) pair, restating it whole.
+-- cost or margin figure, so every admin may read it: widens the allow-list
+-- as 0029 left it by this one (table_name, column_name) pair, restating it
+-- whole.
 ALTER POLICY audit_log_select_admin_only ON audit_log
 USING (
     current_app_role() = 'admin'
@@ -277,6 +286,7 @@ USING (
             ('price_overrides', 'ask_price_override'),
             ('price_overrides', 'min_allowed_override'),
             ('price_overrides', 'expires_at'),
+            ('allotments', 'total_rooms'),
             ('staff_replies', 'amounts')
         )
     )
