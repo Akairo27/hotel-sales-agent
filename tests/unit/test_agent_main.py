@@ -46,6 +46,10 @@ from services.agent.startup_sweep import (
     STARTUP_SWEEP_LOOKBACK_HOURS_ENV,
     StartupSweepConfigurationError,
 )
+from services.agent.takeover_ack import (
+    MIN_TOKEN_LENGTH,
+    InternalApiConfigurationError,
+)
 from services.agent.webhook import WebhookConfigurationError
 from services.agent.whatsapp_send import WhatsAppSendConfigurationError
 
@@ -173,6 +177,7 @@ _VALID_ENV = {
     "MAX_MESSAGES_PER_NUMBER_PER_DAY": "50",
     "LLM_MAX_TOKENS_PER_NUMBER_PER_DAY": "100000",
     "DATABASE_URL": "postgresql://placeholder.invalid/db",
+    "AGENT_INTERNAL_TOKEN": "test-agent-internal-token-placeholder",
 }
 
 
@@ -215,6 +220,7 @@ def test_validate_startup_configuration_accepts_a_complete_environment(
         ("MAX_MESSAGES_PER_NUMBER_PER_DAY", LlmConfigurationError),
         ("LLM_MAX_TOKENS_PER_NUMBER_PER_DAY", LlmConfigurationError),
         ("DATABASE_URL", StartupConfigurationError),
+        ("AGENT_INTERNAL_TOKEN", InternalApiConfigurationError),
     ],
 )
 def test_validate_startup_configuration_refuses_each_missing_setting(
@@ -240,6 +246,21 @@ def test_the_app_refuses_to_start_with_a_broken_environment(
 
     with pytest.raises(WebhookConfigurationError), TestClient(app):
         pass
+
+
+@pytest.mark.usefixtures("_valid_env")
+def test_validate_startup_configuration_refuses_a_short_internal_token(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The dashboard's shared token must not be guessable (owner decision
+    D5, 2026-10-02); the error never carries the value."""
+    short_token = "x" * (MIN_TOKEN_LENGTH - 1)
+    monkeypatch.setenv("AGENT_INTERNAL_TOKEN", short_token)
+
+    with pytest.raises(InternalApiConfigurationError) as exc_info:
+        validate_startup_configuration()
+
+    assert short_token not in str(exc_info.value)
 
 
 @pytest.mark.usefixtures("_valid_env")

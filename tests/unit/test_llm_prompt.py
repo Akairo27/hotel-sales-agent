@@ -14,7 +14,7 @@ from datetime import UTC, date, datetime
 import pytest
 
 from lib.hijri import to_hijri
-from services.agent.fixed_texts import FALLBACK, PLEASE_TYPE
+from services.agent.fixed_texts import FALLBACK, PLEASE_TYPE, TAKEN_OVER
 from services.agent.llm import dispatch as dispatch_module
 from services.agent.llm import prompt as prompt_module
 from services.agent.llm.config import MAX_CUSTOMER_NAME_LENGTH
@@ -476,7 +476,12 @@ def test_customer_facing_arabic_texts_are_white_arabic() -> None:
     """Every customer-facing Arabic text we write ourselves -- the rules'
     examples and the fixed texts (services/agent/fixed_texts.py) -- uses
     neither stiff formal phrasing nor heavy local words (arabic_register)."""
-    texts = (*CUSTOMER_FACING_ARABIC_EXAMPLES, FALLBACK.arabic, PLEASE_TYPE.arabic)
+    texts = (
+        *CUSTOMER_FACING_ARABIC_EXAMPLES,
+        FALLBACK.arabic,
+        PLEASE_TYPE.arabic,
+        TAKEN_OVER.arabic,
+    )
     for text in texts:
         for phrase in _FORMAL_ARABIC_PHRASES + _HEAVY_LOCAL_WORDS:
             assert not _uses(text, phrase), (phrase, text)

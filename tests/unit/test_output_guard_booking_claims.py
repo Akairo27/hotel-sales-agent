@@ -16,6 +16,7 @@ from services.agent.fixed_texts import (
     FALLBACK,
     NEWER_PRICE,
     PLEASE_TYPE,
+    TAKEN_OVER,
     Language,
 )
 from services.agent.llm import prompt as prompt_module
@@ -100,6 +101,7 @@ def _legitimate_texts() -> list[str]:
             FALLBACK,
             PLEASE_TYPE,
             NEWER_PRICE,
+            TAKEN_OVER,
             BOOKING_YES_BUTTON,
             BOOKING_QUESTION_BUTTON,
         )

@@ -23,6 +23,7 @@ from services.agent.fixed_texts import (
     FALLBACK,
     NEWER_PRICE,
     PLEASE_TYPE,
+    TAKEN_OVER,
 )
 from services.agent.llm.config import DEFAULT_QUOTE_VALIDITY_MINUTES
 from services.agent.llm.dispatch import dispatch_get_quote
@@ -722,6 +723,7 @@ _FIXED_TEXT_RENDERINGS = [
         ("booking_yes_button", BOOKING_YES_BUTTON),
         ("booking_question_button", BOOKING_QUESTION_BUTTON),
         ("newer_price", NEWER_PRICE),
+        ("taken_over", TAKEN_OVER),
     )
     for language in ("ar", "en", "id", None)
 ]
