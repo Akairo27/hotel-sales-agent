@@ -241,6 +241,8 @@ export interface MessageRow {
   direction: "inbound" | "outbound";
   body: string;
   created_at: string;
+  // Migration 0035: set on a message a staff member wrote from the dashboard.
+  staff_reply_id: number | null;
 }
 
 export interface QuoteSummaryRow {
@@ -274,4 +276,20 @@ export interface TakeOverResultRow {
   won: boolean;
   holder_id: string;
   holder_since: string;
+}
+
+// Migration 0035: one row per reply a staff member writes from the dashboard
+// (staff notification step 3). claimed_at is set once the agent takes it to
+// send; then exactly one of sent_at or failed_at, with failure_reason.
+export interface StaffReplyRow {
+  id: number;
+  takeover_id: number;
+  conversation_id: number;
+  sent_by: string;
+  body: string;
+  created_at: string;
+  claimed_at: string | null;
+  sent_at: string | null;
+  failed_at: string | null;
+  failure_reason: "outside_window" | "send_failed" | null;
 }

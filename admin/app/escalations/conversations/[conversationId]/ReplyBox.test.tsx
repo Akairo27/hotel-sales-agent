@@ -1,0 +1,173 @@
+import { describe, expect, it } from "vitest";
+import { renderToStaticMarkup } from "react-dom/server";
+import { type BoxReply, ReplyBox } from "./ReplyBox";
+
+const ME = "user-me";
+const NOW = "2026-10-02T12:00:00Z";
+const INSIDE_WINDOW = "2026-10-02T09:00:00Z";
+const OUTSIDE_WINDOW = "2026-10-01T11:00:00Z";
+const TAKEOVER_ID = 9;
+
+function reply(overrides: Partial<BoxReply>): BoxReply {
+  return {
+    id: 1,
+    takeover_id: TAKEOVER_ID,
+    conversation_id: 5,
+    sent_by: ME,
+    body: "حياك الله",
+    created_at: "2026-10-02T11:00:00Z",
+    claimed_at: null,
+    sent_at: null,
+    failed_at: null,
+    failure_reason: null,
+    authorName: "Sara",
+    ...overrides,
+  };
+}
+
+function render({
+  takeoverId = TAKEOVER_ID,
+  holderId = ME,
+  lastInboundAt = INSIDE_WINDOW,
+  replies = [],
+  loadFailed = false,
+}: {
+  takeoverId?: number | null;
+  holderId?: string | null;
+  lastInboundAt?: string | null;
+  replies?: BoxReply[];
+  loadFailed?: boolean;
+}): string {
+  return renderToStaticMarkup(
+    <ReplyBox
+      conversationId={5}
+      takeoverId={takeoverId}
+      holderId={holderId}
+      currentUserId={ME}
+      lastInboundAt={lastInboundAt}
+      replies={replies}
+      loadFailed={loadFailed}
+      now={NOW}
+    />,
+  );
+}
+
+function buttons(html: string): { label: string; disabled: boolean }[] {
+  return [...html.matchAll(/<button([^>]*)>([^<]*)<\/button>/g)].map((match) => ({
+    label: match[2].trim(),
+    disabled: /\bdisabled(=|\s|$)/.test(match[1]),
+  }));
+}
+
+function textareaDisabled(html: string): boolean {
+  const textarea = /<textarea([^>]*)>/.exec(html);
+  return textarea !== null && /\bdisabled(=|\s|$)/.test(textarea[1]);
+}
+
+describe("ReplyBox visibility", () => {
+  it("shows to the holder of the takeover", () => {
+    expect(render({})).toContain("الرد على العميل");
+  });
+
+  it("shows nothing when nobody holds the customer", () => {
+    expect(render({ takeoverId: null, holderId: null })).toBe("");
+  });
+
+  it("shows nothing to another staff member, an admin included (owner decision 1)", () => {
+    expect(render({ holderId: "someone-else" })).toBe("");
+  });
+});
+
+describe("ReplyBox inside the 24-hour window", () => {
+  it("offers free text and send, and no template button", () => {
+    const html = render({});
+    expect(textareaDisabled(html)).toBe(false);
+    expect(buttons(html)).toEqual([{ label: "إرسال الرد", disabled: false }]);
+    expect(html).not.toContain("24 ساعة");
+  });
+});
+
+describe("ReplyBox outside the 24-hour window", () => {
+  it("disables free text and shows the template button, disabled until PR C", () => {
+    const html = render({ lastInboundAt: OUTSIDE_WINDOW });
+    expect(textareaDisabled(html)).toBe(true);
+    expect(buttons(html)).toEqual([
+      { label: "إرسال الرد", disabled: true },
+      { label: "إرسال قالب إعادة التواصل", disabled: true },
+    ]);
+    expect(html).toContain("مرّ أكثر من 24 ساعة");
+    expect(html).toContain("تواصل معه هاتفياً");
+  });
+
+  it("treats a customer who never wrote as outside the window", () => {
+    const html = render({ lastInboundAt: null });
+    expect(textareaDisabled(html)).toBe(true);
+  });
+});
+
+describe("ReplyBox replies", () => {
+  it("shows sent, with its author and text", () => {
+    const html = render({
+      replies: [reply({ claimed_at: NOW, sent_at: NOW })],
+    });
+    expect(html).toContain("أُرسل");
+    expect(html).toContain("Sara");
+    expect(html).toContain("حياك الله");
+    expect(buttons(html)).toEqual([{ label: "إرسال الرد", disabled: false }]);
+  });
+
+  it("shows a reply the agent never claimed with a retry for its author", () => {
+    const html = render({ replies: [reply({})] });
+    expect(html).toContain("لم يُرسل بعد");
+    expect(buttons(html).map((button) => button.label)).toEqual(["إرسال الرد", "إعادة المحاولة"]);
+  });
+
+  it("offers no retry for a reply of an ended takeover, and says so", () => {
+    const html = render({ replies: [reply({ takeover_id: 3 })] });
+    expect(buttons(html).map((button) => button.label)).toEqual(["إرسال الرد"]);
+    expect(html).toContain("انتهى الاستلام قبل إرسال هذا الرد");
+  });
+
+  it("offers no retry for a reply someone else wrote", () => {
+    const html = render({ replies: [reply({ sent_by: "someone-else" })] });
+    expect(buttons(html).map((button) => button.label)).toEqual(["إرسال الرد"]);
+  });
+
+  it("shows a failed send with the call-the-customer hint and a rewrite, never a retry", () => {
+    const html = render({
+      replies: [
+        reply({ claimed_at: NOW, failed_at: NOW, failure_reason: "send_failed" }),
+      ],
+    });
+    expect(html).toContain("لم يُرسل");
+    expect(html).toContain("تواصل معه هاتفياً");
+    expect(buttons(html).map((button) => button.label)).toEqual(["إرسال الرد", "إعادة كتابته"]);
+  });
+
+  it("shows an outside-window failure with the hint, and no rewrite while the window is shut", () => {
+    const html = render({
+      lastInboundAt: OUTSIDE_WINDOW,
+      replies: [
+        reply({ claimed_at: NOW, failed_at: NOW, failure_reason: "outside_window" }),
+      ],
+    });
+    expect(html).toContain("لا يقبل واتساب رداً حراً");
+    expect(buttons(html).map((button) => button.label)).not.toContain("إعادة كتابته");
+  });
+
+  it("shows a reply being sent with neither retry nor rewrite", () => {
+    const html = render({ replies: [reply({ claimed_at: "2026-10-02T11:59:50Z" })] });
+    expect(html).toContain("قيد الإرسال");
+    expect(buttons(html).map((button) => button.label)).toEqual(["إرسال الرد"]);
+  });
+
+  it("says when the earlier replies could not be loaded", () => {
+    expect(render({ loadFailed: true })).toContain("تعذّر تحميل ردودك السابقة");
+  });
+
+  it("renders a reply's text as text, never as HTML", () => {
+    const html = render({ replies: [reply({ body: "<img src=x onerror=alert(1)>" })] });
+    expect(html).not.toContain("<img");
+    expect(html).toContain("&lt;img");
+  });
+});
