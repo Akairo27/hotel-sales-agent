@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { renderToStaticMarkup } from "react-dom/server";
+import { ChatWorkspaceProvider } from "./ChatWorkspace";
 import { type BoxReply, ReplyBox } from "./ReplyBox";
 
 const ME = "user-me";
@@ -39,16 +40,16 @@ function render({
   loadFailed?: boolean;
 }): string {
   return renderToStaticMarkup(
-    <ReplyBox
-      conversationId={5}
-      takeoverId={takeoverId}
-      holderId={holderId}
-      currentUserId={ME}
-      lastInboundAt={lastInboundAt}
-      replies={replies}
-      loadFailed={loadFailed}
-      now={NOW}
-    />,
+    <ChatWorkspaceProvider serverNow={NOW} canReply={holderId === ME} lastInboundAt={lastInboundAt}>
+      <ReplyBox
+        conversationId={5}
+        takeoverId={takeoverId}
+        holderId={holderId}
+        currentUserId={ME}
+        replies={replies}
+        loadFailed={loadFailed}
+      />
+    </ChatWorkspaceProvider>,
   );
 }
 
@@ -66,7 +67,7 @@ function textareaDisabled(html: string): boolean {
 
 describe("ReplyBox visibility", () => {
   it("shows to the holder of the takeover", () => {
-    expect(render({})).toContain("الرد على العميل");
+    expect(render({})).toContain('aria-label="نص الرد"');
   });
 
   it("shows nothing when nobody holds the customer", () => {
@@ -83,7 +84,22 @@ describe("ReplyBox inside the 24-hour window", () => {
     const html = render({});
     expect(textareaDisabled(html)).toBe(false);
     expect(buttons(html)).toEqual([{ label: "إرسال الرد", disabled: false }]);
-    expect(html).not.toContain("24 ساعة");
+    expect(html).not.toContain("مرّ أكثر من 24 ساعة");
+  });
+
+  it("counts the window down, in hours and minutes, with Ctrl/⌘+Enter named", () => {
+    // Last message 09:00, now 12:00: 21 hours left.
+    const html = render({});
+    expect(html).toContain("نافذة الرد الحر مفتوحة");
+    expect(html).toContain("باقي 21 ساعة");
+    expect(html).toContain("Ctrl/⌘ + Enter للإرسال");
+  });
+
+  it("turns the countdown into a warning in the last hour", () => {
+    const html = render({ lastInboundAt: "2026-10-01T12:30:00Z" });
+    expect(html).toContain("باقي 30 دقيقة");
+    expect(html).toContain("text-danger");
+    expect(render({})).not.toContain("text-danger");
   });
 });
 
@@ -106,26 +122,24 @@ describe("ReplyBox outside the 24-hour window", () => {
 });
 
 describe("ReplyBox replies", () => {
-  it("shows sent, with its author and text", () => {
+  it("leaves a sent reply to the conversation, where it shows as a staff message", () => {
     const html = render({
       replies: [reply({ claimed_at: NOW, sent_at: NOW })],
     });
-    expect(html).toContain("أُرسل");
-    expect(html).toContain("Sara");
-    expect(html).toContain("حياك الله");
+    expect(html).not.toContain("حياك الله");
     expect(buttons(html)).toEqual([{ label: "إرسال الرد", disabled: false }]);
   });
 
   it("shows a reply the agent never claimed with a retry for its author", () => {
     const html = render({ replies: [reply({})] });
     expect(html).toContain("لم يُرسل بعد");
-    expect(buttons(html).map((button) => button.label)).toEqual(["إرسال الرد", "إعادة المحاولة"]);
+    expect(buttons(html).map((button) => button.label)).toEqual(["إعادة المحاولة", "إرسال الرد"]);
   });
 
-  it("offers no retry for a reply of an ended takeover, and says so", () => {
+  it("lists only the replies of this takeover", () => {
     const html = render({ replies: [reply({ takeover_id: 3 })] });
     expect(buttons(html).map((button) => button.label)).toEqual(["إرسال الرد"]);
-    expect(html).toContain("انتهى الاستلام قبل إرسال هذا الرد");
+    expect(html).not.toContain("حياك الله");
   });
 
   it("offers no retry for a reply someone else wrote", () => {
@@ -141,7 +155,7 @@ describe("ReplyBox replies", () => {
     });
     expect(html).toContain("لم يُرسل");
     expect(html).toContain("تواصل معه هاتفياً");
-    expect(buttons(html).map((button) => button.label)).toEqual(["إرسال الرد", "إعادة كتابته"]);
+    expect(buttons(html).map((button) => button.label)).toEqual(["إعادة كتابته", "إرسال الرد"]);
   });
 
   it("shows an outside-window failure with the hint, and no rewrite while the window is shut", () => {

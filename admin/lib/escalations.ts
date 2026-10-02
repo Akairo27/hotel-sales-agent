@@ -82,6 +82,15 @@ export function formatRiyadhDateTime(instant: string): string {
   return `${parts.year}-${parts.month}-${parts.day} ${parts.hour}:${parts.minute}`;
 }
 
+/** The time of day in Riyadh («14:05») -- what a quote's «valid until»
+ * reads as. */
+export function formatRiyadhClock(instant: string | number): string {
+  const parts = Object.fromEntries(
+    RIYADH_TIME.formatToParts(new Date(instant)).map((part) => [part.type, part.value]),
+  );
+  return `${parts.hour}:${parts.minute}`;
+}
+
 const ISO_DATE = /^(\d{4})-(\d{2})-(\d{2})$/;
 
 /** A stay date ("2026-10-20") as the bot writes it to customers: «20
@@ -143,6 +152,27 @@ function twoUnits(
 ): string {
   const first = arabicCount(whole, wholeForms);
   return part === 0 ? first : `${first} و${arabicCount(part, partForms)}`;
+}
+
+/** How much of a period is left, as «باقي 5 ساعات و12 دقيقة» (the same
+ * parts as formatAge, never rounded up): «أقل من دقيقة» under a minute,
+ * nothing at or below zero. */
+export function formatTimeLeft(remainingMs: number): string {
+  const minutes = Math.floor(remainingMs / MS_PER_MINUTE);
+  if (remainingMs <= 0) {
+    return "";
+  }
+  if (minutes < 1) {
+    return "أقل من دقيقة";
+  }
+  if (minutes < MINUTES_PER_HOUR) {
+    return `باقي ${arabicCount(minutes, MINUTES)}`;
+  }
+  const hours = Math.floor(minutes / MINUTES_PER_HOUR);
+  if (hours < HOURS_PER_DAY) {
+    return `باقي ${twoUnits(hours, HOURS, minutes % MINUTES_PER_HOUR, MINUTES)}`;
+  }
+  return `باقي ${twoUnits(Math.floor(hours / HOURS_PER_DAY), DAYS, hours % HOURS_PER_DAY, HOURS)}`;
 }
 
 /** How long ago something happened, never rounded away (owner request

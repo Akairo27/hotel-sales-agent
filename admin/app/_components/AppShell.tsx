@@ -13,11 +13,25 @@ import { logout } from "./sessionActions";
 // bar on narrow ones. Deliberately not a route-group layout — the sidebar
 // needs the caller's AppUser, and every page already loads it to decide
 // what it may show, so passing it in avoids a second round trip per render.
-export function AppShell({ appUser, children }: { appUser: AppUser; children: ReactNode }) {
+//
+// "workspace" is for a screen that fills the viewport and scrolls inside
+// itself (the customer page's chat): the frame is exactly one viewport tall,
+// the main area has no page padding, and the narrow-screen link strip is
+// left out to give the chat the height (the page links back to the list).
+export function AppShell({
+  appUser,
+  layout = "page",
+  children,
+}: {
+  appUser: AppUser;
+  layout?: "page" | "workspace";
+  children: ReactNode;
+}) {
   const navItems = [HOME_NAV_ITEM, ...navItemsForRole(appUser.app_role)];
+  const workspace = layout === "workspace";
 
   return (
-    <div className="flex min-h-full flex-1">
+    <div className={workspace ? "flex h-dvh overflow-hidden" : "flex min-h-full flex-1"}>
       <aside className="sticky top-0 hidden h-screen w-64 shrink-0 flex-col overflow-y-auto border-e border-border bg-shell lg:flex">
         <div className="flex items-center gap-3 px-5 py-6">
           <BrandMark />
@@ -40,7 +54,7 @@ export function AppShell({ appUser, children }: { appUser: AppUser; children: Re
         </p>
       </aside>
 
-      <div className="flex min-w-0 flex-1 flex-col">
+      <div className={`flex min-w-0 flex-1 flex-col ${workspace ? "min-h-0" : ""}`}>
         <header className="sticky top-0 z-20 border-b border-border bg-shell/95 backdrop-blur">
           <div className="flex items-center gap-4 px-4 py-3 sm:px-6">
             <div className="flex items-center gap-3 lg:hidden">
@@ -71,12 +85,14 @@ export function AppShell({ appUser, children }: { appUser: AppUser; children: Re
             </div>
           </div>
 
-          <div className="border-t border-border px-4 py-2 sm:px-6 lg:hidden">
-            <SidebarNav items={navItems} orientation="horizontal" />
-          </div>
+          {!workspace && (
+            <div className="border-t border-border px-4 py-2 sm:px-6 lg:hidden">
+              <SidebarNav items={navItems} orientation="horizontal" />
+            </div>
+          )}
         </header>
 
-        <main className={PAGE}>{children}</main>
+        <main className={workspace ? "flex min-h-0 flex-1 flex-col" : PAGE}>{children}</main>
       </div>
     </div>
   );

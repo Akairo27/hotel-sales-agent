@@ -4,8 +4,10 @@ import {
   escalationGroup,
   escalationLabel,
   formatAge,
+  formatRiyadhClock,
   formatRiyadhDateTime,
   formatStayDate,
+  formatTimeLeft,
   halalasList,
   maskPhone,
   notOpenStays,
@@ -190,5 +192,31 @@ describe("stringList and halalasList", () => {
     expect(stringList(["passed your request", 3])).toEqual(["passed your request"]);
     expect(stringList("not a list")).toEqual([]);
     expect(halalasList([90_000, -1, 1.5, "7"])).toEqual([90_000]);
+  });
+});
+
+describe("formatRiyadhClock", () => {
+  it("reads the time of day in Riyadh", () => {
+    expect(formatRiyadhClock("2026-10-02T11:05:00Z")).toBe("14:05");
+    expect(formatRiyadhClock(Date.parse("2026-10-02T21:30:00Z"))).toBe("00:30");
+  });
+});
+
+describe("formatTimeLeft", () => {
+  const MINUTE = 60_000;
+  const HOUR = 60 * MINUTE;
+
+  it("reads minutes under an hour, hours and minutes under a day, never rounded up", () => {
+    expect(formatTimeLeft(59 * MINUTE + 59_000)).toBe("باقي 59 دقيقة");
+    expect(formatTimeLeft(HOUR)).toBe("باقي ساعة");
+    expect(formatTimeLeft(5 * HOUR + 12 * MINUTE)).toBe("باقي 5 ساعات و12 دقيقة");
+    expect(formatTimeLeft(2 * HOUR)).toBe("باقي ساعتين");
+    expect(formatTimeLeft(23 * HOUR + 59 * MINUTE)).toBe("باقي 23 ساعة و59 دقيقة");
+  });
+
+  it("says less than a minute for the last seconds, and nothing at zero", () => {
+    expect(formatTimeLeft(30_000)).toBe("أقل من دقيقة");
+    expect(formatTimeLeft(0)).toBe("");
+    expect(formatTimeLeft(-5)).toBe("");
   });
 });

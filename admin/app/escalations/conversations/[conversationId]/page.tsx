@@ -1,19 +1,11 @@
+import Link from "next/link";
 import { notFound, redirect } from "next/navigation";
 import { AppShell } from "@/app/_components/AppShell";
-import { PageHeader } from "@/app/_components/PageHeader";
+import { messageSender, senderLabel, BUBBLE_CLASSES, SENDER_LABEL_CLASSES } from "@/lib/chatMessages";
 import { isOpen, orderEscalations } from "@/lib/escalationCustomers";
-import {
-  escalationLabel,
-  formatAge,
-  formatRiyadhDateTime,
-  formatStayDate,
-  notOpenStays,
-  parseNotes,
-  technicalNotes,
-} from "@/lib/escalations";
-import { formatHalalasAsRiyal } from "@/lib/money";
+import { escalationSummary } from "@/lib/escalationSummary";
+import { escalationLabel, formatRiyadhDateTime, notOpenStays, parseNotes } from "@/lib/escalations";
 import { getCurrentAppUser } from "@/lib/session";
-import { staffMessageLabel } from "@/lib/staffReply";
 import { noticeState } from "@/lib/takeoverNotice";
 import type {
   ConversationRow,
@@ -21,14 +13,17 @@ import type {
   MessageRow,
   QuoteSummaryRow,
 } from "@/lib/types";
-import { BADGE, BADGE_ACCENT, CARD, HINT, SECTION_TITLE } from "@/lib/ui";
+import { HINT, SECTION_TITLE } from "@/lib/ui";
 import { createClient } from "@/utils/supabase/server";
 import { LiveRefresh } from "../../LiveRefresh";
-import { ReasonDetails } from "../../_parts/ReasonDetails";
-import { loadStayNames, type StayNames } from "../../_parts/names";
+import { loadStayNames } from "../../_parts/names";
+import { buildPanelQuotes } from "../../_parts/panelQuotes";
 import { loadStaffReplyContext } from "../../_parts/staffReplies";
 import { type ActiveTakeover, loadActiveTakeovers } from "../../_parts/takeovers";
+import { ChatWorkspaceProvider, PanelToggleButton, SidePanel } from "./ChatWorkspace";
 import { ConversationScroll } from "./ConversationScroll";
+import { EscalationEntry } from "./EscalationEntry";
+import { QuotePanel } from "./QuotePanel";
 import { ReplyBox } from "./ReplyBox";
 import { type PanelTakeover, TakeoverPanel } from "./TakeoverPanel";
 
@@ -40,61 +35,6 @@ const ESCALATION_COLUMNS =
   "responded_at, resolved_at, assigned_to";
 const QUOTE_COLUMNS =
   "id, hotel_id, room_type_id, check_in, check_out, rooms, ask_price_total, created_at";
-
-function EscalationEntry({
-  escalation,
-  quotes,
-  names,
-  now,
-}: {
-  escalation: EscalationRow;
-  quotes: QuoteSummaryRow[];
-  names: StayNames;
-  now: Date;
-}) {
-  const notes = parseNotes(escalation.notes);
-  const technical = technicalNotes(notes);
-  const open = isOpen(escalation);
-  return (
-    <details
-      id={`escalation-${escalation.id}`}
-      open={open}
-      className="rounded-xl border border-border p-4 target:border-accent"
-    >
-      <summary className="flex cursor-pointer flex-wrap items-center gap-x-3 gap-y-1">
-        <span className="font-medium">رقم {escalation.id}</span>
-        <span className={open ? BADGE_ACCENT : BADGE}>{escalationLabel(escalation.reason)}</span>
-        <span className={HINT}>
-          <span dir="ltr">{formatRiyadhDateTime(escalation.opened_at)}</span> ·{" "}
-          {formatAge(escalation.opened_at, now)}
-        </span>
-        <span className={HINT}>{open ? "مفتوح" : "مغلق"}</span>
-      </summary>
-      <div className="mt-3 min-w-0 break-words">
-        <ReasonDetails
-          escalation={escalation}
-          notes={notes}
-          quote={quotes.find((quote) => quote.id === escalation.quote_id)}
-          names={names}
-          now={now}
-        />
-        {technical.length > 0 && (
-          <details className="mt-3">
-            <summary className={HINT}>تفاصيل تقنية</summary>
-            <dl className="mt-2 grid gap-1 text-sm" dir="ltr">
-              {technical.map(([key, value]) => (
-                <div key={key} className="min-w-0">
-                  <dt className="inline font-medium">{key}: </dt>
-                  <dd className="inline break-all">{value}</dd>
-                </div>
-              ))}
-            </dl>
-          </details>
-        )}
-      </div>
-    </details>
-  );
-}
 
 /** For each message, the escalations that opened after the previous message
  * and no later than this one -- marked just before it. Escalations newer
@@ -120,18 +60,6 @@ function escalationsBeforeEachMessage(
   return { before, after: chronological.slice(next) };
 }
 
-/** Who wrote a message: the customer, a staff member from the dashboard
- * («الموظف: name»), or the agent. */
-function messageSender(message: MessageRow, authorNames: Map<number, string>): string {
-  if (message.direction === "inbound") {
-    return "العميل";
-  }
-  if (message.staff_reply_id !== null) {
-    return staffMessageLabel(authorNames.get(message.staff_reply_id) ?? null);
-  }
-  return "الوكيل";
-}
-
 function EscalationMarker({ escalation }: { escalation: EscalationRow }) {
   return (
     <p className="my-2 text-center text-xs text-muted-foreground">
@@ -153,13 +81,29 @@ function panelTakeover(takeover: ActiveTakeover | undefined): PanelTakeover | nu
   };
 }
 
-// One customer's escalations and conversation (staff notification steps 1,
-// 2a and 3, ARCHITECTURE.md §7; grouped by customer, owner decision
-// 2026-10-01), with take over, resolve and hand back (TakeoverPanel) and the
-// holder's reply box (ReplyBox). Every
-// read goes through the signed-in user's own session, so migrations 0033
-// and 0034's policies decide what exists here; customer text is rendered as
-// text, never as HTML.
+function Bubble({ message, authorNames }: { message: MessageRow; authorNames: Map<number, string> }) {
+  const sender = messageSender(message);
+  return (
+    <div className={BUBBLE_CLASSES[sender]}>
+      <p className={`text-xs ${SENDER_LABEL_CLASSES[sender]}`}>
+        {senderLabel(message, authorNames)} ·{" "}
+        <span dir="ltr">{formatRiyadhDateTime(message.created_at)}</span>
+      </p>
+      <p className="mt-1 whitespace-pre-wrap break-words">{message.body}</p>
+    </div>
+  );
+}
+
+// One customer's conversation, chat first (staff notification steps 1, 2a
+// and 3, ARCHITECTURE.md §7; grouped by customer, owner decision
+// 2026-10-01; chat layout, owner request 2026-10-02): the conversation is
+// the main column with the holder's reply box under it, a compact header
+// carries the customer and take over, resolve and hand back, one pinned line
+// says why the bot stopped, and the escalations and quotes sit in a side
+// panel that collapses (a sheet on a narrow screen). Every read goes through
+// the signed-in user's own session, so migrations 0033, 0034 and 0035's
+// policies decide what exists here; customer text is rendered as text, never
+// as HTML.
 export default async function CustomerEscalationsPage({
   params,
 }: {
@@ -242,120 +186,119 @@ export default async function CustomerEscalationsPage({
   const openCount = escalations.filter(isOpen).length;
   const now = new Date();
   const takeover = takeovers.byConversation.get(conversationId);
+  const summary = escalationSummary(
+    escalations,
+    quotes,
+    { hotel: (id) => names.hotels.get(id) ?? `الفندق ${id}` },
+    now,
+  );
 
   return (
-    <AppShell appUser={appUser}>
-      <PageHeader
-        breadcrumb={{ href: "/escalations", label: "التصعيدات" }}
-        title="تصعيدات العميل"
-        description={`المفتوحة: ${openCount} من ${escalations.length}`}
-      />
+    <AppShell appUser={appUser} layout="workspace">
       <LiveRefresh channelName={`escalations-customer-${conversationId}`} conversationId={conversationId} />
+      <ChatWorkspaceProvider
+        serverNow={now.toISOString()}
+        canReply={takeover?.taken_over_by === appUser.id}
+        lastInboundAt={lastInboundResult.data?.created_at ?? null}
+      >
+        <div className="flex min-h-0 flex-1">
+          <section className="flex min-h-0 min-w-0 flex-1 flex-col" aria-label="محادثة العميل">
+            <header className="shrink-0 border-b border-border bg-surface px-3 py-2 sm:px-4">
+              <div className="flex min-w-0 flex-wrap items-center gap-x-4 gap-y-1">
+                <Link
+                  href="/escalations"
+                  className="text-sm text-muted-foreground transition hover:text-accent"
+                >
+                  → التصعيدات
+                </Link>
+                <a href={`tel:${conversation.customer_phone}`} dir="ltr" className="font-medium underline">
+                  {conversation.customer_phone}
+                </a>
+                <span className={HINT}>
+                  المفتوحة: {openCount} من {escalations.length}
+                </span>
+                <span className="ms-auto">
+                  <PanelToggleButton />
+                </span>
+              </div>
+              <div className="mt-2">
+                <TakeoverPanel
+                  conversationId={conversationId}
+                  openCount={openCount}
+                  takeover={panelTakeover(takeover)}
+                  currentUserId={appUser.id}
+                  isAdmin={appUser.app_role === "admin"}
+                  now={now.toISOString()}
+                  loadFailed={takeovers.failed}
+                />
+              </div>
+            </header>
+            <p
+              title={summary}
+              className="shrink-0 truncate border-b border-border bg-accent/5 px-3 py-1.5 text-sm sm:px-4"
+            >
+              <span className="text-muted-foreground">التصعيد: </span>
+              {summary}
+            </p>
 
-      <div className="grid min-w-0 gap-6">
-        <section className={CARD}>
-          <h2 className={SECTION_TITLE}>العميل</h2>
-          <p className="mt-2">
-            <a href={`tel:${conversation.customer_phone}`} dir="ltr" className="font-medium underline">
-              {conversation.customer_phone}
-            </a>
-          </p>
-          <TakeoverPanel
-            conversationId={conversationId}
-            openCount={openCount}
-            takeover={panelTakeover(takeover)}
-            currentUserId={appUser.id}
-            isAdmin={appUser.app_role === "admin"}
-            now={now.toISOString()}
-            loadFailed={takeovers.failed}
-          />
-        </section>
-
-        <section className={CARD}>
-          <h2 className={SECTION_TITLE}>التصعيدات</h2>
-          <div className="mt-3 grid gap-3">
-            {escalations.map((escalation) => (
-              <EscalationEntry
-                key={escalation.id}
-                escalation={escalation}
-                quotes={quotes}
-                names={names}
-                now={now}
-              />
-            ))}
-          </div>
-        </section>
-
-        <section className={CARD}>
-          <h2 className={SECTION_TITLE}>المحادثة</h2>
-          {messages.length === MESSAGE_LIMIT && (
-            <p className={HINT}>تظهر آخر {MESSAGE_LIMIT} رسالة فقط.</p>
-          )}
-          <ConversationScroll messageCount={messages.length}>
-            <ol className="space-y-2">
-              {messages.map((message) => (
-                <li key={message.id} className="min-w-0">
-                  {(before.get(message.id) ?? []).map((escalation) => (
-                    <EscalationMarker key={escalation.id} escalation={escalation} />
-                  ))}
-                  <div
-                    className={
-                      message.direction === "inbound"
-                        ? "me-12 rounded-xl border border-border bg-surface-subtle p-3"
-                        : message.staff_reply_id === null
-                          ? "ms-12 rounded-xl border border-border p-3"
-                          : "ms-12 rounded-xl border border-accent/40 p-3"
-                    }
-                  >
-                    <p className="text-xs text-muted-foreground">
-                      {messageSender(message, staffReplies.authorNames)} ·{" "}
-                      <span dir="ltr">{formatRiyadhDateTime(message.created_at)}</span>
-                    </p>
-                    <p className="mt-1 whitespace-pre-wrap break-words">{message.body}</p>
-                  </div>
-                </li>
+            <ConversationScroll messageIds={messages.map((message) => message.id)}>
+              {messages.length === MESSAGE_LIMIT && (
+                <p className={`${HINT} mb-2 text-center`}>تظهر آخر {MESSAGE_LIMIT} رسالة فقط.</p>
+              )}
+              <ol className="space-y-2">
+                {messages.map((message) => (
+                  <li key={message.id} className="min-w-0">
+                    {(before.get(message.id) ?? []).map((escalation) => (
+                      <EscalationMarker key={escalation.id} escalation={escalation} />
+                    ))}
+                    <Bubble message={message} authorNames={staffReplies.authorNames} />
+                  </li>
+                ))}
+              </ol>
+              {after.map((escalation) => (
+                <EscalationMarker key={escalation.id} escalation={escalation} />
               ))}
-            </ol>
-            {after.map((escalation) => (
-              <EscalationMarker key={escalation.id} escalation={escalation} />
-            ))}
-          </ConversationScroll>
-          <ReplyBox
-            conversationId={conversationId}
-            takeoverId={takeover?.id ?? null}
-            holderId={takeover?.taken_over_by ?? null}
-            currentUserId={appUser.id}
-            lastInboundAt={lastInboundResult.data?.created_at ?? null}
-            replies={staffReplies.recent.map((reply) => ({
-              ...reply,
-              authorName: staffReplies.authorNames.get(reply.id) ?? null,
-            }))}
-            loadFailed={staffReplies.failed}
-            now={now.toISOString()}
-          />
-        </section>
+            </ConversationScroll>
 
-        {quotes.length > 0 && (
-          <section className={CARD}>
-            <h2 className={SECTION_TITLE}>العروض في هذه المحادثة</h2>
-            <ul className="mt-3 grid gap-2">
-              {quotes.map((quote) => (
-                <li key={quote.id} className="rounded-xl border border-border p-3">
-                  <p className="font-medium">
-                    {names.hotels.get(quote.hotel_id) ?? `الفندق ${quote.hotel_id}`}،{" "}
-                    {names.roomTypes.get(quote.room_type_id) ?? `نوع الغرفة ${quote.room_type_id}`}
-                  </p>
-                  <p className={HINT}>
-                    العرض رقم {quote.id} · من {formatStayDate(quote.check_in, now)} إلى{" "}
-                    {formatStayDate(quote.check_out, now)} ·
-                    عدد الغرف {quote.rooms} · الإجمالي {formatHalalasAsRiyal(quote.ask_price_total)}
-                  </p>
-                </li>
-              ))}
-            </ul>
+            <ReplyBox
+              conversationId={conversationId}
+              takeoverId={takeover?.id ?? null}
+              holderId={takeover?.taken_over_by ?? null}
+              currentUserId={appUser.id}
+              replies={staffReplies.recent.map((reply) => ({
+                ...reply,
+                authorName: staffReplies.authorNames.get(reply.id) ?? null,
+              }))}
+              loadFailed={staffReplies.failed}
+            />
           </section>
-        )}
-      </div>
+
+          <SidePanel>
+            <section>
+              <h2 className={`${SECTION_TITLE} text-base`}>التصعيدات</h2>
+              <div className="mt-3 grid gap-3">
+                {escalations.map((escalation) => (
+                  <EscalationEntry
+                    key={escalation.id}
+                    escalation={escalation}
+                    quotes={quotes}
+                    names={names}
+                    now={now}
+                  />
+                ))}
+              </div>
+            </section>
+            {quotes.length > 0 && (
+              <section>
+                <h2 className={`${SECTION_TITLE} text-base`}>العروض في هذه المحادثة</h2>
+                <div className="mt-3">
+                  <QuotePanel quotes={buildPanelQuotes(quotes, escalations, names, now)} />
+                </div>
+              </section>
+            )}
+          </SidePanel>
+        </div>
+      </ChatWorkspaceProvider>
     </AppShell>
   );
 }
