@@ -14,6 +14,10 @@ import { logout } from "./sessionActions";
 // needs the caller's AppUser, and every page already loads it to decide
 // what it may show, so passing it in avoids a second round trip per render.
 //
+// overflow-x-clip (not hidden, which would stop the sticky header sticking)
+// keeps one over-wide element from widening the page and pushing the sidebar
+// out of view; the element is clipped instead, never the sidebar.
+//
 // "workspace" is for a screen that fills the viewport and scrolls inside
 // itself (the customer page's chat): the frame is exactly one viewport tall,
 // the main area has no page padding, and the narrow-screen link strip is
@@ -31,7 +35,7 @@ export function AppShell({
   const workspace = layout === "workspace";
 
   return (
-    <div className={workspace ? "flex h-dvh overflow-hidden" : "flex min-h-full flex-1"}>
+    <div className={workspace ? "flex h-dvh overflow-hidden" : "flex min-h-full flex-1 overflow-x-clip"}>
       <aside className="sticky top-0 hidden h-screen w-64 shrink-0 flex-col overflow-y-auto border-e border-border bg-shell lg:flex">
         <div className="flex items-center gap-3 px-5 py-6">
           <BrandMark />
@@ -54,7 +58,7 @@ export function AppShell({
         </p>
       </aside>
 
-      <div className={`flex min-w-0 flex-1 flex-col ${workspace ? "min-h-0" : ""}`}>
+      <div className={`flex min-w-0 flex-1 flex-col ${workspace ? "min-h-0" : "overflow-x-clip"}`}>
         <header className="sticky top-0 z-20 border-b border-border bg-shell/95 backdrop-blur">
           <div className="flex items-center gap-4 px-4 py-3 sm:px-6">
             <div className="flex items-center gap-3 lg:hidden">
