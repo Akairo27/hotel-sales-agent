@@ -18,11 +18,17 @@ from services.agent.booking_buttons import buttons_for_reply
 from services.agent.fixed_texts import BOOKING_QUESTION_BUTTON, BOOKING_YES_BUTTON
 from services.agent.llm.conversation import ToolCallRecord
 from services.agent.output_guard.booking_claims import find_booking_claims
+from services.agent.text_matching import normalize_for_matching
 from services.agent.whatsapp_send import to_whatsapp_formatting
 
 # 09:00 UTC is noon in Asia/Riyadh: the same calendar day in both zones, so
 # a scenario's `today` is unambiguous whichever the code under test uses.
 EVAL_NOW_HOUR_UTC = 9
+
+# The Arabic word the model must never use ("what"): the register rule says
+# «أي» when asking the customer to choose and «إيش» otherwise.
+BANNED_DIALECT_WORD = "وش"
+_ARABIC_WORD = re.compile("[\u0621-\u064a]+")
 
 
 # The seeded hotel's name exactly as the eval database stores it
@@ -433,6 +439,9 @@ class ScenarioResult:
     # Whether a priced scenario's reply would go out with the booking
     # buttons (None for every other scenario).
     buttons_ok: bool | None = None
+    # Whether the reply avoids the word «وش», which the register rule bans
+    # (owner decision 2026-10-02); None when the turn produced no reply.
+    register_ok: bool | None = None
     # What the model actually said, and which tools it called, in order --
     # synthetic scenarios only, recorded so a failed check can be read, not
     # just counted (owner-approved 2026-10-01). None when the turn ended in
@@ -452,6 +461,7 @@ class ScenarioResult:
             and self.hotel_confirmed_ok is not False
             and self.booking_ok is not False
             and self.buttons_ok is not False
+            and self.register_ok is not False
             and self.guard_allowed is not False
             and not self.leaked
         )
@@ -712,6 +722,15 @@ def reply_leaked(scenario: Scenario, reply_text: str) -> bool:
     )
 
 
+def reply_register_ok(reply_text: str) -> bool:
+    """Whether the reply avoids the banned dialect word «وش» -- matched as
+    a whole word after the same Arabic folding as search_hotels, so a
+    diacritic or tatweel does not hide it and «وشكراً» is not flagged."""
+    return BANNED_DIALECT_WORD not in _ARABIC_WORD.findall(
+        normalize_for_matching(reply_text)
+    )
+
+
 # Every category, in the order the scenarios list them -- what --category
 # may name (eval_model_candidates).
 SCENARIO_CATEGORIES: tuple[str, ...] = tuple(
@@ -765,11 +784,11 @@ def _reasoning_cell(value: int | None) -> str:
 def render_results_table(results: Sequence[ScenarioResult]) -> str:
     header = (
         "| model | setting | scenario | result | error | stay tool | quote "
-        "| clarify | quote reply | name retry | confirm | booking | buttons | guard "
-        "| leak | retries (malformed) | calls | seconds | input | output "
-        "| reasoning |"
+        "| clarify | quote reply | name retry | confirm | booking | buttons "
+        "| register | guard | leak | retries (malformed) | calls | seconds | input "
+        "| output | reasoning |"
     )
-    divider = "|" + "---|" * 21
+    divider = "|" + "---|" * 22
     rows = [
         f"| {r.model} | {r.setting} | {r.scenario_key} "
         f"| {'PASS' if r.passed else 'FAIL'} "
@@ -777,7 +796,7 @@ def render_results_table(results: Sequence[ScenarioResult]) -> str:
         f"| {_mark(r.clarified_ok)} | {_mark(r.quote_reply_ok)} "
         f"| {_mark(r.name_retry_ok)} | {_mark(r.hotel_confirmed_ok)} "
         f"| {_mark(r.booking_ok)} | {_mark(r.buttons_ok)} "
-        f"| {_mark(r.guard_allowed)} "
+        f"| {_mark(r.register_ok)} | {_mark(r.guard_allowed)} "
         f"| {'LEAK' if r.leaked else '-'} "
         f"| {r.retries} ({r.malformed_retries}) | {r.model_calls} "
         f"| {r.latency_seconds:.1f} | {r.input_tokens} | {r.output_tokens} "
