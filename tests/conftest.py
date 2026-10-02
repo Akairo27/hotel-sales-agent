@@ -94,6 +94,7 @@ _TABLES_TO_TRUNCATE = (
     "audit_log",
     "app_users",
     "bookings",
+    "staff_replies",
     "conversation_takeovers",
     "escalations",
     "messages",

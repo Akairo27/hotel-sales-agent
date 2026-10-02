@@ -32,6 +32,11 @@ from services.agent.output_guard.extraction import (
     parse_amount_to_halalas,
 )
 from services.agent.output_guard.quotes import load_allowed_amounts
+from services.agent.output_guard.staff_replies import (
+    StaffReplyInspection,
+    audit_record,
+    inspect_staff_reply,
+)
 
 __all__ = [
     "AMOUNT_BELOW_FLOOR",
@@ -45,11 +50,14 @@ __all__ = [
     "AmountFinding",
     "CandidateAmount",
     "GuardVerdict",
+    "StaffReplyInspection",
     "amounts_are_allowed",
+    "audit_record",
     "enforce_outbound_text",
     "evaluate_amounts",
     "extract_candidate_amounts",
     "find_booking_claims",
+    "inspect_staff_reply",
     "load_allowed_amounts",
     "normalize_for_scanning",
     "parse_amount_to_halalas",

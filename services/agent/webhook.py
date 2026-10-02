@@ -221,6 +221,7 @@ from services.agent.output_guard.enforcement import (
     enforce_outbound_text,
     open_escalation,
 )
+from services.agent.output_guard.staff_replies import StaffReplyInspection
 from services.agent.staff_follow_up import open_follow_up_for_dates_not_open
 from services.agent.takeover import is_taken_over
 from services.agent.whatsapp_send import (
@@ -555,8 +556,10 @@ def _insert_outbound_message(
     customer_phone: str,
     whatsapp_message_id: str,
     body: str,
+    staff_reply_id: int | None = None,
 ) -> None:
-    """Records one outbound message. Called only after a real WhatsApp
+    """Records one outbound message, linked to the staff reply it carries
+    when staff_reply_id is given (migration 0035). Called only after a real WhatsApp
     Cloud API send actually succeeded (see _send_or_log_failure) — a row
     here is always proof of an attempted delivery that got a message id
     back, never merely an intention to send. No idempotency handling
@@ -566,12 +569,26 @@ def _insert_outbound_message(
     _insert_inbound_message's own idempotent insert, long before this
     point — see the module docstring).
     """
-    conn.execute(
-        "INSERT INTO messages "
-        "(conversation_id, customer_phone, direction, whatsapp_message_id, body) "
-        "VALUES (%s, %s, 'outbound', %s, %s)",
-        (conversation_id, customer_phone, whatsapp_message_id, body),
-    )
+    if staff_reply_id is None:
+        conn.execute(
+            "INSERT INTO messages "
+            "(conversation_id, customer_phone, direction, whatsapp_message_id, body) "
+            "VALUES (%s, %s, 'outbound', %s, %s)",
+            (conversation_id, customer_phone, whatsapp_message_id, body),
+        )
+    else:
+        conn.execute(
+            "INSERT INTO messages (conversation_id, customer_phone, direction, "
+            "whatsapp_message_id, body, staff_reply_id) "
+            "VALUES (%s, %s, 'outbound', %s, %s, %s)",
+            (
+                conversation_id,
+                customer_phone,
+                whatsapp_message_id,
+                body,
+                staff_reply_id,
+            ),
+        )
     touch_last_message_at(conn, conversation_id=conversation_id)
 
 
@@ -639,6 +656,7 @@ async def _send_or_log_failure(
     customer_phone: str,
     text: str,
     offer: BookingOfferButtons | None = None,
+    staff_reply_id: int | None = None,
 ) -> str | None:
     """Attempts the real WhatsApp send (_send_text_or_offer); on any
     failure (deliberately not narrowed to WhatsAppSendError — see
@@ -686,6 +704,7 @@ async def _send_or_log_failure(
             customer_phone=customer_phone,
             whatsapp_message_id=whatsapp_message_id,
             body=text,
+            staff_reply_id=staff_reply_id,
         )
     except Exception as exc:
         logger.error(
@@ -1112,6 +1131,48 @@ async def send_fixed_text_or_log_failure(
         escalation_id=None,
         notice=notice,
     )
+
+
+async def send_staff_reply_or_log_failure(
+    conn: psycopg.Connection[Any],
+    *,
+    conversation_id: int,
+    customer_phone: str,
+    staff_reply_id: int,
+    inspection: StaffReplyInspection,
+) -> bool:
+    """Sends one staff reply (services/agent/staff_reply.py) and records it
+    as an outbound message linked to its staff_replies row. It sends
+    inspection.text and nothing else: only text that went through the
+    output guard's staff-reply mode can be sent this way (CLAUDE.md rule
+    8). Deliberately no takeover check: the caller claimed the reply while
+    its takeover was active. Returns whether it was delivered; never
+    raises."""
+    try:
+        sender = get_whatsapp_sender(get_whatsapp_send_settings())
+    except Exception as setup_exc:
+        logger.error(
+            json.dumps(
+                {
+                    "event": "staff_reply_delivery_failed",
+                    "conversation_id": conversation_id,
+                    "staff_reply_id": staff_reply_id,
+                    "exception_type": type(setup_exc).__name__,
+                    "exception_message": str(setup_exc),
+                }
+            ),
+            exc_info=setup_exc,
+        )
+        return False
+    whatsapp_message_id = await _send_or_log_failure(
+        sender,
+        conn=conn,
+        conversation_id=conversation_id,
+        customer_phone=customer_phone,
+        text=inspection.text,
+        staff_reply_id=staff_reply_id,
+    )
+    return whatsapp_message_id is not None
 
 
 async def _escalate_and_notify(

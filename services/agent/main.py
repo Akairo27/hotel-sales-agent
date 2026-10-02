@@ -2,8 +2,9 @@
 
 Health-check plus the WhatsApp Cloud API webhook (services/agent/webhook.py)
 — signature verification, idempotent inbound logging, and spend/rate-cap
-enforcement — and the internal takeover acknowledgement the dashboard
-calls (services/agent/takeover_ack.py). The lifespan handler refuses to
+enforcement — and the two internal endpoints the dashboard calls: the
+takeover acknowledgement (services/agent/takeover_ack.py) and staff
+replies (services/agent/staff_reply.py). The lifespan handler refuses to
 start with a missing setting (validate_startup_configuration), then starts
 the startup sweep for
 messages lost to a hard kill (services/agent/startup_sweep.py) in the
@@ -27,6 +28,7 @@ from datetime import UTC, datetime
 from fastapi import FastAPI
 
 from services.agent.llm.config import load_llm_settings
+from services.agent.staff_reply import router as staff_reply_router
 from services.agent.startup_sweep import (
     load_startup_sweep_settings,
     run_startup_sweep,
@@ -162,6 +164,7 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
 app = FastAPI(title="hotel-sales-agent", lifespan=_lifespan)
 app.include_router(webhook_router)
 app.include_router(takeover_ack_router)
+app.include_router(staff_reply_router)
 
 
 @app.get("/health")

@@ -71,6 +71,7 @@ _PUBLIC_RELATIONS = frozenset(
         "room_types",
         "seasons",
         "staff_names_for_dashboard",
+        "staff_replies",
         "token_usage",
     }
 )
@@ -100,6 +101,7 @@ _MANIFEST: dict[str, dict[str, dict[str, tuple[str, ...] | str]]] = {
                 "direction",
                 "whatsapp_message_id",
                 "body",
+                "staff_reply_id",
             ),
         },
         "escalations": {
@@ -126,6 +128,22 @@ _MANIFEST: dict[str, dict[str, dict[str, tuple[str, ...] | str]]] = {
                 "ack_failed_at",
             ),
             "UPDATE": ("ack_claimed_at", "ack_sent_at", "ack_failed_at"),
+        },
+        # Migration 0035: sending a staff reply (services/agent/staff_reply.py).
+        # Never who wrote it: the amounts audit reads that as its owner.
+        "staff_replies": {
+            "SELECT": (
+                "id",
+                "takeover_id",
+                "conversation_id",
+                "body",
+                "created_at",
+                "claimed_at",
+                "sent_at",
+                "failed_at",
+                "failure_reason",
+            ),
+            "UPDATE": ("claimed_at", "sent_at", "failed_at", "failure_reason"),
         },
         "token_usage": {
             "SELECT": _ALL,
@@ -199,9 +217,14 @@ _MANIFEST: dict[str, dict[str, dict[str, tuple[str, ...] | str]]] = {
 
 # The only functions each role may execute: the two validators the quotes
 # CHECK constraint calls (a role that writes a table whose CHECK calls a
-# function needs EXECUTE on it).
+# function needs EXECUTE on it), and the agent's one way into audit_log, the
+# staff reply amounts audit (migration 0035).
 _EXECUTABLE_FUNCTIONS = {
-    "hotel_agent": {"quotes_is_valid_night_record", "quotes_all_nights_are_complete"},
+    "hotel_agent": {
+        "quotes_is_valid_night_record",
+        "quotes_all_nights_are_complete",
+        "staff_reply_record_amounts",
+    },
     "hotel_worker": set[str](),
 }
 
