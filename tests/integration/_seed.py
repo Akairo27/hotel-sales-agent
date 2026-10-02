@@ -472,3 +472,38 @@ def seed_escalation(
         "RETURNING id",
         (conversation_id, customer_phone, reason, opened_at),
     )
+
+
+def seed_takeover(
+    conn: psycopg.Connection[Any],
+    conversation_id: int,
+    *,
+    taken_over_at: datetime | None = None,
+    ended_at: datetime | None = None,
+) -> int:
+    """One conversation_takeovers row (migration 0034) by a new sales user,
+    written directly as the privileged test role so the times can be
+    placed exactly. An ended one is resolved by the same user. taken_over_at
+    defaults to now(), the column's own default."""
+    row = conn.execute("INSERT INTO auth.users DEFAULT VALUES RETURNING id").fetchone()
+    assert row is not None
+    staff_id = str(row[0])
+    conn.execute(
+        "INSERT INTO app_users (id, full_name, app_role) "
+        "VALUES (%s, 'Seeded Staff', 'sales')",
+        (staff_id,),
+    )
+    return returning_id(
+        conn,
+        "INSERT INTO conversation_takeovers (conversation_id, taken_over_by, "
+        "taken_over_at, ended_by, ended_at, outcome) "
+        "VALUES (%s, %s, COALESCE(%s, now()), %s, %s, %s) RETURNING id",
+        (
+            conversation_id,
+            staff_id,
+            taken_over_at,
+            staff_id if ended_at is not None else None,
+            ended_at,
+            "resolved" if ended_at is not None else None,
+        ),
+    )

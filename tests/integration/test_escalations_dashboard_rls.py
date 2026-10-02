@@ -2,7 +2,9 @@
 against a real Postgres: every active admin and sales user reads every
 escalation, and the conversation, messages and quotes of an escalated
 conversation only -- never a conversation that did not escalate, never a
-quote's nights or floor, and never any write (CLAUDE.md rules 2, 10)."""
+quote's nights or floor, and no write but closing an escalation (CLAUDE.md
+rules 2, 10). Closing escalations, and taking a conversation over, came
+with migration 0034: tests/integration/test_conversation_takeovers.py."""
 
 from __future__ import annotations
 
@@ -230,7 +232,9 @@ def test_a_quote_outside_any_conversation_is_invisible(
     [
         "INSERT INTO escalations (conversation_id, customer_phone, reason) "
         "VALUES ({conversation_id}, '+966500000001', 'x')",
-        "UPDATE escalations SET resolved_at = now()",
+        "UPDATE escalations SET reason = 'x'",
+        "UPDATE escalations SET notes = 'x'",
+        "UPDATE escalations SET assigned_to = NULL",
         "DELETE FROM escalations",
         "UPDATE conversations SET last_message_at = now()",
         "DELETE FROM conversations",
@@ -248,8 +252,9 @@ def test_staff_can_write_none_of_these_tables(
     two_conversations: tuple[int, int],
     statement: str,
 ) -> None:
-    """Step 1 is read-only: taking over, resolving and replying are later
-    steps with their own migrations."""
+    """Step 1 was read-only. Step 2a (migration 0034) lets staff close an
+    escalation -- resolved_at only, tested with the takeovers -- and
+    nothing else here; replying is step 3."""
     escalated, _ = two_conversations
     user_id = _seed_user(db_conn, role="admin")
 
@@ -264,12 +269,13 @@ def test_staff_can_write_none_of_these_tables(
 def test_escalations_and_messages_stream_through_supabase_realtime(
     db_conn: psycopg.Connection[Any],
 ) -> None:
-    """Owner decision 8: live updates. Only these two tables are published;
-    conversations and quotes are re-read when an event arrives."""
+    """Owner decision 8: live updates. Only these tables are published --
+    takeovers since migration 0034; conversations and quotes are re-read
+    when an event arrives."""
     rows = db_conn.execute(
         "SELECT tablename FROM pg_publication_tables "
         "WHERE pubname = 'supabase_realtime' AND schemaname = 'public' "
         "ORDER BY tablename"
     ).fetchall()
 
-    assert rows == [("escalations",), ("messages",)]
+    assert rows == [("conversation_takeovers",), ("escalations",), ("messages",)]

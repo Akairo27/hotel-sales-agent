@@ -55,6 +55,7 @@ _PUBLIC_RELATIONS = frozenset(
         "app_users",
         "audit_log",
         "bookings",
+        "conversation_takeovers",
         "conversations",
         "escalations",
         "holds",
@@ -69,6 +70,7 @@ _PUBLIC_RELATIONS = frozenset(
         "room_night_inventory",
         "room_types",
         "seasons",
+        "staff_names_for_dashboard",
         "token_usage",
     }
 )
@@ -109,6 +111,21 @@ _MANIFEST: dict[str, dict[str, dict[str, tuple[str, ...] | str]]] = {
                 "notes",
                 "quote_id",
             ),
+        },
+        # Migration 0034: whether a conversation is taken over, and the
+        # acknowledgement (services/agent/takeover.py, takeover_ack.py).
+        # Never which staff member holds it, and never the end of one.
+        "conversation_takeovers": {
+            "SELECT": (
+                "id",
+                "conversation_id",
+                "taken_over_at",
+                "ended_at",
+                "ack_claimed_at",
+                "ack_sent_at",
+                "ack_failed_at",
+            ),
+            "UPDATE": ("ack_claimed_at", "ack_sent_at", "ack_failed_at"),
         },
         "token_usage": {
             "SELECT": _ALL,
