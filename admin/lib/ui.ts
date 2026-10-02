@@ -5,7 +5,9 @@
 // Centralized here so every screen's forms and tables stay visually
 // identical instead of each re-deriving its own version.
 
-export const PAGE = "mx-auto w-full max-w-6xl flex-1 px-4 py-8 sm:px-8 sm:py-12";
+// min-w-0: a flex child never shrinks below its content by default, so one
+// wide descendant would widen the whole column instead of wrapping.
+export const PAGE = "mx-auto w-full min-w-0 max-w-6xl flex-1 px-4 py-8 sm:px-8 sm:py-12";
 
 export const CARD = "rounded-2xl border border-border bg-surface p-6";
 

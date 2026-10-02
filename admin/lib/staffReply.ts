@@ -20,18 +20,27 @@ export const MAX_REPLY_LENGTH = 4096;
 // reached the customer.
 export const SENDING_STALE_MS = 2 * 60 * 1000;
 
-/** Whether free text can still be sent: the customer's last message is
- * strictly less than 24 hours old, as the agent counts it. No message from
- * the customer at all is outside the window. */
+/** How long free text can still be sent: the time left until the customer's
+ * last message is 24 hours old, or 0 when it already is (or they never
+ * wrote). The agent counts it strictly, so exactly 24 hours is closed. */
+export function windowRemainingMs(lastInboundAt: string | null, now: Date): number {
+  if (lastInboundAt === null) {
+    return 0;
+  }
+  const remaining = Date.parse(lastInboundAt) + CUSTOMER_SERVICE_WINDOW_MS - now.getTime();
+  return Math.max(remaining, 0);
+}
+
+/** Whether free text can still be sent (see windowRemainingMs). */
 export function isWithinCustomerServiceWindow(
   lastInboundAt: string | null,
   now: Date,
 ): boolean {
-  if (lastInboundAt === null) {
-    return false;
-  }
-  return now.getTime() - Date.parse(lastInboundAt) < CUSTOMER_SERVICE_WINDOW_MS;
+  return windowRemainingMs(lastInboundAt, now) > 0;
 }
+
+// Below this much window left the indicator turns into a warning.
+export const WINDOW_LOW_MS = 60 * 60 * 1000;
 
 /** Why a draft cannot be queued, or null when it can. The database checks
  * the same two things; this turns them into a message before the trip. */

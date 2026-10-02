@@ -11,6 +11,7 @@ import {
   replyStatusFromBody,
   sendResultLabel,
   staffMessageLabel,
+  windowRemainingMs,
 } from "./staffReply";
 
 const NOW = new Date("2026-10-02T12:00:00Z");
@@ -153,5 +154,16 @@ describe("staffMessageLabel", () => {
 
   it("falls back to the role alone when the name could not be read", () => {
     expect(staffMessageLabel(null)).toBe("الموظف");
+  });
+});
+
+describe("windowRemainingMs", () => {
+  it("is what is left of the 24 hours, and 0 once they are over or nobody wrote", () => {
+    const eightHoursAgo = new Date(NOW.getTime() - 8 * 60 * 60 * 1000).toISOString();
+    expect(windowRemainingMs(eightHoursAgo, NOW)).toBe(16 * 60 * 60 * 1000);
+    const exactly = new Date(NOW.getTime() - CUSTOMER_SERVICE_WINDOW_MS).toISOString();
+    expect(windowRemainingMs(exactly, NOW)).toBe(0);
+    expect(windowRemainingMs("2026-09-30T00:00:00Z", NOW)).toBe(0);
+    expect(windowRemainingMs(null, NOW)).toBe(0);
   });
 });

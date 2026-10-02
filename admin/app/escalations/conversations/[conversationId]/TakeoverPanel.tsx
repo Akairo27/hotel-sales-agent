@@ -56,8 +56,9 @@ function statusText(
   return openCount > 0 ? "لم يستلم أحد هذه المحادثة بعد." : "كل تصعيدات هذا العميل مغلقة.";
 }
 
-// Take over, resolve and hand back for one customer (staff notification
-// step 2a, owner decisions 2026-10-02). Which buttons show mirrors
+// Take over, resolve and hand back for one customer, laid out as the chat
+// header's row (staff notification step 2a, owner decisions 2026-10-02;
+// compact header, same day). Which buttons show mirrors
 // migration 0034's policies -- anyone active takes over; the holder or an
 // admin ends a takeover; resolve also closes escalations nobody holds --
 // but the database decides; a refusal comes back as a message.
@@ -140,9 +141,50 @@ export function TakeoverPanel({
     });
 
   return (
-    <div className="mt-3 grid gap-3">
-      <p className={HINT}>{statusText(takeover, openCount, currentUserId, new Date(now))}</p>
-      {takeover && <p className={HINT}>{noticeStateLabel(takeover.noticeState)}</p>}
+    <div className="grid min-w-0 gap-2">
+      <div className="flex min-w-0 flex-wrap items-center gap-x-4 gap-y-2">
+        <div className="min-w-0 flex-1">
+          <p className={HINT}>{statusText(takeover, openCount, currentUserId, new Date(now))}</p>
+          {takeover && <p className={HINT}>{noticeStateLabel(takeover.noticeState)}</p>}
+        </div>
+        <div className="flex flex-wrap gap-2">
+          {!takeover && openCount > 0 && (
+            <button type="button" onClick={takeOver} disabled={pending} className={BUTTON_PRIMARY}>
+              استلام المحادثة
+            </button>
+          )}
+          {noticeRetryId !== null && (
+            <button
+              type="button"
+              onClick={() => retryNotice(noticeRetryId)}
+              disabled={pending}
+              className={BUTTON_PRIMARY}
+            >
+              إرسال إشعار الاستلام
+            </button>
+          )}
+          {(mayEnd || (!takeover && openCount > 0)) && (
+            <button
+              type="button"
+              onClick={() => close("resolved")}
+              disabled={pending}
+              className={BUTTON_SECONDARY}
+            >
+              إغلاق
+            </button>
+          )}
+          {mayEnd && (
+            <button
+              type="button"
+              onClick={() => close("handed_back")}
+              disabled={pending}
+              className={BUTTON_SECONDARY}
+            >
+              إعادة للبوت
+            </button>
+          )}
+        </div>
+      </div>
       {status && (
         <p role="status" className={ALERT_STATUS}>
           {status}
@@ -153,43 +195,6 @@ export function TakeoverPanel({
           {error}
         </p>
       )}
-      <div className="flex flex-wrap gap-2">
-        {!takeover && openCount > 0 && (
-          <button type="button" onClick={takeOver} disabled={pending} className={BUTTON_PRIMARY}>
-            استلام المحادثة
-          </button>
-        )}
-        {noticeRetryId !== null && (
-          <button
-            type="button"
-            onClick={() => retryNotice(noticeRetryId)}
-            disabled={pending}
-            className={BUTTON_PRIMARY}
-          >
-            إرسال إشعار الاستلام
-          </button>
-        )}
-        {(mayEnd || (!takeover && openCount > 0)) && (
-          <button
-            type="button"
-            onClick={() => close("resolved")}
-            disabled={pending}
-            className={BUTTON_SECONDARY}
-          >
-            إغلاق
-          </button>
-        )}
-        {mayEnd && (
-          <button
-            type="button"
-            onClick={() => close("handed_back")}
-            disabled={pending}
-            className={BUTTON_SECONDARY}
-          >
-            إعادة للبوت
-          </button>
-        )}
-      </div>
     </div>
   );
 }
