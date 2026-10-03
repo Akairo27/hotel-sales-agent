@@ -451,6 +451,17 @@ class _FakeWhatsAppSender:
         self.calls.append((to_phone, body))
         return self.message_id
 
+    async def send_template(
+        self,
+        *,
+        to_phone: str,
+        template_name: str,
+        language_code: str,
+        body_parameters: tuple[str, ...],
+    ) -> str:
+        del to_phone, template_name, language_code, body_parameters
+        raise AssertionError("send_template is not expected in this test")
+
     async def send_reply_buttons(
         self, *, to_phone: str, body: str, buttons: tuple[ReplyButton, ...]
     ) -> str:
@@ -472,6 +483,17 @@ class _FailingWhatsAppSender:
     async def send_text(self, *, to_phone: str, body: str) -> str:
         del to_phone, body
         raise self.exc
+
+    async def send_template(
+        self,
+        *,
+        to_phone: str,
+        template_name: str,
+        language_code: str,
+        body_parameters: tuple[str, ...],
+    ) -> str:
+        del to_phone, template_name, language_code, body_parameters
+        raise AssertionError("send_template is not expected in this test")
 
     async def send_reply_buttons(
         self, *, to_phone: str, body: str, buttons: tuple[ReplyButton, ...]
@@ -496,6 +518,17 @@ class _FlakyWhatsAppSender:
         if len(self.calls) <= self.failures:
             raise WhatsAppSendError("simulated API error")
         return f"wamid.OUTBOUND-FLAKY-{len(self.calls)}"
+
+    async def send_template(
+        self,
+        *,
+        to_phone: str,
+        template_name: str,
+        language_code: str,
+        body_parameters: tuple[str, ...],
+    ) -> str:
+        del to_phone, template_name, language_code, body_parameters
+        raise AssertionError("send_template is not expected in this test")
 
     async def send_reply_buttons(
         self, *, to_phone: str, body: str, buttons: tuple[ReplyButton, ...]

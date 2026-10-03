@@ -21,6 +21,8 @@ function reply(overrides: Partial<BoxReply>): BoxReply {
     sent_at: null,
     failed_at: null,
     failure_reason: null,
+    kind: "text",
+    template_hotel_id: null,
     authorName: "Sara",
     ...overrides,
   };
@@ -32,12 +34,14 @@ function render({
   lastInboundAt = INSIDE_WINDOW,
   replies = [],
   loadFailed = false,
+  templateEnabled = true,
 }: {
   takeoverId?: number | null;
   holderId?: string | null;
   lastInboundAt?: string | null;
   replies?: BoxReply[];
   loadFailed?: boolean;
+  templateEnabled?: boolean;
 }): string {
   return renderToStaticMarkup(
     <ChatWorkspaceProvider serverNow={NOW} canReply={holderId === ME} lastInboundAt={lastInboundAt}>
@@ -48,6 +52,7 @@ function render({
         currentUserId={ME}
         replies={replies}
         loadFailed={loadFailed}
+        templateEnabled={templateEnabled}
       />
     </ChatWorkspaceProvider>,
   );
@@ -104,20 +109,36 @@ describe("ReplyBox inside the 24-hour window", () => {
 });
 
 describe("ReplyBox outside the 24-hour window", () => {
-  it("disables free text and shows the template button, disabled until PR C", () => {
+  it("disables free text and offers the re-engagement template once the agent has it", () => {
     const html = render({ lastInboundAt: OUTSIDE_WINDOW });
     expect(textareaDisabled(html)).toBe(true);
     expect(buttons(html)).toEqual([
       { label: "إرسال الرد", disabled: true },
-      { label: "إرسال قالب إعادة التواصل", disabled: true },
+      { label: "إرسال قالب إعادة التواصل", disabled: false },
     ]);
     expect(html).toContain("مرّ أكثر من 24 ساعة");
-    expect(html).toContain("تواصل معه هاتفياً");
+    expect(html).not.toContain("غير مفعّل بعد");
+  });
+
+  it("keeps the template button off, saying to call the customer, until the agent has template names", () => {
+    const html = render({ lastInboundAt: OUTSIDE_WINDOW, templateEnabled: false });
+    expect(buttons(html)).toEqual([
+      { label: "إرسال الرد", disabled: true },
+      { label: "إرسال قالب إعادة التواصل", disabled: true },
+    ]);
+    expect(html).toContain("قالب إعادة التواصل غير مفعّل بعد. تواصل مع العميل هاتفياً.");
   });
 
   it("treats a customer who never wrote as outside the window", () => {
     const html = render({ lastInboundAt: null });
     expect(textareaDisabled(html)).toBe(true);
+    expect(buttons(html).map((button) => button.label)).toContain("إرسال قالب إعادة التواصل");
+  });
+
+  it("offers no template inside the window, whatever the agent has", () => {
+    expect(buttons(render({ templateEnabled: true })).map((button) => button.label)).toEqual([
+      "إرسال الرد",
+    ]);
   });
 });
 
@@ -167,6 +188,35 @@ describe("ReplyBox replies", () => {
     });
     expect(html).toContain("لا يقبل واتساب رداً حراً");
     expect(buttons(html).map((button) => button.label)).not.toContain("إعادة كتابته");
+  });
+
+  it("never offers to rewrite a failed template as text", () => {
+    const html = render({
+      replies: [
+        reply({
+          kind: "template",
+          body: "قالب إعادة التواصل",
+          claimed_at: NOW,
+          failed_at: NOW,
+          failure_reason: "send_failed",
+        }),
+      ],
+    });
+    expect(buttons(html).map((button) => button.label)).toEqual(["إرسال الرد"]);
+  });
+
+  it("tells staff a template was refused because the window is open", () => {
+    const html = render({
+      replies: [
+        reply({
+          kind: "template",
+          claimed_at: NOW,
+          failed_at: NOW,
+          failure_reason: "window_open",
+        }),
+      ],
+    });
+    expect(html).toContain("نافذة الـ24 ساعة مفتوحة");
   });
 
   it("shows a reply being sent with neither retry nor rewrite", () => {

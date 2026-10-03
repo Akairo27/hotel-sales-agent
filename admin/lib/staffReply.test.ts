@@ -11,6 +11,8 @@ import {
   replyStatusFromBody,
   sendResultLabel,
   staffMessageLabel,
+  templateButtonProblem,
+  TEMPLATE_NOT_ENABLED,
   windowRemainingMs,
 } from "./staffReply";
 
@@ -67,6 +69,8 @@ describe("replyStatusFromBody", () => {
       "not_found",
       "failed",
       "unavailable",
+      "window_open",
+      "not_configured",
     ] as const) {
       expect(replyStatusFromBody({ status })).toBe(status);
     }
@@ -88,6 +92,8 @@ describe("replyStatusFromBody", () => {
       "not_found",
       "failed",
       "unavailable",
+      "window_open",
+      "not_configured",
       "unreachable",
     ] as const) {
       expect(sendResultLabel(status)).not.toBe("");
@@ -165,5 +171,32 @@ describe("windowRemainingMs", () => {
     expect(windowRemainingMs(exactly, NOW)).toBe(0);
     expect(windowRemainingMs("2026-09-30T00:00:00Z", NOW)).toBe(0);
     expect(windowRemainingMs(null, NOW)).toBe(0);
+  });
+});
+
+describe("templateButtonProblem", () => {
+  it("is nothing only when the window is shut and the agent has the template", () => {
+    expect(templateButtonProblem(false, true)).toBeNull();
+  });
+
+  it("says to write directly while the window is open, whatever the agent has", () => {
+    expect(templateButtonProblem(true, true)).toContain("اكتب ردك مباشرة");
+    expect(templateButtonProblem(true, false)).toContain("اكتب ردك مباشرة");
+  });
+
+  it("says to call the customer while the agent has no template names", () => {
+    expect(templateButtonProblem(false, false)).toBe(TEMPLATE_NOT_ENABLED);
+    expect(TEMPLATE_NOT_ENABLED).toContain("تواصل مع العميل هاتفياً");
+  });
+});
+
+describe("a window_open failure", () => {
+  it("has its own hint", () => {
+    expect(
+      replyProblemHint(
+        { claimed_at: AT, sent_at: null, failed_at: AT, failure_reason: "window_open" },
+        NOW,
+      ),
+    ).toContain("نافذة الـ24 ساعة مفتوحة");
   });
 });

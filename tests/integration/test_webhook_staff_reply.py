@@ -35,8 +35,10 @@ from services.agent.whatsapp_send import (
 from tests.integration._seed import (
     seed_conversation,
     seed_escalation,
+    seed_hotel,
     seed_message,
     seed_staff_reply,
+    seed_staff_template_reply,
     seed_takeover,
 )
 
@@ -60,12 +62,30 @@ class _RecordingSender:
 
     fail: bool = False
     calls: list[tuple[str, str]] = field(default_factory=list)
+    template_calls: list[tuple[str, str, str, tuple[str, ...]]] = field(
+        default_factory=list
+    )
 
     async def send_text(self, *, to_phone: str, body: str) -> str:
         self.calls.append((to_phone, body))
         if self.fail:
             raise WhatsAppSendError("simulated API error")
         return f"wamid.OUT-{len(self.calls)}"
+
+    async def send_template(
+        self,
+        *,
+        to_phone: str,
+        template_name: str,
+        language_code: str,
+        body_parameters: tuple[str, ...],
+    ) -> str:
+        self.template_calls.append(
+            (to_phone, template_name, language_code, body_parameters)
+        )
+        if self.fail:
+            raise WhatsAppSendError("simulated API error")
+        return f"wamid.TEMPLATE-{len(self.template_calls)}"
 
     async def send_reply_buttons(
         self, *, to_phone: str, body: str, buttons: tuple[ReplyButton, ...]
@@ -378,3 +398,235 @@ def test_the_reply_text_never_reaches_the_logs(
     _send(wiring.client, reply_id)
 
     assert all(_PRICED_REPLY not in record.getMessage() for record in caplog.records)
+
+
+# ---------------------------------------------------------------------------
+# The re-engagement template (migration 0036; services/agent/
+# reengagement_template.py): a reply of kind 'template', sent outside the
+# 24-hour window only, and only once both template names are set.
+# ---------------------------------------------------------------------------
+
+_TEMPLATE_WITH_HOTEL = "reengagement_with_hotel"
+_TEMPLATE_NO_HOTEL = "reengagement_no_hotel"
+_OUTSIDE_WINDOW = timedelta(hours=25)
+
+
+@pytest.fixture
+def template_names(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("WHATSAPP_REENGAGEMENT_TEMPLATE", _TEMPLATE_WITH_HOTEL)
+    monkeypatch.setenv("WHATSAPP_REENGAGEMENT_TEMPLATE_NO_HOTEL", _TEMPLATE_NO_HOTEL)
+
+
+@pytest.fixture
+def template_names_unset(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("WHATSAPP_REENGAGEMENT_TEMPLATE", raising=False)
+    monkeypatch.delenv("WHATSAPP_REENGAGEMENT_TEMPLATE_NO_HOTEL", raising=False)
+
+
+def _customer_wrote(
+    db_conn: psycopg.Connection[Any], conversation_id: int, body: str, ago: timedelta
+) -> None:
+    seed_message(
+        db_conn,
+        conversation_id,
+        direction="inbound",
+        body=body,
+        customer_phone=_PHONE,
+        created_at=datetime.now(UTC) - ago,
+    )
+
+
+@pytest.mark.usefixtures("template_names")
+def test_a_template_names_the_hotel_in_the_customers_language_and_is_recorded(
+    wiring: _Wiring, db_conn: psycopg.Connection[Any]
+) -> None:
+    conversation_id, takeover_id = _taken_over_conversation(
+        db_conn, customer_wrote_ago=_OUTSIDE_WINDOW
+    )
+    _customer_wrote(db_conn, conversation_id, "هل في غرفة متاحة؟", _OUTSIDE_WINDOW)
+    hotel_id = seed_hotel(db_conn, hotel_name="  فندق\nزمزم  ")
+    reply_id = seed_staff_template_reply(db_conn, takeover_id, hotel_id=hotel_id)
+
+    first = _send(wiring.client, reply_id)
+    second = _send(wiring.client, reply_id)
+
+    assert (first.status_code, first.json()) == (200, {"status": "sent"})
+    assert second.json() == {"status": "already_claimed"}
+    assert wiring.sender.calls == []
+    assert wiring.sender.template_calls == [
+        (_WA_ID, _TEMPLATE_WITH_HOTEL, "ar", ("فندق زمزم",))
+    ]
+    assert _outbound(db_conn) == [
+        (
+            "حاولنا نتواصل معك بخصوص طلبك في فندق زمزم. ردّ على هذه الرسالة "
+            "متى ما ناسبك ونكمل معك إن شاء الله.",
+            reply_id,
+        )
+    ]
+    assert _reply_state(db_conn, reply_id) == (True, True, False, None)
+
+
+@pytest.mark.usefixtures("template_names")
+def test_a_template_without_a_hotel_uses_the_variant_with_no_hotel_name(
+    wiring: _Wiring, db_conn: psycopg.Connection[Any]
+) -> None:
+    _, takeover_id = _taken_over_conversation(
+        db_conn, customer_wrote_ago=_OUTSIDE_WINDOW
+    )
+    reply_id = seed_staff_template_reply(db_conn, takeover_id)
+
+    response = _send(wiring.client, reply_id)
+
+    assert response.json() == {"status": "sent"}
+    assert wiring.sender.template_calls == [(_WA_ID, _TEMPLATE_NO_HOTEL, "en", ())]
+    assert _outbound(db_conn) == [
+        (
+            "We tried to reach you about your request. Reply to this message "
+            "whenever it suits you and we will continue from there.",
+            reply_id,
+        )
+    ]
+
+
+@pytest.mark.usefixtures("template_names")
+def test_a_template_goes_out_in_indonesian_for_an_indonesian_customer(
+    wiring: _Wiring, db_conn: psycopg.Connection[Any]
+) -> None:
+    conversation_id, takeover_id = _taken_over_conversation(
+        db_conn, customer_wrote_ago=_OUTSIDE_WINDOW
+    )
+    _customer_wrote(db_conn, conversation_id, "Halo, ada kamar?", _OUTSIDE_WINDOW)
+    hotel_id = seed_hotel(db_conn, hotel_name="Hotel Dua")
+    reply_id = seed_staff_template_reply(db_conn, takeover_id, hotel_id=hotel_id)
+
+    _send(wiring.client, reply_id)
+
+    assert wiring.sender.template_calls == [
+        (_WA_ID, _TEMPLATE_WITH_HOTEL, "id", ("Hotel Dua",))
+    ]
+
+
+@pytest.mark.usefixtures("template_names")
+def test_a_template_is_refused_while_the_24_hour_window_is_open(
+    wiring: _Wiring, db_conn: psycopg.Connection[Any]
+) -> None:
+    """Inside the window free text is the right tool; the template is
+    recorded as failed (window_open) and nothing is sent."""
+    _, takeover_id = _taken_over_conversation(db_conn)
+    reply_id = seed_staff_template_reply(db_conn, takeover_id)
+
+    response = _send(wiring.client, reply_id)
+
+    assert (response.status_code, response.json()) == (200, {"status": "window_open"})
+    assert wiring.sender.template_calls == []
+    assert wiring.sender.calls == []
+    assert _outbound(db_conn) == []
+    assert _reply_state(db_conn, reply_id) == (True, False, True, "window_open")
+
+
+@pytest.mark.usefixtures("template_names_unset")
+def test_a_template_claims_nothing_while_the_feature_is_off(
+    wiring: _Wiring, db_conn: psycopg.Connection[Any]
+) -> None:
+    _, takeover_id = _taken_over_conversation(
+        db_conn, customer_wrote_ago=_OUTSIDE_WINDOW
+    )
+    reply_id = seed_staff_template_reply(db_conn, takeover_id)
+
+    response = _send(wiring.client, reply_id)
+
+    assert (response.status_code, response.json()) == (
+        200,
+        {"status": "not_configured"},
+    )
+    assert wiring.sender.template_calls == []
+    assert wiring.sender.calls == []
+    assert _reply_state(db_conn, reply_id) == (False, False, False, None)
+
+
+def test_a_half_set_configuration_is_off_and_never_sends_the_placeholder(
+    wiring: _Wiring,
+    db_conn: psycopg.Connection[Any],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("WHATSAPP_REENGAGEMENT_TEMPLATE", _TEMPLATE_WITH_HOTEL)
+    monkeypatch.delenv("WHATSAPP_REENGAGEMENT_TEMPLATE_NO_HOTEL", raising=False)
+    _, takeover_id = _taken_over_conversation(
+        db_conn, customer_wrote_ago=_OUTSIDE_WINDOW
+    )
+    reply_id = seed_staff_template_reply(db_conn, takeover_id)
+
+    response = _send(wiring.client, reply_id)
+
+    assert response.json() == {"status": "not_configured"}
+    assert wiring.sender.template_calls == []
+    assert wiring.sender.calls == []
+
+
+@pytest.mark.usefixtures("template_names")
+def test_a_failed_template_send_is_recorded_and_never_retried(
+    wiring: _Wiring, db_conn: psycopg.Connection[Any]
+) -> None:
+    _, takeover_id = _taken_over_conversation(
+        db_conn, customer_wrote_ago=_OUTSIDE_WINDOW
+    )
+    reply_id = seed_staff_template_reply(db_conn, takeover_id)
+    wiring.sender.fail = True
+
+    first = _send(wiring.client, reply_id)
+    second = _send(wiring.client, reply_id)
+
+    assert (first.status_code, first.json()) == (502, {"status": "failed"})
+    assert second.json() == {"status": "already_claimed"}
+    assert len(wiring.sender.template_calls) == 1
+    assert _outbound(db_conn) == []
+    assert _reply_state(db_conn, reply_id) == (True, False, True, "send_failed")
+
+
+@pytest.mark.usefixtures("template_names")
+def test_a_template_whose_takeover_ended_is_not_sent(
+    wiring: _Wiring, db_conn: psycopg.Connection[Any]
+) -> None:
+    _, takeover_id = _taken_over_conversation(
+        db_conn, customer_wrote_ago=_OUTSIDE_WINDOW
+    )
+    reply_id = seed_staff_template_reply(db_conn, takeover_id)
+    db_conn.execute(
+        "UPDATE conversation_takeovers SET ended_at = now(), ended_by = taken_over_by, "
+        "outcome = 'handed_back' WHERE id = %s",
+        (takeover_id,),
+    )
+
+    response = _send(wiring.client, reply_id)
+
+    assert response.json() == {"status": "takeover_ended"}
+    assert wiring.sender.template_calls == []
+
+
+def test_the_status_endpoint_says_whether_the_template_is_switched_on(
+    wiring: _Wiring, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    headers = {"Authorization": f"Bearer {_INTERNAL_TOKEN}"}
+    monkeypatch.delenv("WHATSAPP_REENGAGEMENT_TEMPLATE", raising=False)
+    monkeypatch.delenv("WHATSAPP_REENGAGEMENT_TEMPLATE_NO_HOTEL", raising=False)
+    off = wiring.client.get("/internal/reengagement-template", headers=headers)
+
+    monkeypatch.setenv("WHATSAPP_REENGAGEMENT_TEMPLATE", _TEMPLATE_WITH_HOTEL)
+    monkeypatch.setenv("WHATSAPP_REENGAGEMENT_TEMPLATE_NO_HOTEL", _TEMPLATE_NO_HOTEL)
+    on = wiring.client.get("/internal/reengagement-template", headers=headers)
+
+    monkeypatch.delenv("WHATSAPP_REENGAGEMENT_TEMPLATE_NO_HOTEL")
+    half = wiring.client.get("/internal/reengagement-template", headers=headers)
+
+    assert off.json() == {"enabled": False}
+    assert on.json() == {"enabled": True}
+    assert half.json() == {"enabled": False}
+
+
+def test_the_status_endpoint_needs_the_internal_token(wiring: _Wiring) -> None:
+    missing = wiring.client.get("/internal/reengagement-template")
+    wrong = wiring.client.get(
+        "/internal/reengagement-template", headers={"Authorization": "Bearer nope"}
+    )
+
+    assert (missing.status_code, wrong.status_code) == (401, 401)

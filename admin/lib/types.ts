@@ -291,5 +291,9 @@ export interface StaffReplyRow {
   claimed_at: string | null;
   sent_at: string | null;
   failed_at: string | null;
-  failure_reason: "outside_window" | "send_failed" | null;
+  failure_reason: "outside_window" | "send_failed" | "window_open" | null;
+  // Migration 0036: a re-engagement template is a reply of its own kind, and
+  // may name a hotel ({{1}}); a text reply names none.
+  kind: "text" | "template";
+  template_hotel_id: number | null;
 }

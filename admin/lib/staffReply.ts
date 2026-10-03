@@ -5,6 +5,9 @@
 // server-only.
 import type { StaffReplyRow } from "@/lib/types";
 
+// What staff are told while the agent has no template names set.
+export const TEMPLATE_NOT_ENABLED = "قالب إعادة التواصل غير مفعّل بعد. تواصل مع العميل هاتفياً.";
+
 // WhatsApp's customer service window: free text is accepted for this long
 // after the customer's last message. The agent enforces it by the database
 // clock (services/agent/takeover_ack.py); the dashboard only mirrors it to
@@ -65,6 +68,8 @@ export type StaffReplyStatus =
   | "not_found"
   | "failed"
   | "unavailable"
+  | "window_open"
+  | "not_configured"
   | "unreachable";
 
 const AGENT_STATUSES: readonly StaffReplyStatus[] = [
@@ -75,6 +80,8 @@ const AGENT_STATUSES: readonly StaffReplyStatus[] = [
   "not_found",
   "failed",
   "unavailable",
+  "window_open",
+  "not_configured",
 ];
 
 /** The status in the agent's {"status": ...} body, or "unreachable" when
@@ -97,6 +104,8 @@ const SEND_RESULT_LABELS: Record<StaffReplyStatus, string> = {
   not_found: "لم يُعثر على هذا الرد.",
   failed: "تعذّر إرسال الرد للعميل، وقد يكون وصله. تحقق من المحادثة أو تواصل معه هاتفياً.",
   unavailable: "تعذّر إرسال الرد الآن. اضغط «إعادة المحاولة» تحت الرد.",
+  window_open: "نافذة الـ24 ساعة مفتوحة، فلا حاجة للقالب. اكتب ردك مباشرة.",
+  not_configured: TEMPLATE_NOT_ENABLED,
   // A timeout may still have been answered by the agent, so the reply's own
   // state below decides what staff do next.
   unreachable: "تعذّر تأكيد إرسال الرد. راجع حالته في الردود أدناه.",
@@ -138,6 +147,7 @@ const FAILURE_HINTS: Record<NonNullable<StaffReplyRow["failure_reason"]>, string
     "مرّ أكثر من 24 ساعة على آخر رسالة من العميل، فلا يقبل واتساب رداً حراً. تواصل معه هاتفياً.",
   send_failed:
     "تعذّر الإرسال، وقد يكون الرد وصل العميل رغم ذلك. تحقق من المحادثة أو تواصل معه هاتفياً، أو أعد كتابته.",
+  window_open: "لم يُرسل القالب لأن نافذة الـ24 ساعة مفتوحة. اكتب ردك مباشرة.",
 };
 
 const STALE_SENDING_HINT =
@@ -168,4 +178,20 @@ export function replyProblemHint(
 /** How a staff message is labelled in the conversation. */
 export function staffMessageLabel(authorName: string | null): string {
   return authorName === null ? "الموظف" : `الموظف: ${authorName}`;
+}
+
+/** Why the template button cannot be pressed, or null when it can: the
+ * window is still open (free text is the way), the agent has no template
+ * names yet (call the customer instead), or a send is already under way. */
+export function templateButtonProblem(
+  windowOpen: boolean,
+  templateEnabled: boolean,
+): string | null {
+  if (windowOpen) {
+    return "نافذة الـ24 ساعة مفتوحة. اكتب ردك مباشرة.";
+  }
+  if (!templateEnabled) {
+    return TEMPLATE_NOT_ENABLED;
+  }
+  return null;
 }
