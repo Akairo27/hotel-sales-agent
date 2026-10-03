@@ -42,6 +42,14 @@
   --font-sans: var(--font-sans);
 }
 
+/* The page never scrolls sideways: in this right-to-left layout the sidebar
+   sits on the right edge, and a document wider than the window (or scrolled
+   sideways by a focused element) shifts it out of view. `clip` on the root is
+   applied to the viewport as hidden. */
+html {
+  overflow-x: clip;
+}
+
 body {
   font-family: var(--font-sans), Arial, Helvetica, sans-serif;
 }

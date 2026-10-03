@@ -1,6 +1,6 @@
 "use client";
 
-import { type ReactNode, useEffect, useRef, useState } from "react";
+import { type ReactNode, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { BUTTON_PRIMARY } from "@/lib/ui";
 
 // Within this distance of the bottom the reader counts as following the
@@ -35,24 +35,59 @@ export function ConversationScroll({
   children: ReactNode;
 }) {
   const area = useRef<HTMLDivElement>(null);
+  const content = useRef<HTMLDivElement>(null);
+  // Whether the reader follows the newest message; a ref as well as state so
+  // the resize observer below reads it without being recreated.
+  const following = useRef(true);
   const [atBottom, setAtBottom] = useState(true);
   const latestId = newestId(messageIds);
   const [seenId, setSeenId] = useState(latestId);
 
-  useEffect(() => {
+  const scrollToEnd = () => {
     const element = area.current;
-    if (element && atBottom) {
+    if (element) {
       element.scrollTop = element.scrollHeight;
-      setSeenId(latestId);
+    }
+  };
+
+  // Opens at the newest message, before the first paint.
+  useLayoutEffect(scrollToEnd, []);
+
+  // The conversation's height can still change after that (fonts loading,
+  // the reply box and the panel settling): while the reader follows, keep
+  // the newest message in view.
+  useEffect(() => {
+    const element = content.current;
+    if (!element) {
+      return;
+    }
+    const observer = new ResizeObserver(() => {
+      if (following.current) {
+        scrollToEnd();
+      }
+    });
+    observer.observe(element);
+    return () => observer.disconnect();
+  }, []);
+
+  useEffect(() => {
+    if (atBottom) {
+      scrollToEnd();
     }
   }, [latestId, atBottom]);
 
   const onScroll = () => {
     const element = area.current;
     if (element) {
-      setAtBottom(
-        element.scrollHeight - element.scrollTop - element.clientHeight < FOLLOW_THRESHOLD_PX,
-      );
+      const near =
+        element.scrollHeight - element.scrollTop - element.clientHeight < FOLLOW_THRESHOLD_PX;
+      following.current = near;
+      setAtBottom(near);
+      if (near) {
+        // At the bottom everything is seen; this also runs for the scroll the
+        // effect above makes when a new message arrives while following.
+        setSeenId(latestId);
+      }
     }
   };
 
@@ -67,9 +102,9 @@ export function ConversationScroll({
         onScroll={onScroll}
         tabIndex={0}
         aria-label="المحادثة"
-        className="h-full min-w-0 overflow-y-auto px-3 py-3 sm:px-4"
+        className="absolute inset-0 min-w-0 overflow-y-auto px-3 py-3 sm:px-4"
       >
-        {children}
+        <div ref={content}>{children}</div>
       </div>
       {!atBottom && (
         <div className="pointer-events-none absolute inset-x-0 bottom-3 flex justify-center">

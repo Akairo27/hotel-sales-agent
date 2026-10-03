@@ -36,7 +36,7 @@ export function AppShell({
 
   return (
     <div className={workspace ? "flex h-dvh overflow-hidden" : "flex min-h-full flex-1 overflow-x-clip"}>
-      <aside className="sticky top-0 hidden h-screen w-64 shrink-0 flex-col overflow-y-auto border-e border-border bg-shell lg:flex">
+      <aside className="sticky top-0 hidden h-screen w-64 shrink-0 flex-col overflow-y-auto overflow-x-hidden border-e border-border bg-shell lg:flex">
         <div className="flex items-center gap-3 px-5 py-6">
           <BrandMark />
           <span className="min-w-0">
