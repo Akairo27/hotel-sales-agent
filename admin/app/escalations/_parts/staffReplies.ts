@@ -17,8 +17,10 @@ const RECENT_REPLY_LIMIT = 10;
 
 const REPLY_COLUMNS =
   "id, takeover_id, conversation_id, sent_by, body, created_at, claimed_at, sent_at, " +
-  "failed_at, failure_reason";
+  "failed_at, failure_reason, kind, template_hotel_id";
 
+// kind and template_hotel_id are migration 0036's: reading them before it is
+// applied fails this whole read, so the migration goes first.
 /** The conversation's latest staff replies and the authors of every staff
  * reply the shown messages carry (migration 0035), read through the
  * signed-in user's own session; names come from migration 0034's view. */

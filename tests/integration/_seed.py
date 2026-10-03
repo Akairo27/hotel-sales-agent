@@ -522,3 +522,19 @@ def seed_staff_reply(
         "FROM conversation_takeovers WHERE id = %s RETURNING id",
         (body, takeover_id),
     )
+
+
+def seed_staff_template_reply(
+    conn: psycopg.Connection[Any], takeover_id: int, *, hotel_id: int | None = None
+) -> int:
+    """One re-engagement template staff_replies row (migration 0036) from
+    the takeover's holder, naming hotel_id (the variant without a hotel name
+    when None), written directly as the privileged test role."""
+    return returning_id(
+        conn,
+        "INSERT INTO staff_replies (takeover_id, conversation_id, sent_by, body, "
+        "kind, template_hotel_id) "
+        "SELECT id, conversation_id, taken_over_by, 'قالب إعادة التواصل', "
+        "'template', %s FROM conversation_takeovers WHERE id = %s RETURNING id",
+        (hotel_id, takeover_id),
+    )

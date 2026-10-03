@@ -222,6 +222,7 @@ from services.agent.output_guard.enforcement import (
     open_escalation,
 )
 from services.agent.output_guard.staff_replies import StaffReplyInspection
+from services.agent.reengagement_template import RenderedReengagement
 from services.agent.staff_follow_up import open_follow_up_for_dates_not_open
 from services.agent.takeover import is_taken_over
 from services.agent.whatsapp_send import (
@@ -1133,6 +1134,29 @@ async def send_fixed_text_or_log_failure(
     )
 
 
+def _sender_for_staff_reply_or_log_failure(
+    *, conversation_id: int, staff_reply_id: int
+) -> WhatsAppSender | None:
+    """The WhatsApp transport for a staff reply, or None -- logged at ERROR
+    as staff_reply_delivery_failed -- when it cannot be set up."""
+    try:
+        return get_whatsapp_sender(get_whatsapp_send_settings())
+    except Exception as setup_exc:
+        logger.error(
+            json.dumps(
+                {
+                    "event": "staff_reply_delivery_failed",
+                    "conversation_id": conversation_id,
+                    "staff_reply_id": staff_reply_id,
+                    "exception_type": type(setup_exc).__name__,
+                    "exception_message": str(setup_exc),
+                }
+            ),
+            exc_info=setup_exc,
+        )
+        return None
+
+
 async def send_staff_reply_or_log_failure(
     conn: psycopg.Connection[Any],
     *,
@@ -1148,21 +1172,10 @@ async def send_staff_reply_or_log_failure(
     8). Deliberately no takeover check: the caller claimed the reply while
     its takeover was active. Returns whether it was delivered; never
     raises."""
-    try:
-        sender = get_whatsapp_sender(get_whatsapp_send_settings())
-    except Exception as setup_exc:
-        logger.error(
-            json.dumps(
-                {
-                    "event": "staff_reply_delivery_failed",
-                    "conversation_id": conversation_id,
-                    "staff_reply_id": staff_reply_id,
-                    "exception_type": type(setup_exc).__name__,
-                    "exception_message": str(setup_exc),
-                }
-            ),
-            exc_info=setup_exc,
-        )
+    sender = _sender_for_staff_reply_or_log_failure(
+        conversation_id=conversation_id, staff_reply_id=staff_reply_id
+    )
+    if sender is None:
         return False
     whatsapp_message_id = await _send_or_log_failure(
         sender,
@@ -1173,6 +1186,86 @@ async def send_staff_reply_or_log_failure(
         staff_reply_id=staff_reply_id,
     )
     return whatsapp_message_id is not None
+
+
+async def send_staff_template_or_log_failure(
+    conn: psycopg.Connection[Any],
+    *,
+    conversation_id: int,
+    customer_phone: str,
+    staff_reply_id: int,
+    inspection: StaffReplyInspection,
+    template: RenderedReengagement,
+) -> bool:
+    """Sends the re-engagement template for a staff reply
+    (services/agent/reengagement_template.py) and records what the customer
+    was sent -- the template's rendered text, which is inspection.text -- as
+    an outbound message linked to the staff_replies row. As for a text
+    reply, only text that went through the output guard's staff-reply mode
+    is recorded as sent (CLAUDE.md rule 8): a template whose text is not the
+    inspected text is refused and logged. Returns whether it was delivered;
+    never raises."""
+    if inspection.text != template.text:
+        logger.error(
+            json.dumps(
+                {
+                    "event": "staff_template_text_not_inspected",
+                    "conversation_id": conversation_id,
+                    "staff_reply_id": staff_reply_id,
+                }
+            )
+        )
+        return False
+    sender = _sender_for_staff_reply_or_log_failure(
+        conversation_id=conversation_id, staff_reply_id=staff_reply_id
+    )
+    if sender is None:
+        return False
+    try:
+        whatsapp_message_id = await sender.send_template(
+            to_phone=customer_phone.removeprefix("+"),
+            template_name=template.template_name,
+            language_code=template.language_code,
+            body_parameters=template.body_parameters,
+        )
+    except Exception as exc:
+        logger.error(
+            json.dumps(
+                {
+                    "event": "whatsapp_template_send_failed",
+                    "conversation_id": conversation_id,
+                    "staff_reply_id": staff_reply_id,
+                    "template_name": template.template_name,
+                    "exception_type": type(exc).__name__,
+                    "exception_message": str(exc),
+                }
+            ),
+            exc_info=exc,
+        )
+        return False
+    try:
+        _insert_outbound_message(
+            conn,
+            conversation_id=conversation_id,
+            customer_phone=customer_phone,
+            whatsapp_message_id=whatsapp_message_id,
+            body=inspection.text,
+            staff_reply_id=staff_reply_id,
+        )
+    except Exception as exc:
+        logger.error(
+            json.dumps(
+                {
+                    "event": "outbound_message_not_recorded",
+                    "conversation_id": conversation_id,
+                    "whatsapp_message_id": whatsapp_message_id,
+                    "exception_type": type(exc).__name__,
+                    "exception_message": str(exc),
+                }
+            ),
+            exc_info=exc,
+        )
+    return True
 
 
 async def _escalate_and_notify(

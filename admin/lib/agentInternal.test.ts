@@ -3,6 +3,7 @@ import {
   AGENT_BASE_URL,
   AGENT_REQUEST_TIMEOUT_MS,
   STAFF_REPLY_REQUEST_TIMEOUT_MS,
+  requestReengagementTemplateEnabled,
   requestStaffReplySend,
   requestTakeoverNotice,
 } from "./agentInternal";
@@ -167,6 +168,65 @@ describe("requestStaffReplySend", () => {
     const first = JSON.parse(String(logged.mock.calls[0][0])) as Record<string, unknown>;
     expect(first).toMatchObject({ event: "agent_internal_token_refused", staff_reply_id: 5 });
     expect(first).not.toHaveProperty("takeover_id");
+    expect(JSON.stringify(logged.mock.calls)).not.toContain(TOKEN);
+  });
+});
+
+describe("requestReengagementTemplateEnabled", () => {
+  const fetchMock = vi.fn<typeof fetch>();
+
+  beforeEach(() => {
+    vi.stubGlobal("fetch", fetchMock);
+    vi.stubEnv("AGENT_INTERNAL_TOKEN", TOKEN);
+    vi.spyOn(console, "error").mockImplementation(() => {});
+  });
+
+  afterEach(() => {
+    fetchMock.mockReset();
+    vi.unstubAllGlobals();
+    vi.unstubAllEnvs();
+    vi.restoreAllMocks();
+  });
+
+  it("reads the agent's loopback status endpoint with a GET and the Bearer token", async () => {
+    fetchMock.mockResolvedValue(answer(200, { enabled: true }));
+
+    expect(await requestReengagementTemplateEnabled()).toBe(true);
+
+    const [url, init] = fetchMock.mock.calls[0];
+    expect(url).toBe(`${AGENT_BASE_URL}/internal/reengagement-template`);
+    expect(init?.method).toBe("GET");
+    expect(init?.headers).toEqual({ Authorization: `Bearer ${TOKEN}` });
+    expect(init?.signal).toBeInstanceOf(AbortSignal);
+  });
+
+  it("is true only for an explicit enabled: true", async () => {
+    fetchMock.mockResolvedValueOnce(answer(200, { enabled: false }));
+    fetchMock.mockResolvedValueOnce(answer(200, { enabled: "yes" }));
+    fetchMock.mockResolvedValueOnce(answer(200, {}));
+
+    expect(await requestReengagementTemplateEnabled()).toBe(false);
+    expect(await requestReengagementTemplateEnabled()).toBe(false);
+    expect(await requestReengagementTemplateEnabled()).toBe(false);
+  });
+
+  it("is false, calling nothing, with no token", async () => {
+    vi.stubEnv("AGENT_INTERNAL_TOKEN", "");
+
+    expect(await requestReengagementTemplateEnabled()).toBe(false);
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("is false for a refused token, a network error, a timeout or a non-JSON answer, and logs no token", async () => {
+    const logged = vi.spyOn(console, "error").mockImplementation(() => {});
+    fetchMock.mockResolvedValueOnce(answer(401, {}));
+    fetchMock.mockRejectedValueOnce(new TypeError(`failed with ${TOKEN}`));
+    fetchMock.mockRejectedValueOnce(new DOMException("timed out", "TimeoutError"));
+    fetchMock.mockResolvedValueOnce(new Response("<html>", { status: 200 }));
+
+    for (let attempt = 0; attempt < 4; attempt += 1) {
+      expect(await requestReengagementTemplateEnabled()).toBe(false);
+    }
     expect(JSON.stringify(logged.mock.calls)).not.toContain(TOKEN);
   });
 });

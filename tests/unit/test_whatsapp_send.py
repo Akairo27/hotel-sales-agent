@@ -21,6 +21,7 @@ from services.agent.whatsapp_send import (
     REPLY_BUTTON_TITLE_MAX_CHARS,
     REPLY_BUTTONS_BODY_MAX_CHARS,
     InvalidReplyButtonsError,
+    InvalidTemplateMessageError,
     ReplyButton,
     WhatsAppCloudApiSender,
     WhatsAppMessageRejectedError,
@@ -521,3 +522,122 @@ def test_check_reply_buttons_refuses_what_meta_refuses(
 ) -> None:
     with pytest.raises(InvalidReplyButtonsError):
         check_reply_buttons(body, buttons)
+
+
+def test_send_template_posts_meta_s_template_shape_with_a_body_parameter(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Meta's template message reference: type "template", the template's
+    name and language code, one body component with a text parameter per
+    variable."""
+    posted: list[dict[str, Any]] = []
+    _record_post(monkeypatch, posted)
+    sender = WhatsAppCloudApiSender(_SETTINGS)
+
+    message_id = asyncio.run(
+        sender.send_template(
+            to_phone="966500000001",
+            template_name="reengagement_with_hotel",
+            language_code="ar",
+            body_parameters=("Hotel Two",),
+        )
+    )
+
+    assert message_id == "wamid.BUTTONS1"
+    assert posted == [
+        {
+            "messaging_product": "whatsapp",
+            "recipient_type": "individual",
+            "to": "966500000001",
+            "type": "template",
+            "template": {
+                "name": "reengagement_with_hotel",
+                "language": {"code": "ar"},
+                "components": [
+                    {
+                        "type": "body",
+                        "parameters": [{"type": "text", "text": "Hotel Two"}],
+                    }
+                ],
+            },
+        }
+    ]
+
+
+def test_send_template_without_parameters_sends_no_components(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    posted: list[dict[str, Any]] = []
+    _record_post(monkeypatch, posted)
+
+    asyncio.run(
+        WhatsAppCloudApiSender(_SETTINGS).send_template(
+            to_phone="966500000001",
+            template_name="reengagement_no_hotel",
+            language_code="en",
+            body_parameters=(),
+        )
+    )
+
+    assert posted[0]["template"] == {
+        "name": "reengagement_no_hotel",
+        "language": {"code": "en"},
+    }
+
+
+@pytest.mark.parametrize(
+    ("name", "language", "parameters"),
+    [
+        pytest.param("Has Capitals", "ar", (), id="name-not-a-meta-name"),
+        pytest.param("", "ar", (), id="empty-name"),
+        pytest.param("ok_name", "  ", (), id="blank-language"),
+        pytest.param("ok_name", "ar", ("",), id="empty-parameter"),
+        pytest.param("ok_name", "ar", ("x" * 1025,), id="parameter-too-long"),
+    ],
+)
+def test_send_template_sends_nothing_when_it_cannot_be_sent_as_asked(
+    monkeypatch: pytest.MonkeyPatch,
+    name: str,
+    language: str,
+    parameters: tuple[str, ...],
+) -> None:
+    posted: list[dict[str, Any]] = []
+    _record_post(monkeypatch, posted)
+
+    with pytest.raises(InvalidTemplateMessageError):
+        asyncio.run(
+            WhatsAppCloudApiSender(_SETTINGS).send_template(
+                to_phone="966500000001",
+                template_name=name,
+                language_code=language,
+                body_parameters=parameters,
+            )
+        )
+
+    assert posted == []
+    assert issubclass(InvalidTemplateMessageError, WhatsAppMessageRejectedError)
+
+
+def test_send_template_wraps_an_error_status_as_whatsapp_send_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _patch_post(
+        monkeypatch,
+        httpx.Response(
+            400, request=_REQUEST, json={"error": {"code": 132001, "message": "gone"}}
+        ),
+    )
+
+    with pytest.raises(WhatsAppSendError) as exc_info:
+        asyncio.run(
+            WhatsAppCloudApiSender(_SETTINGS).send_template(
+                to_phone="966500000001",
+                template_name="ok_name",
+                language_code="ar",
+                body_parameters=(),
+            )
+        )
+
+    # 132001 (template does not exist) is not one of the invalid-message codes:
+    # the message may or may not have gone out, so it is a plain send error.
+    assert not isinstance(exc_info.value, WhatsAppMessageRejectedError)

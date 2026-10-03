@@ -32,16 +32,18 @@ interface CallLogFields {
   id: number;
 }
 
-function logFailure(event: string, call: CallLogFields, detail?: string): void {
-  console.error(JSON.stringify({ event, [call.idKey]: call.id, detail }));
+// A call with no id (the template status read) logs with none.
+function logFailure(event: string, call: CallLogFields | null, detail?: string): void {
+  console.error(JSON.stringify({ event, ...(call ? { [call.idKey]: call.id } : {}), detail }));
 }
 
-/** POSTs to one of the agent's internal endpoints and returns its JSON body,
+/** Calls one of the agent's internal endpoints and returns its JSON body,
  * or null when there is no usable answer (no token configured, the agent
  * down or slow, the token refused). Never throws. */
-async function postToAgent(
+async function callAgent(
+  method: "GET" | "POST",
   path: string,
-  call: CallLogFields,
+  call: CallLogFields | null,
   timeoutMs: number,
 ): Promise<unknown> {
   const token = process.env.AGENT_INTERNAL_TOKEN;
@@ -51,7 +53,7 @@ async function postToAgent(
   }
   try {
     const response = await fetch(`${AGENT_BASE_URL}${path}`, {
-      method: "POST",
+      method,
       headers: { Authorization: `Bearer ${token}` },
       cache: "no-store",
       signal: AbortSignal.timeout(timeoutMs),
@@ -76,7 +78,8 @@ async function postToAgent(
  * answer (no token configured, the agent down or slow, the token refused).
  * Never throws: the takeover itself already stands either way. */
 export async function requestTakeoverNotice(takeoverId: number): Promise<TakeoverNoticeStatus> {
-  const body = await postToAgent(
+  const body = await callAgent(
+    "POST",
     `/internal/takeovers/${takeoverId}/acknowledge`,
     { idKey: "takeover_id", id: takeoverId },
     AGENT_REQUEST_TIMEOUT_MS,
@@ -89,10 +92,29 @@ export async function requestTakeoverNotice(takeoverId: number): Promise<Takeove
  * usable answer. Never throws: the reply is already stored either way, and
  * the agent claims it at most once, so asking again is safe. */
 export async function requestStaffReplySend(staffReplyId: number): Promise<StaffReplyStatus> {
-  const body = await postToAgent(
+  const body = await callAgent(
+    "POST",
     `/internal/staff-replies/${staffReplyId}/send`,
     { idKey: "staff_reply_id", id: staffReplyId },
     STAFF_REPLY_REQUEST_TIMEOUT_MS,
   );
   return replyStatusFromBody(body);
+}
+
+/** Whether the agent can send the re-engagement template: both template
+ * names are set in agent.env (PR C). False when the agent says so and when
+ * there is no usable answer, so the dashboard's template button stays off
+ * rather than offering something that cannot be sent. Never throws. */
+export async function requestReengagementTemplateEnabled(): Promise<boolean> {
+  const body = await callAgent(
+    "GET",
+    "/internal/reengagement-template",
+    null,
+    AGENT_REQUEST_TIMEOUT_MS,
+  );
+  return (
+    body !== null &&
+    typeof body === "object" &&
+    (body as Record<string, unknown>).enabled === true
+  );
 }

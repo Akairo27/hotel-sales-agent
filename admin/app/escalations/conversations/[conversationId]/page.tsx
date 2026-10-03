@@ -2,6 +2,7 @@ import Link from "next/link";
 import { notFound, redirect } from "next/navigation";
 import { AppShell } from "@/app/_components/AppShell";
 import { messageSender, senderLabel, BUBBLE_CLASSES, SENDER_LABEL_CLASSES } from "@/lib/chatMessages";
+import { requestReengagementTemplateEnabled } from "@/lib/agentInternal";
 import { isOpen, orderEscalations } from "@/lib/escalationCustomers";
 import { escalationSummary } from "@/lib/escalationSummary";
 import { escalationLabel, formatRiyadhDateTime, notOpenStays, parseNotes } from "@/lib/escalations";
@@ -17,6 +18,7 @@ import type {
 import { HINT, SECTION_TITLE } from "@/lib/ui";
 import { createClient } from "@/utils/supabase/server";
 import { LiveRefresh } from "../../LiveRefresh";
+import { ESCALATION_COLUMNS, QUOTE_COLUMNS } from "../../_parts/columns";
 import { loadStayNames } from "../../_parts/names";
 import { buildPanelQuotes } from "../../_parts/panelQuotes";
 import { loadStaffReplyContext } from "../../_parts/staffReplies";
@@ -30,12 +32,6 @@ import { type PanelTakeover, TakeoverPanel } from "./TakeoverPanel";
 
 // The latest messages of the conversation shown, oldest first.
 const MESSAGE_LIMIT = 100;
-
-const ESCALATION_COLUMNS =
-  "id, conversation_id, customer_phone, reason, notes, quote_id, opened_at, " +
-  "responded_at, resolved_at, assigned_to";
-const QUOTE_COLUMNS =
-  "id, hotel_id, room_type_id, check_in, check_out, rooms, ask_price_total, created_at";
 
 /** For each message, the escalations that opened after the previous message
  * and no later than this one -- marked just before it. Escalations newer
@@ -191,6 +187,10 @@ export default async function CustomerEscalationsPage({
   const openCount = escalations.filter(isOpen).length;
   const now = new Date();
   const takeover = takeovers.byConversation.get(conversationId);
+  const holdsIt = takeover?.taken_over_by === appUser.id;
+  // Asked only of the one who can use it: the agent says whether both
+  // template names are set in agent.env.
+  const templateEnabled = holdsIt ? await requestReengagementTemplateEnabled() : false;
   const summary = escalationSummary(
     escalations,
     quotes,
@@ -203,7 +203,7 @@ export default async function CustomerEscalationsPage({
       <LiveRefresh channelName={`escalations-customer-${conversationId}`} conversationId={conversationId} />
       <ChatWorkspaceProvider
         serverNow={now.toISOString()}
-        canReply={takeover?.taken_over_by === appUser.id}
+        canReply={holdsIt}
         lastInboundAt={lastInboundResult.data?.created_at ?? null}
       >
         <div className="flex min-h-0 flex-1">
@@ -275,6 +275,7 @@ export default async function CustomerEscalationsPage({
                 authorName: staffReplies.authorNames.get(reply.id) ?? null,
               }))}
               loadFailed={staffReplies.failed}
+              templateEnabled={templateEnabled}
             />
           </section>
 

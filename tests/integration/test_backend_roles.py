@@ -142,6 +142,9 @@ _MANIFEST: dict[str, dict[str, dict[str, tuple[str, ...] | str]]] = {
                 "sent_at",
                 "failed_at",
                 "failure_reason",
+                # Migration 0036: what to send, and the hotel a template names.
+                "kind",
+                "template_hotel_id",
             ),
             "UPDATE": ("claimed_at", "sent_at", "failed_at", "failure_reason"),
         },

@@ -10,6 +10,7 @@ import {
   replyState,
   replyStateLabel,
   sendResultLabel,
+  templateButtonProblem,
   windowRemainingMs,
 } from "@/lib/staffReply";
 import type { StaffReplyRow } from "@/lib/types";
@@ -23,7 +24,7 @@ import {
   HINT,
   INPUT,
 } from "@/lib/ui";
-import { retryStaffReply, sendStaffReply } from "../../replyActions";
+import { retryStaffReply, sendReengagementTemplate, sendStaffReply } from "../../replyActions";
 import { useWorkspace } from "./ChatWorkspace";
 
 export interface BoxReply extends StaffReplyRow {
@@ -37,7 +38,8 @@ const OUTSIDE_WINDOW_NOTICE =
 
 const QUEUED_HINT = "لم يُرسل هذا الرد بعد. يمكنك إعادة المحاولة.";
 
-const TEMPLATE_UNAVAILABLE = "قالب إعادة التواصل غير متاح بعد.";
+const TEMPLATE_CONFIRMATION =
+  "إرسال قالب إعادة التواصل الجاهز للعميل؟ لن يصله إلا هذا القالب، وحين يرد تفتح نافذة الرد الحر.";
 
 function ReplyEntry({
   reply,
@@ -74,7 +76,7 @@ function ReplyEntry({
             إعادة المحاولة
           </button>
         )}
-        {state === "failed" && canRewrite && (
+        {state === "failed" && canRewrite && reply.kind === "text" && (
           <button type="button" onClick={onRewrite} disabled={pending} className={BUTTON_SECONDARY}>
             إعادة كتابته
           </button>
@@ -103,6 +105,7 @@ export function ReplyBox({
   currentUserId,
   replies,
   loadFailed,
+  templateEnabled,
 }: {
   conversationId: number;
   takeoverId: number | null;
@@ -110,6 +113,8 @@ export function ReplyBox({
   currentUserId: string;
   replies: BoxReply[];
   loadFailed: boolean;
+  /** Whether the agent can send the re-engagement template (agent.env). */
+  templateEnabled: boolean;
 }) {
   const { now, windowOpen, lastInboundAt, draft, setDraft, replyInput } = useWorkspace();
   const [pending, startTransition] = useTransition();
@@ -124,6 +129,7 @@ export function ReplyBox({
   const thisTakeover = replies.filter((reply) => reply.takeover_id === takeoverId);
   const unsent = thisTakeover.filter((reply) => replyState(reply) !== "sent");
   const remainingMs = windowRemainingMs(lastInboundAt, now);
+  const templateProblem = templateButtonProblem(windowOpen, templateEnabled);
 
   const run = (action: () => Promise<void>) => {
     setStatus(null);
@@ -160,6 +166,13 @@ export function ReplyBox({
       }
       show(result);
     });
+  };
+
+  const sendTemplate = () => {
+    if (pending || !window.confirm(TEMPLATE_CONFIRMATION)) {
+      return;
+    }
+    run(async () => show(await sendReengagementTemplate(conversationId)));
   };
 
   const sendOnShortcut = (event: KeyboardEvent<HTMLTextAreaElement>) => {
@@ -233,10 +246,16 @@ export function ReplyBox({
         </button>
         {!windowOpen && (
           <>
-            <button type="button" disabled title={TEMPLATE_UNAVAILABLE} className={BUTTON_SECONDARY}>
+            <button
+              type="button"
+              onClick={sendTemplate}
+              disabled={pending || templateProblem !== null}
+              title={templateProblem ?? undefined}
+              className={BUTTON_SECONDARY}
+            >
               إرسال قالب إعادة التواصل
             </button>
-            <span className={HINT}>{TEMPLATE_UNAVAILABLE}</span>
+            {templateProblem !== null && <span className={HINT}>{templateProblem}</span>}
           </>
         )}
         <span className={`${HINT} ms-auto text-xs`}>

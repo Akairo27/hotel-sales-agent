@@ -116,6 +116,17 @@ class _RecordingSender:
             raise WhatsAppSendError("simulated API error")
         return f"wamid.OUT-{len(self.calls)}"
 
+    async def send_template(
+        self,
+        *,
+        to_phone: str,
+        template_name: str,
+        language_code: str,
+        body_parameters: tuple[str, ...],
+    ) -> str:
+        del to_phone, template_name, language_code, body_parameters
+        raise AssertionError("send_template is not expected in this test")
+
     async def send_reply_buttons(
         self, *, to_phone: str, body: str, buttons: tuple[ReplyButton, ...]
     ) -> str:

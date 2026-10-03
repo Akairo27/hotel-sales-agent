@@ -16,8 +16,17 @@ a reply id: the text sent is the reply's own stored body.
 
 Outside WhatsApp's 24-hour customer service window the reply is not sent
 and is recorded as failed (outside_window), for the acknowledgement's
-reason; the dashboard offers the re-engagement template instead. A failed
-send is never retried: it may have reached the customer anyway.
+reason; the dashboard offers the re-engagement template instead.
+
+That template is a reply of kind 'template' (migration 0036), sent here by
+the same endpoint: claimed once, its rendered text inspected by the guard
+and audited, sent with whatsapp_send.py's send_template and recorded as an
+outbound message linked to the reply -- but only outside the window (inside
+it, free text is the right tool: failed as window_open) and only once both
+template names are set (services/agent/reengagement_template.py; otherwise
+not_configured, before anything is claimed).
+
+A failed send is never retried: it may have reached the customer anyway.
 """
 
 from __future__ import annotations
@@ -38,6 +47,13 @@ from services.agent.output_guard.staff_replies import (
     audit_record,
     inspect_staff_reply,
 )
+from services.agent.reengagement_template import (
+    ReengagementConfigurationError,
+    ReengagementSettings,
+    RenderedReengagement,
+    reengagement_settings_or_none,
+    render_for_conversation,
+)
 from services.agent.takeover_ack import (
     require_internal_token,
     within_customer_service_window,
@@ -54,6 +70,10 @@ STATUS_ALREADY_CLAIMED = "already_claimed"
 STATUS_TAKEOVER_ENDED = "takeover_ended"
 STATUS_NOT_FOUND = "not_found"
 STATUS_UNAVAILABLE = "unavailable"
+# A template while the customer's 24-hour window is open, and a template
+# while the feature is switched off (neither template name set).
+STATUS_WINDOW_OPEN = "window_open"
+STATUS_NOT_CONFIGURED = "not_configured"
 
 _HTTP_STATUS = {
     STATUS_SENT: 200,
@@ -63,11 +83,17 @@ _HTTP_STATUS = {
     STATUS_NOT_FOUND: 404,
     STATUS_FAILED: 502,
     STATUS_UNAVAILABLE: 503,
+    STATUS_WINDOW_OPEN: 200,
+    STATUS_NOT_CONFIGURED: 200,
 }
 
 # staff_replies.failure_reason (migration 0035).
 FAILURE_OUTSIDE_WINDOW = "outside_window"
 FAILURE_SEND_FAILED = "send_failed"
+FAILURE_WINDOW_OPEN = "window_open"
+
+# staff_replies.kind (migration 0036).
+KIND_TEMPLATE = "template"
 
 _RECORD_SENT = "UPDATE staff_replies SET sent_at = now() WHERE id = %s"
 _RECORD_FAILED = (
@@ -80,6 +106,8 @@ class ClaimedStaffReply:
     conversation_id: int
     customer_phone: str
     body: str
+    kind: str
+    template_hotel_id: int | None
 
 
 def claim_staff_reply(
@@ -97,12 +125,32 @@ def claim_staff_reply(
         "FROM conversation_takeovers AS t, conversations AS c "
         "WHERE r.id = %s AND t.id = r.takeover_id AND c.id = r.conversation_id "
         "AND t.ended_at IS NULL AND r.claimed_at IS NULL "
-        "RETURNING r.conversation_id, c.customer_phone, r.body",
+        "RETURNING r.conversation_id, c.customer_phone, r.body, r.kind, "
+        "r.template_hotel_id",
         (staff_reply_id,),
     ).fetchone()
     if row is None:
         return None
-    return ClaimedStaffReply(conversation_id=row[0], customer_phone=row[1], body=row[2])
+    return ClaimedStaffReply(
+        conversation_id=row[0],
+        customer_phone=row[1],
+        body=row[2],
+        kind=row[3],
+        template_hotel_id=row[4],
+    )
+
+
+def reply_kind(conn: psycopg.Connection[Any], *, staff_reply_id: int) -> str | None:
+    """The kind of a reply ('text' or 'template'), or None when there is no
+    such reply.
+
+    Raises:
+        psycopg.Error: the read failed.
+    """
+    row = conn.execute(
+        "SELECT kind FROM staff_replies WHERE id = %s", (staff_reply_id,)
+    ).fetchone()
+    return None if row is None else str(row[0])
 
 
 def unclaimed_status(conn: psycopg.Connection[Any], *, staff_reply_id: int) -> str:
@@ -173,34 +221,112 @@ def record_outcome_or_log_failure(
         )
 
 
+@dataclass(frozen=True)
+class PreparedStaffReply:
+    """A claimed, inspected and audited reply, ready to send: its
+    inspection, and for a template the message to send."""
+
+    claim: ClaimedStaffReply
+    inspection: StaffReplyInspection
+    template: RenderedReengagement | None
+
+
+def _prepare_reply(
+    conn: psycopg.Connection[Any],
+    claim: ClaimedStaffReply,
+    settings: ReengagementSettings | None,
+) -> tuple[StaffReplyInspection, RenderedReengagement | None]:
+    """What to inspect and send for a claimed reply: its own body, or for a
+    template the rendered template (settings is set then).
+
+    Raises:
+        psycopg.Error: a read failed.
+    """
+    if claim.kind == KIND_TEMPLATE:
+        if settings is None:
+            # Unreachable while settings come from the process environment
+            # (_claim_and_audit returned before claiming); never send the
+            # placeholder body as free text if it ever is reached.
+            raise ReengagementConfigurationError(
+                "template reply without template names"
+            )
+        template = render_for_conversation(
+            conn,
+            settings,
+            conversation_id=claim.conversation_id,
+            template_hotel_id=claim.template_hotel_id,
+        )
+        return (
+            inspect_staff_reply(template.text, conversation_id=claim.conversation_id),
+            template,
+        )
+    return inspect_staff_reply(claim.body, conversation_id=claim.conversation_id), None
+
+
 def _claim_and_audit(
     conn: psycopg.Connection[Any], *, staff_reply_id: int
-) -> tuple[ClaimedStaffReply, StaffReplyInspection] | str:
+) -> PreparedStaffReply | str:
     """In one transaction: claims the reply, inspects it, audits its
-    amounts, and checks the 24-hour window. Returns what to send, or the
-    final status when there is nothing to send (an outside-window reply is
-    recorded as failed in the same transaction).
+    amounts, and checks the 24-hour window (a text reply needs it open, a
+    template needs it closed). Returns what to send, or the final status
+    when there is nothing to send (a reply that failed the window check is
+    recorded as failed in the same transaction; a template while the
+    feature is off claims nothing).
 
     Raises:
         psycopg.Error: any step failed; the transaction is rolled back, so
             the reply stays unclaimed.
     """
     with conn.transaction():
+        settings = reengagement_settings_or_none()
+        if (
+            settings is None
+            and reply_kind(conn, staff_reply_id=staff_reply_id) == KIND_TEMPLATE
+        ):
+            return STATUS_NOT_CONFIGURED
         claim = claim_staff_reply(conn, staff_reply_id=staff_reply_id)
         if claim is None:
             return unclaimed_status(conn, staff_reply_id=staff_reply_id)
-        inspection = inspect_staff_reply(
-            claim.body, conversation_id=claim.conversation_id
-        )
+        inspection, template = _prepare_reply(conn, claim, settings)
         record_stated_amounts(
             conn, staff_reply_id=staff_reply_id, inspection=inspection
         )
-        if not within_customer_service_window(
+        window_open = within_customer_service_window(
             conn, conversation_id=claim.conversation_id
-        ):
+        )
+        if claim.kind == KIND_TEMPLATE and window_open:
+            conn.execute(_RECORD_FAILED, (FAILURE_WINDOW_OPEN, staff_reply_id))
+            return STATUS_WINDOW_OPEN
+        if claim.kind != KIND_TEMPLATE and not window_open:
             conn.execute(_RECORD_FAILED, (FAILURE_OUTSIDE_WINDOW, staff_reply_id))
             return STATUS_OUTSIDE_WINDOW
-    return claim, inspection
+    return PreparedStaffReply(claim=claim, inspection=inspection, template=template)
+
+
+async def _deliver(
+    conn: psycopg.Connection[Any],
+    *,
+    staff_reply_id: int,
+    prepared: PreparedStaffReply,
+) -> bool:
+    """Sends a prepared reply -- its text, or its template -- and records it
+    as an outbound message; whether it was delivered. Never raises."""
+    if prepared.template is not None:
+        return await webhook.send_staff_template_or_log_failure(
+            conn,
+            conversation_id=prepared.claim.conversation_id,
+            customer_phone=prepared.claim.customer_phone,
+            staff_reply_id=staff_reply_id,
+            inspection=prepared.inspection,
+            template=prepared.template,
+        )
+    return await webhook.send_staff_reply_or_log_failure(
+        conn,
+        conversation_id=prepared.claim.conversation_id,
+        customer_phone=prepared.claim.customer_phone,
+        staff_reply_id=staff_reply_id,
+        inspection=prepared.inspection,
+    )
 
 
 async def send_staff_reply(
@@ -214,14 +340,7 @@ async def send_staff_reply(
     prepared = _claim_and_audit(conn, staff_reply_id=staff_reply_id)
     if isinstance(prepared, str):
         return prepared
-    claim, inspection = prepared
-    delivered = await webhook.send_staff_reply_or_log_failure(
-        conn,
-        conversation_id=claim.conversation_id,
-        customer_phone=claim.customer_phone,
-        staff_reply_id=staff_reply_id,
-        inspection=inspection,
-    )
+    delivered = await _deliver(conn, staff_reply_id=staff_reply_id, prepared=prepared)
     record_outcome_or_log_failure(
         conn,
         staff_reply_id=staff_reply_id,
@@ -235,7 +354,9 @@ async def send_staff_reply_endpoint(
     staff_reply_id: int, request: Request
 ) -> JSONResponse:
     """Sends one staff reply for the dashboard. The response is
-    {"status": ...}: sent, outside_window, already_claimed or
+    {"status": ...}: sent, outside_window, window_open (a template while the
+    24-hour window is open), not_configured (a template while the feature is
+    off; nothing claimed), already_claimed or
     takeover_ended (200), not_found (404), failed (502: the send failed),
     unavailable (503: the database could not be reached; the reply was not
     claimed, so the dashboard may offer to try again).
@@ -271,3 +392,17 @@ async def send_staff_reply_endpoint(
         )
     )
     return JSONResponse({"status": status}, status_code=_HTTP_STATUS[status])
+
+
+@router.get("/internal/reengagement-template")
+async def reengagement_template_status(request: Request) -> JSONResponse:
+    """Whether the re-engagement template can be sent: {"enabled": bool}, true
+    only when both template names are set (reengagement_template.py). The
+    dashboard reads it to enable its template button; nothing is sent.
+
+    Raises:
+        HTTPException(401): the Bearer token is missing or wrong
+            (takeover_ack.require_internal_token).
+    """
+    require_internal_token(request)
+    return JSONResponse({"enabled": reengagement_settings_or_none() is not None})

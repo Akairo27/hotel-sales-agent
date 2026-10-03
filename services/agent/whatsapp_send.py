@@ -58,6 +58,16 @@ REPLY_BUTTON_ID_MAX_CHARS = 256
 # sent. Rate limits, an expired token, temporary or unknown errors and
 # delivery errors have codes of their own and are not in this set.
 INVALID_MESSAGE_ERROR_CODES = frozenset({100, 131008, 131009, 131051})
+# Template messages (Meta's "Template fundamentals" and "Message API"
+# references, checked 2026-10-03): a template is addressed by its name and a
+# language code, both fixed when it was created; its variable parts are body
+# parameters. Template names are lowercase letters, digits and underscores
+# (at most 512 characters). The limit on one body parameter's text is not
+# stated on the pages checked, so this module stays inside the template
+# body's own 1024-character limit and leaves anything finer to Meta's
+# refusal, handled like any other failed send.
+TEMPLATE_NAME_PATTERN = re.compile(r"[a-z0-9_]{1,512}")
+TEMPLATE_PARAMETER_MAX_CHARS = 1024
 _CLIENT_ERROR_MIN_STATUS = 400
 _SERVER_ERROR_MIN_STATUS = 500
 
@@ -97,6 +107,13 @@ class InvalidReplyButtonsError(WhatsAppMessageRejectedError):
     not sent."""
 
 
+class InvalidTemplateMessageError(WhatsAppMessageRejectedError):
+    """Raised before any request when a template message cannot be sent
+    as asked: a name that is not a Meta template name, a blank language
+    code, or a body parameter that is empty or too long. Certainly not
+    sent."""
+
+
 @dataclass(frozen=True)
 class ReplyButton:
     """One reply button: the id WhatsApp echoes back when it is tapped,
@@ -104,6 +121,22 @@ class ReplyButton:
 
     button_id: str
     title: str
+
+
+def check_template_message(
+    template_name: str, language_code: str, body_parameters: tuple[str, ...]
+) -> None:
+    """Raises InvalidTemplateMessageError unless the template name,
+    language code and body parameters can be sent."""
+    if TEMPLATE_NAME_PATTERN.fullmatch(template_name) is None:
+        raise InvalidTemplateMessageError("not a template name")
+    if not language_code.strip():
+        raise InvalidTemplateMessageError("blank language code")
+    for parameter in body_parameters:
+        if not parameter.strip() or len(parameter) > TEMPLATE_PARAMETER_MAX_CHARS:
+            raise InvalidTemplateMessageError(
+                f"body parameter of {len(parameter)} characters"
+            )
 
 
 def check_reply_buttons(body: str, buttons: tuple[ReplyButton, ...]) -> None:
@@ -231,6 +264,16 @@ class WhatsAppSender(Protocol):
     ) -> str:  # returns the WhatsApp message id
         ...
 
+    async def send_template(
+        self,
+        *,
+        to_phone: str,
+        template_name: str,
+        language_code: str,
+        body_parameters: tuple[str, ...],
+    ) -> str:  # returns the WhatsApp message id
+        ...
+
 
 class WhatsAppCloudApiSender:
     """The real transport, over the WhatsApp Cloud API's messages
@@ -305,6 +348,53 @@ class WhatsAppCloudApiSender:
                         ]
                     },
                 },
+            }
+        )
+
+    async def send_template(
+        self,
+        *,
+        to_phone: str,
+        template_name: str,
+        language_code: str,
+        body_parameters: tuple[str, ...],
+    ) -> str:
+        """Sends one approved template message, in the shape of Meta's
+        template message reference: its name, its language code and, when
+        it has variables, one body component with a text parameter each.
+        The one kind of message WhatsApp accepts outside the 24-hour
+        customer service window. Returns the WhatsApp-assigned message id,
+        as send_text does.
+
+        Raises:
+            InvalidTemplateMessageError: the name, language code or a
+                parameter cannot be sent; nothing was sent.
+            WhatsAppMessageRejectedError: Meta refused the message as
+                invalid; nothing was sent.
+            WhatsAppSendError: any other failure, as for send_text.
+        """
+        check_template_message(template_name, language_code, body_parameters)
+        template: dict[str, Any] = {
+            "name": template_name,
+            "language": {"code": language_code},
+        }
+        if body_parameters:
+            template["components"] = [
+                {
+                    "type": "body",
+                    "parameters": [
+                        {"type": "text", "text": parameter}
+                        for parameter in body_parameters
+                    ],
+                }
+            ]
+        return await self._post(
+            {
+                "messaging_product": "whatsapp",
+                "recipient_type": "individual",
+                "to": to_phone,
+                "type": "template",
+                "template": template,
             }
         )
 
