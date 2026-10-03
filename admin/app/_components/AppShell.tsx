@@ -14,6 +14,10 @@ import { logout } from "./sessionActions";
 // needs the caller's AppUser, and every page already loads it to decide
 // what it may show, so passing it in avoids a second round trip per render.
 //
+// The sidebar column is not itself a scroll container: only its link list
+// scrolls, if the window is too short for it, so a scrollbar never sits in
+// the column's own box and takes width from its brand and footer.
+//
 // overflow-x-clip (not hidden, which would stop the sticky header sticking)
 // keeps one over-wide element from widening the page and pushing the sidebar
 // out of view; the element is clipped instead, never the sidebar.
@@ -36,8 +40,8 @@ export function AppShell({
 
   return (
     <div className={workspace ? "flex h-dvh overflow-hidden" : "flex min-h-full flex-1 overflow-x-clip"}>
-      <aside className="sticky top-0 hidden h-screen w-64 shrink-0 flex-col overflow-y-auto overflow-x-hidden border-e border-border bg-shell lg:flex">
-        <div className="flex items-center gap-3 px-5 py-6">
+      <aside className="sticky top-0 hidden h-screen w-64 shrink-0 flex-col border-e border-border bg-shell lg:flex">
+        <div className="flex shrink-0 items-center gap-3 px-5 py-6">
           <BrandMark />
           <span className="min-w-0">
             <span className="block truncate text-sm font-semibold text-foreground">
@@ -49,11 +53,11 @@ export function AppShell({
           </span>
         </div>
 
-        <div className="flex-1 px-3 pb-4">
+        <div className="min-h-0 flex-1 overflow-y-auto px-3 pb-4">
           <SidebarNav items={navItems} orientation="vertical" />
         </div>
 
-        <p className="border-t border-border px-5 py-4 text-xs text-muted-foreground">
+        <p className="shrink-0 border-t border-border px-5 py-4 text-xs text-muted-foreground">
           عرض التكلفة: {appUser.can_view_cost ? "مفعّل" : "غير مفعّل"}
         </p>
       </aside>
