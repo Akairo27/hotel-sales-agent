@@ -218,9 +218,13 @@ jobs:
         with:
           node-version: ${{ env.NODE_VERSION }}
 
+      # npm audit --audit-level=high, plus one time-limited exception for an
+      # advisory that has no fixed release (braces, GHSA-vfj7-8cjw-p6xm,
+      # until 2026-10-17); see admin/scripts/audit-gate.mjs. Every other high
+      # or critical advisory still fails the job.
       - name: npm audit (admin)
         working-directory: admin
-        run: npm audit --audit-level=high
+        run: node scripts/audit-gate.mjs
 
   migrations:
     name: migrations lint
