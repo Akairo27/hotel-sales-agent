@@ -7,6 +7,7 @@ import { escalationSummary } from "@/lib/escalationSummary";
 import { escalationLabel, formatRiyadhDateTime, notOpenStays, parseNotes } from "@/lib/escalations";
 import { getCurrentAppUser } from "@/lib/session";
 import { noticeState } from "@/lib/takeoverNotice";
+import { splitBold } from "@/lib/whatsappText";
 import type {
   ConversationRow,
   EscalationRow,
@@ -89,7 +90,11 @@ function Bubble({ message, authorNames }: { message: MessageRow; authorNames: Ma
         {senderLabel(message, authorNames)} ·{" "}
         <span dir="ltr">{formatRiyadhDateTime(message.created_at)}</span>
       </p>
-      <p className="mt-1 whitespace-pre-wrap break-words">{message.body}</p>
+      <p className="mt-1 whitespace-pre-wrap break-words">
+        {splitBold(message.body).map((part, index) =>
+          part.bold ? <strong key={index}>{part.text}</strong> : part.text,
+        )}
+      </p>
     </div>
   );
 }
