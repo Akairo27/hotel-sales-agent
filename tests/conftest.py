@@ -92,6 +92,9 @@ GRANT EXECUTE ON FUNCTION auth.uid() TO anon, authenticated, service_role;
 
 _TABLES_TO_TRUNCATE = (
     "audit_log",
+    "rate_import_nights",
+    "rate_import_rows",
+    "rate_import_batches",
     "app_users",
     "bookings",
     "staff_replies",
