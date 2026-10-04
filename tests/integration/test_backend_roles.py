@@ -66,6 +66,9 @@ _PUBLIC_RELATIONS = frozenset(
         "price_rules",
         "price_rules_for_dashboard",
         "quotes",
+        "rate_import_batches",
+        "rate_import_nights",
+        "rate_import_rows",
         "room_night_availability_for_dashboard",
         "room_night_inventory",
         "room_types",
@@ -180,6 +183,22 @@ _MANIFEST: dict[str, dict[str, dict[str, tuple[str, ...] | str]]] = {
         "seasons": {"SELECT": _ALL},
         "price_rules": {"SELECT": _ALL},
         "price_overrides": {"SELECT": _ALL},
+        # Migration 0038: what pricing reads to find a night's base selling
+        # price (from PR 2 of the price import) -- which batches are approved
+        # and in what order, and their nights. Never who created, validated
+        # or approved a batch, and nothing on rate_import_rows.
+        "rate_import_batches": {
+            "SELECT": ("id", "hotel_id", "status", "approval_seq"),
+        },
+        "rate_import_nights": {
+            "SELECT": (
+                "batch_id",
+                "hotel_id",
+                "room_type_id",
+                "stay_date",
+                "sell_price_halalas",
+            ),
+        },
         # Migration 0030: search_hotels (services/agent/llm/dispatch.py).
         # Column-scoped, not _ALL like allotments above: hotels is expected
         # to grow columns this role must never see just by being added (a
